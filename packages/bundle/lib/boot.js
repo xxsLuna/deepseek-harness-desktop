@@ -62,6 +62,22 @@ const shutdown = async (code) => {
 process.on('SIGTERM', () => void shutdown(0))
 process.on('SIGINT', () => void shutdown(130))
 
+// Parent watchdog: the launcher passes its pid; if it dies without managing
+// to SIGTERM this process (hard crash, SIGKILL), shut down instead of
+// lingering as an orphan holding the socket.
+const parentPid = Number(process.env.DSH_DESKTOP_PARENT_PID)
+if (Number.isInteger(parentPid) && parentPid > 0) {
+  const watchdog = setInterval(() => {
+    try {
+      process.kill(parentPid, 0)
+    } catch {
+      clearInterval(watchdog)
+      void shutdown(0)
+    }
+  }, 5_000)
+  watchdog.unref()
+}
+
 const ctx = await boot(NAME, rootConfig, patches, (hostCtx) => {
   current = hostCtx
   hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)

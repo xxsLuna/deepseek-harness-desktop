@@ -15,6 +15,9 @@ files:
   - package.json
 asar: true
 npmRebuild: false
+extraMetadata:
+  desktop:
+    macUpdatesSigned: false
 afterPack: scripts/after-pack.mjs
 
 # Unsigned v1: both switches are single-line reversals once certificates exist.

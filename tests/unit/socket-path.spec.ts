@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createSidecarAddress } from '../src/socket-path.js'
+import { createSidecarAddress } from '../../src/socket-path.js'
 
 describe('createSidecarAddress', () => {
   it('uses a named pipe on Windows', () => {

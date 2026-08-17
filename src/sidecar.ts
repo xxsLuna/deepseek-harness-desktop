@@ -61,6 +61,7 @@ export class Sidecar {
         ...process.env,
         DSH_DESKTOP_SOCKET: address.socketPath,
         DSH_DESKTOP_TOKEN: address.token,
+        DSH_DESKTOP_PARENT_PID: String(process.pid),
         ELECTRON_RUN_AS_NODE: undefined,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

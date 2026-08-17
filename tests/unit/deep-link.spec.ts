@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deepLinkFromArgv, parseDeepLink } from '../src/deep-link.js'
+import { deepLinkFromArgv, parseDeepLink } from '../../src/deep-link.js'
 
 describe('parseDeepLink', () => {
   it('recognizes the app scheme', () => {

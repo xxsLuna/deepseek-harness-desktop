@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampWindowState, DEFAULT_STATE, parseWindowState } from '../src/window-state.js'
+import { clampWindowState, DEFAULT_STATE, parseWindowState } from '../../src/window-state.js'
 
 describe('parseWindowState', () => {
   it('falls back to defaults for absent or malformed content', () => {

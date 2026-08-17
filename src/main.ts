@@ -21,6 +21,7 @@ import { installTray } from './tray.js'
 import { startNotifications } from './notifications.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
 import { DEEP_LINK_SCHEME, deepLinkFromArgv, parseDeepLink } from './deep-link.js'
+import { startUpdater } from './updater.js'
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'dsh',
@@ -169,16 +170,20 @@ async function run(): Promise<void> {
     app.on('before-quit', () => stopNotifications())
   })
 
-  if (process.env.DSH_DESKTOP_SMOKE === '1') await runSmoke(win)
+  const stopUpdater = startUpdater()
+  app.on('before-quit', () => stopUpdater())
+
+  if (process.env.DSH_DESKTOP_SMOKE === '1') await runSmoke(win, () => sidecar.stop())
 }
 
 /**
  * Headless self-check for CI and local verification: waits for the client
  * plugin tree to settle, then asserts the UI actually rendered. Prints
- * RESULT lines and exits.
+ * RESULT lines, stops the sidecar (app.exit skips before-quit), and exits.
  * @param win - the loaded main window.
+ * @param stopSidecar - graceful sidecar shutdown to run before exiting.
  */
-async function runSmoke(win: Electron.BrowserWindow): Promise<void> {
+async function runSmoke(win: Electron.BrowserWindow, stopSidecar: () => Promise<void>): Promise<void> {
   const results: [string, boolean, string][] = []
   const check = (name: string, pass: boolean, detail = ''): void => {
     results.push([name, pass, detail])
@@ -211,5 +216,6 @@ async function runSmoke(win: Electron.BrowserWindow): Promise<void> {
   }
   const pass = results.every(([, ok]) => ok)
   console.log(`SUMMARY ${pass ? 'ALL-PASS' : 'HAS-FAIL'}`)
+  await stopSidecar()
   app.exit(pass ? 0 : 1)
 }
