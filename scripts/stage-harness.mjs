@@ -1,0 +1,55 @@
+// Stage the pinned harness into build/harness: a production-only npm install
+// of the official @deepseek-ai/dsh package, plus this repo's desktop plugin
+// packages copied in beside it. The staged tree is what ships as an Electron
+// extraResource and what the contract tests boot.
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const pin = JSON.parse(readFileSync(join(root, 'harness.json'), 'utf8'))
+const stageDir = join(root, 'build', 'harness')
+
+console.log(`staging @deepseek-ai/dsh@${pin.harness} -> build/harness`)
+rmSync(stageDir, { recursive: true, force: true })
+mkdirSync(stageDir, { recursive: true })
+writeFileSync(join(stageDir, 'package.json'), JSON.stringify({
+  name: 'harness-stage',
+  private: true,
+  dependencies: { '@deepseek-ai/dsh': pin.harness },
+}, null, 2))
+
+execFileSync('npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
+  cwd: stageDir,
+  stdio: 'inherit',
+})
+
+// Copy this repo's desktop plugin packages into the staged node_modules.
+// Their @deepseek-ai/* imports resolve upward into the staged tree.
+const packagesDir = join(root, 'packages')
+if (existsSync(packagesDir)) {
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const pkgJsonPath = join(packagesDir, entry.name, 'package.json')
+    if (!existsSync(pkgJsonPath)) continue
+    const pkgName = JSON.parse(readFileSync(pkgJsonPath, 'utf8')).name
+    const dest = join(stageDir, 'node_modules', ...pkgName.split('/'))
+    rmSync(dest, { recursive: true, force: true })
+    mkdirSync(dirname(dest), { recursive: true })
+    cpSync(join(packagesDir, entry.name), dest, {
+      recursive: true,
+      filter: (src) => !src.includes(`${entry.name}/node_modules`) && !src.endsWith('.map'),
+    })
+    console.log(`staged local package ${pkgName}`)
+  }
+}
+
+// The staged harness decides which Node it needs; fail loud on a mismatch
+// with the Node major this repo pins for bundling.
+const dshManifest = JSON.parse(readFileSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
+const engines = dshManifest.engines?.node ?? '(unspecified)'
+console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines}; bundling Node ${pin.node}.x`)
+if (dshManifest.version !== pin.harness) {
+  throw new Error(`staged version ${dshManifest.version} does not match pin ${pin.harness}`)
+}
