@@ -6,7 +6,7 @@
  * unguessable, with the token as the second factor on every request.
  */
 import { randomBytes } from 'node:crypto'
-import { join } from 'node:path'
+import { posix } from 'node:path'
 
 export interface SidecarAddress {
   /** What the carrier binds and node:http connects to. */
@@ -27,5 +27,7 @@ export function createSidecarAddress(platform: NodeJS.Platform, tmpdir: string):
     return { socketPath: `\\\\.\\pipe\\dsh-${randomBytes(16).toString('hex')}`, token }
   }
   // Keep the path well under the POSIX sun_path limit (~104 bytes on macOS).
-  return { socketPath: join(tmpdir, `dsh-${randomBytes(4).toString('hex')}`, 's'), token }
+  // posix.join keeps the function pure on any host (join() would inject
+  // host-flavored separators into a POSIX-only path).
+  return { socketPath: posix.join(tmpdir, `dsh-${randomBytes(4).toString('hex')}`, 's'), token }
 }
