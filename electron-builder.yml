@@ -27,7 +27,11 @@ mac:
   identity: null
 
 # zip is omitted on Windows: NSIS + latest.yml is the updater feed there, and
-# 7za exhausts hosted-runner memory zipping the ~700MB payload.
+# 7za exhausts hosted-runner memory zipping the ~700MB payload. The same 7za
+# failure hits the NSIS differential package and its max-compression internal
+# archive, so differential updates are off (updates download the full
+# installer) and compression is store — trading installer size for a build
+# that fits hosted-runner memory.
 win:
   target: [nsis]
   signAndEditExecutable: false
@@ -36,6 +40,9 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  differentialPackage: false
+
+compression: store
 
 linux:
   target: [AppImage, deb]
