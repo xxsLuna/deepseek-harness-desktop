@@ -26,8 +26,10 @@ mac:
   category: public.app-category.developer-tools
   identity: null
 
+# zip is omitted on Windows: NSIS + latest.yml is the updater feed there, and
+# 7za exhausts hosted-runner memory zipping the ~700MB payload.
 win:
-  target: [nsis, zip]
+  target: [nsis]
   signAndEditExecutable: false
 
 nsis:
