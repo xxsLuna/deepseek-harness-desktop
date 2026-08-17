@@ -54,7 +54,8 @@ for (const pattern of [
   'node_modules/node-pty/build/Release/spawn-helper',
   'node_modules/@deepseek-ai/node-addon-landlock-run-*/bin/landlock-run',
 ]) {
-  for (const hit of globSync(join(harness, pattern))) {
+  // glob patterns use forward slashes even on Windows (backslash escapes).
+  for (const hit of globSync(`${harness.replaceAll('\\', '/')}/${pattern}`)) {
     if (statSync(hit).isFile()) assertExecutable(hit, 'spawned binary')
   }
 }

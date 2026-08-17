@@ -79,8 +79,14 @@ jobs:
         if: startsWith(matrix.target, 'linux')
         run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources"
 
+      # ELECTRON_DISABLE_SANDBOX: hosted ubuntu-24.04 restricts unprivileged
+      # user namespaces and the unpacked build's chrome-sandbox lacks SUID, so
+      # Chromium cannot sandbox here. A deliberate CI-only fidelity reduction;
+      # local smokes and real installs keep the sandbox.
       - name: Packaged smoke (Linux)
         if: startsWith(matrix.target, 'linux')
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
         run: xvfb-run -a node scripts/smoke-packaged.mjs
 
       - name: Packaged smoke (Windows)

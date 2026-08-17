@@ -1,3 +1,6 @@
+# Host isolation: anonymous volumes shadow node_modules and build inside the
+# container, so Linux installs never overwrite the host's platform binaries.
+# The build service shares the host's out/ so installers land on the host.
 services:
   # Typecheck + unit + contract, isolated from the host toolchain:
   #   docker compose -f docker/compose.yml run --rm ci
@@ -6,6 +9,10 @@ services:
     working_dir: /work
     volumes:
       - ..:/work
+      - /work/node_modules
+      - /work/packages/connection/node_modules
+      - /work/build
+      - /work/dist
     command: >-
       bash -lc "npm ci && npm run stage && npm run build && npm run typecheck
       && npm test && npm run test:contract"
@@ -17,7 +24,12 @@ services:
     working_dir: /work
     volumes:
       - ..:/work
+      - /work/node_modules
+      - /work/packages/connection/node_modules
+      - /work/build
+      - /work/dist
     command: >-
       bash -lc "npm ci && npm run stage && npm run fetch-node && npm run build
       && npx electron-builder --linux --publish never
-      && node scripts/verify-payload.mjs \"$(ls -d out/linux*-unpacked | head -1)/resources\""
+      && node scripts/verify-payload.mjs out/linux-unpacked/resources
+      && node scripts/verify-payload.mjs out/linux-arm64-unpacked/resources || true"

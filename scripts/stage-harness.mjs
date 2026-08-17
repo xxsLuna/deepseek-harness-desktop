@@ -27,9 +27,11 @@ if (!localOnly) {
     dependencies: { '@deepseek-ai/dsh': pin.harness },
   }, null, 2))
 
-  execFileSync('npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
+  // npm is npm.cmd on Windows, which spawnSync only resolves through a shell.
+  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
     cwd: stageDir,
     stdio: 'inherit',
+    shell: process.platform === 'win32',
   })
 }
 
