@@ -1,0 +1,12 @@
+deepseek-harness-desktop
+Copyright (c) 2026 Luna
+
+This application is an unofficial desktop distribution of DeepSeek Harness.
+
+DeepSeek Harness (`dsh`) is developed by DeepSeek AI and published under the
+MIT License at https://github.com/deepseek-ai/deepseek-harness. This project
+bundles the official, unmodified `@deepseek-ai/dsh` npm packages and is not
+endorsed by or affiliated with DeepSeek AI.
+
+The bundled Node.js runtime is published by the Node.js project under the MIT
+License at https://nodejs.org.

@@ -1,0 +1,20 @@
+{
+  "name": "deepseek-harness-desktop",
+  "version": "0.1.0-rc.6",
+  "description": "Unofficial desktop app for DeepSeek Harness",
+  "private": true,
+  "license": "MIT",
+  "author": "Luna <xxs.main@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xxsLuna/deepseek-harness-desktop.git"
+  },
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "test": "vitest run tests"
+  },
+  "devDependencies": {
+    "electron": "43.4.0"
+  }
+}
