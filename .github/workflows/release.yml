@@ -1,0 +1,17 @@
+# Tag push (v<harness-version>[-N]) → five-target build with publish: assets
+# and latest*.yml land on a draft GitHub Release. Review the draft, then
+# publish it — the public release feed is what auto-update clients poll.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/build.yml
+    with:
+      publish: true

@@ -1,0 +1,66 @@
+# Daily upstream watch: when @deepseek-ai/dsh publishes a new version, open a
+# PR bumping harness.json and package.json. The PR's build workflow re-runs
+# the contract suite and five-target packaging, so a green PR is releasable.
+name: watch-upstream
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Compare pinned and published versions
+        id: versions
+        run: |
+          PINNED=$(node -p "require('./harness.json').harness")
+          LATEST=$(npm view @deepseek-ai/dsh version)
+          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "pinned $PINNED / latest $LATEST"
+
+      - name: Open bump PR
+        if: steps.versions.outputs.pinned != steps.versions.outputs.latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          BRANCH="upstream-bump/$LATEST"
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "bump branch already exists"; exit 0
+          fi
+          git config user.name "Luna"
+          git config user.email "xxs.main@gmail.com"
+          git switch -c "$BRANCH"
+          node -e '
+            const fs = require("fs")
+            const latest = process.env.LATEST
+            const pin = JSON.parse(fs.readFileSync("harness.json", "utf8"))
+            pin.harness = latest
+            fs.writeFileSync("harness.json", JSON.stringify(pin, null, 2) + "\n")
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"))
+            pkg.version = latest
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n")
+          '
+          git add harness.json package.json
+          git commit -m "Track upstream @deepseek-ai/dsh $LATEST"
+          git push -u origin "$BRANCH"
+          gh label create upstream-bump --color 0E8A16 --description "Automated harness version bump" 2>/dev/null || true
+          gh pr create \
+            --title "Track upstream @deepseek-ai/dsh $LATEST" \
+            --label upstream-bump \
+            --body "Automated bump: \`harness.json\` and \`package.json\` now pin \`$LATEST\`.
+
+The build workflow on this PR re-runs the sidecar contract suite and five-target packaging against the new version. Green checks mean the coupling contracts held; a red check names the exact seam that changed."

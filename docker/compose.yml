@@ -1,0 +1,23 @@
+services:
+  # Typecheck + unit + contract, isolated from the host toolchain:
+  #   docker compose -f docker/compose.yml run --rm ci
+  ci:
+    build: .
+    working_dir: /work
+    volumes:
+      - ..:/work
+    command: >-
+      bash -lc "npm ci && npm run stage && npm run build && npm run typecheck
+      && npm test && npm run test:contract"
+
+  # Linux packaging (AppImage/deb for the host arch):
+  #   docker compose -f docker/compose.yml run --rm build
+  build:
+    build: .
+    working_dir: /work
+    volumes:
+      - ..:/work
+    command: >-
+      bash -lc "npm ci && npm run stage && npm run fetch-node && npm run build
+      && npx electron-builder --linux --publish never
+      && node scripts/verify-payload.mjs \"$(ls -d out/linux*-unpacked | head -1)/resources\""

@@ -1,0 +1,107 @@
+# Five-target build + packaged smoke. Reused by pull requests (publish: false)
+# and by release.yml (publish: true → assets attach to a draft GitHub Release,
+# which is also the electron-updater feed).
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mac-arm64
+            runner: macos-latest
+            builder: --mac --arm64
+          - target: mac-x64
+            runner: macos-13
+            builder: --mac --x64
+          - target: win-x64
+            runner: windows-latest
+            builder: --win --x64
+          - target: linux-x64
+            runner: ubuntu-24.04
+            builder: --linux --x64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            builder: --linux --arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install
+        run: npm ci
+
+      - name: Stage harness
+        run: npm run stage
+
+      - name: Fetch bundled Node
+        run: npm run fetch-node
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Contract tests
+        run: npm run test:contract
+
+      - name: Package
+        env:
+          GH_TOKEN: ${{ inputs.publish && secrets.GITHUB_TOKEN || '' }}
+        run: npx electron-builder ${{ matrix.builder }} --publish ${{ inputs.publish && 'always' || 'never' }}
+
+      - name: Verify payload (macOS)
+        if: startsWith(matrix.target, 'mac')
+        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/DeepSeek\ Harness\ Desktop.app | head -1)/Contents/Resources"
+
+      - name: Verify payload (Windows)
+        if: startsWith(matrix.target, 'win')
+        run: node scripts/verify-payload.mjs out/win-unpacked/resources
+
+      - name: Verify payload (Linux)
+        if: startsWith(matrix.target, 'linux')
+        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources"
+
+      - name: Packaged smoke (Linux)
+        if: startsWith(matrix.target, 'linux')
+        run: xvfb-run -a node scripts/smoke-packaged.mjs
+
+      - name: Packaged smoke (Windows)
+        if: startsWith(matrix.target, 'win')
+        run: node scripts/smoke-packaged.mjs
+
+      # Observational until unsigned-.app launch on hosted runners is proven.
+      - name: Packaged smoke (macOS)
+        if: startsWith(matrix.target, 'mac')
+        continue-on-error: true
+        run: node scripts/smoke-packaged.mjs
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.target }}
+          path: |
+            out/*.dmg
+            out/*.zip
+            out/*.exe
+            out/*.AppImage
+            out/*.deb
+            out/latest*.yml
+          if-no-files-found: warn

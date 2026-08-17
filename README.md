@@ -35,7 +35,32 @@ Sessions, credentials, and settings live in `~/.dsh`, shared with the `dsh` CLI 
 
 ## Versioning
 
-The app version tracks the upstream harness version exactly. A desktop release `v0.1.0-rc.6` bundles `@deepseek-ai/dsh@0.1.0-rc.6`; a desktop-only fix appends a build counter (`v0.1.0-rc.6-2`).
+The app version tracks the upstream harness version exactly. A desktop release `v0.1.0-rc.6` bundles `@deepseek-ai/dsh@0.1.0-rc.6`; a desktop-only fix appends a build counter (`v0.1.0-rc.6-2`). A daily workflow watches npm and opens a bump PR when upstream publishes; the PR's checks re-run the sidecar contract suite, so a green bump PR is releasable as-is.
+
+## How it works
+
+The app is a thin Electron shell around the **unmodified** published harness:
+
+- `scripts/stage-harness.mjs` installs the pinned `@deepseek-ai/dsh` tree; three small plugin packages of ours are composed in through the harness's own patch-layer system (no upstream file is edited): a `webServer` provider that listens on a socket path with a bearer token, an SSE browser carrier replacing the WebSocket one (WebSockets cannot ride a custom scheme), and the desktop bundle overlay.
+- The main process spawns that tree under a bundled stock Node (no Electron ABI rebuilds), and `protocol.handle('dsh')` proxies the window's requests to the socket.
+- Coupling to upstream is confined to the seams asserted by `tests/contract` — the version-tracking canary.
+
+## Development
+
+Everything is project-local (`node_modules`), nothing is installed system-wide:
+
+```sh
+npm ci
+npm run stage        # install the pinned harness into build/harness
+npm run build        # compile main, build the client bundle, restage local packages
+npm run dev          # launch the app
+npm test             # unit tests
+npm run test:contract  # boot the sidecar over a socket and assert the coupling contract
+```
+
+Docker equivalents (checks and Linux packaging): `docker compose -f docker/compose.yml run --rm ci` / `... run --rm build`.
+
+Packaging locally: `npm run fetch-node && npx electron-builder --<mac|win|linux>` then `node scripts/verify-payload.mjs <resources dir>` and `node scripts/smoke-packaged.mjs`.
 
 ## License
 

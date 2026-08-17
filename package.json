@@ -20,7 +20,9 @@
     "dev": "npm run build && electron .",
     "smoke": "npm run build && DSH_DESKTOP_SMOKE=1 electron .",
     "test": "vitest run tests/unit",
-    "test:contract": "vitest run tests/contract"
+    "test:contract": "vitest run tests/contract",
+    "package": "electron-builder",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs"
   },
   "devDependencies": {
     "@types/node": "26.2.0",

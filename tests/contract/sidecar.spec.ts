@@ -68,7 +68,9 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), 'dsh-contract-home-'))
     socketDir = mkdtempSync(join(tmpdir(), 'dsh-contract-sock-'))
-    socketPath = join(socketDir, 's')
+    socketPath = process.platform === 'win32'
+      ? `\\\\.\\pipe\\dsh-contract-${Date.now()}-${process.pid}`
+      : join(socketDir, 's')
     child = spawn(process.execPath, [entry], {
       env: {
         ...process.env,
@@ -88,7 +90,8 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     const deadline = Date.now() + 90_000
     for (;;) {
       if (child.exitCode !== null) throw new Error(`sidecar exited during startup:\n${log}`)
-      if (existsSync(socketPath)) {
+      // Pipe names have no filesystem presence on Windows; just try connecting.
+      if (process.platform === 'win32' || existsSync(socketPath)) {
         try {
           const probe = await socketRequest(socketPath, {
             path: '/api/host.describe',
@@ -112,8 +115,9 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
       await exited
       clearTimeout(timer)
     }
-    // contract: a SIGTERM shutdown removes the socket file
-    expect(existsSync(socketPath)).toBe(false)
+    // contract: a SIGTERM shutdown removes the socket file (POSIX only —
+    // named pipes vanish with their last handle)
+    if (process.platform !== 'win32') expect(existsSync(socketPath)).toBe(false)
     rmSync(home, { recursive: true, force: true })
     rmSync(socketDir, { recursive: true, force: true })
   }, 30_000)
@@ -172,7 +176,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(res.body).toContain('__ModuleLoader__.load')
   })
 
-  it('holds no TCP listeners', async () => {
+  it.skipIf(process.platform === 'win32')('holds no TCP listeners', async () => {
     const { execFileSync } = await import('node:child_process')
     try {
       const out = execFileSync('lsof', ['-p', String(child.pid), '-a', '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8' })
