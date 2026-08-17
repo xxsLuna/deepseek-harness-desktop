@@ -27,8 +27,11 @@ jobs:
           - target: mac-x64
             runner: macos-13
             builder: --mac --x64
+          # windows-2022 pinned: the bundled 7za fails with a spurious
+          # "Can't allocate required memory!" on the windows-latest (2025)
+          # image regardless of compression settings.
           - target: win-x64
-            runner: windows-latest
+            runner: windows-2022
             builder: --win --x64
           - target: linux-x64
             runner: ubuntu-24.04
