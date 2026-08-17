@@ -42,6 +42,11 @@ const harness = join(resources, 'harness')
 assertExists(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), 'harness')
 assertExists(join(harness, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'), 'desktop bundle')
 assertExists(join(harness, 'node_modules', '@dsh-desktop', 'connection', 'lib', 'client.js'), 'desktop client bundle')
+// Tripwire: a copied resolution symlink here points back into this tree and
+// turns the payload into an infinite directory cycle.
+if (existsSync(join(harness, 'node_modules', '@dsh-desktop', 'connection', 'node_modules'))) {
+  failures.push('desktop client: staged connection package carries a node_modules (directory cycle)')
+}
 const pin = JSON.parse(readFileSync(new URL('../harness.json', import.meta.url), 'utf8'))
 const staged = JSON.parse(readFileSync(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
 if (staged.version !== pin.harness) failures.push(`harness: staged ${staged.version} != pinned ${pin.harness}`)
