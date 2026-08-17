@@ -11,19 +11,27 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const pin = JSON.parse(readFileSync(join(root, 'harness.json'), 'utf8'))
 const stageDir = join(root, 'build', 'harness')
 
-console.log(`staging @deepseek-ai/dsh@${pin.harness} -> build/harness`)
-rmSync(stageDir, { recursive: true, force: true })
-mkdirSync(stageDir, { recursive: true })
-writeFileSync(join(stageDir, 'package.json'), JSON.stringify({
-  name: 'harness-stage',
-  private: true,
-  dependencies: { '@deepseek-ai/dsh': pin.harness },
-}, null, 2))
+// --local-only refreshes just this repo's packages inside an existing stage.
+const localOnly = process.argv.includes('--local-only')
+if (localOnly && !existsSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh'))) {
+  throw new Error('--local-only requires an existing stage; run without the flag first')
+}
 
-execFileSync('npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
-  cwd: stageDir,
-  stdio: 'inherit',
-})
+if (!localOnly) {
+  console.log(`staging @deepseek-ai/dsh@${pin.harness} -> build/harness`)
+  rmSync(stageDir, { recursive: true, force: true })
+  mkdirSync(stageDir, { recursive: true })
+  writeFileSync(join(stageDir, 'package.json'), JSON.stringify({
+    name: 'harness-stage',
+    private: true,
+    dependencies: { '@deepseek-ai/dsh': pin.harness },
+  }, null, 2))
+
+  execFileSync('npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
+    cwd: stageDir,
+    stdio: 'inherit',
+  })
+}
 
 // Copy this repo's desktop plugin packages into the staged node_modules.
 // Their @deepseek-ai/* imports resolve upward into the staged tree.
@@ -47,9 +55,11 @@ if (existsSync(packagesDir)) {
 
 // The staged harness decides which Node it needs; fail loud on a mismatch
 // with the Node major this repo pins for bundling.
-const dshManifest = JSON.parse(readFileSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
-const engines = dshManifest.engines?.node ?? '(unspecified)'
-console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines}; bundling Node ${pin.node}.x`)
-if (dshManifest.version !== pin.harness) {
-  throw new Error(`staged version ${dshManifest.version} does not match pin ${pin.harness}`)
+if (!localOnly) {
+  const dshManifest = JSON.parse(readFileSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
+  const engines = dshManifest.engines?.node ?? '(unspecified)'
+  console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines}; bundling Node ${pin.node}.x`)
+  if (dshManifest.version !== pin.harness) {
+    throw new Error(`staged version ${dshManifest.version} does not match pin ${pin.harness}`)
+  }
 }

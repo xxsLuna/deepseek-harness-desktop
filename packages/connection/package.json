@@ -1,0 +1,24 @@
+{
+  "name": "@dsh-desktop/connection",
+  "version": "0.1.0-rc.6",
+  "description": "Desktop transport row: upstream /api node half + an SSE browser carrier instead of the WebSocket one",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [],
+      "immediately": true
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-connection": "*"
+  }
+}

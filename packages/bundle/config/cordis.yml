@@ -1,0 +1,4 @@
+# Desktop root config: an empty entry list the bundle patch layers fill.
+# Its directory anchors ctx.baseUrl, so bare plugin names resolve from the
+# staged harness node_modules beside this package.
+[]

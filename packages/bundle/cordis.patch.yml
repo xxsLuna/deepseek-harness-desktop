@@ -1,0 +1,47 @@
+# @dsh-desktop/bundle overlay: applied after dsh-base and dsh-web-app.
+# Swaps the web transport rows for the socket-path desktop transport while
+# every other row (tools, persistence, gateway, the whole ui-* roster) stays
+# exactly as the upstream web surface composes it.
+
+# The web transport: a TCP listener, its cmdline flag provider, the URL-printing
+# runtime glue, and the WebSocket browser carrier. All replaced below.
+- id: web-startup
+  disabled: true
+
+- id: webserver
+  disabled: true
+
+- id: web-runtime
+  disabled: true
+
+- id: connection
+  disabled: true
+
+# The HMR browser half opens EventSource('/plugins/events'), which the app
+# scheme cannot serve; a failed client fiber would hold the whole UI on the
+# loading page. Desktop applies plugin changes on restart.
+- id: client-hmr
+  disabled: true
+
+- insert:
+    # The socket-path carrier: provides `webServer` with no TCP port. The
+    # launcher (Electron main) supplies the socket path and bearer token.
+    - id: desktop-carrier
+      name: '@dsh-desktop/carrier'
+      config:
+        socketPath: !!js process.env.DSH_DESKTOP_SOCKET
+        token: !!js process.env.DSH_DESKTOP_TOKEN
+
+    # Desktop surface glue: dist fallback owner, SSE event routes, and the
+    # desktop-surface prompt section + DSH_SURFACE shell variable.
+    - id: desktop-runtime
+      name: '@dsh-desktop/bundle'
+
+    # Dual-face transport row: the node half delegates to the upstream
+    # client-connection apply (the /api route, trust fence, and host
+    # ctx.connection), while the browser half is this package's own SSE
+    # carrier bundle instead of the upstream WebSocket one.
+    - id: desktop-connection
+      name: '@dsh-desktop/connection'
+      config:
+        trustedHosts: []
