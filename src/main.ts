@@ -1,0 +1,149 @@
+/**
+ * Electron main: boot order per the desktop architecture —
+ *  1. scheme privileges (must precede app ready)
+ *  2. single-instance lock (loser quits before any window or sidecar work)
+ *  3. protocol handler behind a promise gate (the window may load before the
+ *     sidecar answers; requests queue instead of failing)
+ *  4. window + sidecar in parallel; show on ready-to-show
+ * Shutdown tears the sidecar down before the app exits.
+ */
+import { app, BrowserWindow, protocol } from 'electron'
+import { tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createSidecarAddress } from './socket-path.js'
+import { createSocketProxy } from './socket-proxy.js'
+import { Sidecar, type SidecarPaths } from './sidecar.js'
+import { createMainWindow } from './window.js'
+import { installMenu } from './menu.js'
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'dsh',
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
+}])
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  void run()
+}
+
+/** Resolve the node binary and harness root for this launch (packaged vs dev). */
+function resolvePaths(): SidecarPaths {
+  if (app.isPackaged) {
+    const resources = process.resourcesPath
+    return {
+      nodeBinary: join(resources, 'node', process.platform === 'win32' ? 'node.exe' : 'node'),
+      harnessRoot: join(resources, 'harness'),
+    }
+  }
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url))
+  const fetched = join(repoRoot, 'build', 'node', process.platform === 'win32' ? 'node.exe' : 'node')
+  return {
+    // Dev prefers the fetched runtime when present so dev matches the package.
+    nodeBinary: existsSync(fetched) ? fetched : 'node',
+    harnessRoot: join(repoRoot, 'build', 'harness'),
+  }
+}
+
+async function run(): Promise<void> {
+  const address = createSidecarAddress(process.platform, tmpdir())
+  const paths = resolvePaths()
+
+  const sidecar = new Sidecar({
+    ...paths,
+    address,
+    onLog: (line) => console.log(`[sidecar] ${line}`),
+    onUnexpectedExit: (code) => {
+      console.error(`[sidecar] exited unexpectedly (code ${String(code)}); restarting`)
+      void sidecar.start().catch((error: unknown) => {
+        console.error('[sidecar] restart failed:', error)
+        app.exit(1)
+      })
+    },
+  })
+
+  let quitting = false
+  app.on('before-quit', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    quitting = true
+    void sidecar.stop().finally(() => app.exit(0))
+  })
+  // The window close keeps the app (and sidecar) alive; Cmd+Q / menu quits.
+  app.on('window-all-closed', () => {})
+  app.on('second-instance', () => {
+    const [win] = BrowserWindow.getAllWindows()
+    if (win !== undefined) {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
+  })
+
+  await app.whenReady()
+
+  // Requests queue on this gate until the sidecar answers; a startup failure
+  // resolves the gate to an error page instead of a dead window.
+  const sidecarReady = sidecar.start().then(
+    () => createSocketProxy(address),
+    (error: unknown) => {
+      console.error('[sidecar] startup failed:', error)
+      return async () => new Response(
+        `<h1>DeepSeek Harness failed to start</h1><pre>${String(error)}</pre>`,
+        { status: 503, headers: { 'content-type': 'text/html' } },
+      )
+    },
+  )
+  protocol.handle('dsh', async (request) => (await sidecarReady)(request))
+
+  installMenu()
+  const win = createMainWindow()
+  win.once('ready-to-show', () => win.show())
+  await win.loadURL('dsh://app/')
+
+  if (process.env.DSH_DESKTOP_SMOKE === '1') await runSmoke(win)
+}
+
+/**
+ * Headless self-check for CI and local verification: waits for the client
+ * plugin tree to settle, then asserts the UI actually rendered. Prints
+ * RESULT lines and exits.
+ * @param win - the loaded main window.
+ */
+async function runSmoke(win: Electron.BrowserWindow): Promise<void> {
+  const results: [string, boolean, string][] = []
+  const check = (name: string, pass: boolean, detail = ''): void => {
+    results.push([name, pass, detail])
+    console.log(`RESULT ${pass ? 'PASS' : 'FAIL'} ${name} ${detail}`)
+  }
+  let pageErrors = 0
+  win.webContents.on('console-message', (_e, level, message) => {
+    if (level >= 3) {
+      pageErrors += 1
+      console.log(`[renderer:error] ${message}`)
+    }
+  })
+  try {
+    const settled = await win.webContents.executeJavaScript(`(async () => {
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline) {
+        const root = document.getElementById('root')
+        if (root !== null && root.children.length > 0 && document.querySelector('[class]') !== null) {
+          return { ok: true, boot: Array.isArray(window.__DSH_BOOT__?.entries) ? window.__DSH_BOOT__.entries.length : 0 }
+        }
+        await new Promise(r => setTimeout(r, 500))
+      }
+      return { ok: false, boot: Array.isArray(window.__DSH_BOOT__?.entries) ? window.__DSH_BOOT__.entries.length : 0 }
+    })()`)
+    check('ui-rendered', settled.ok === true, `boot entries: ${String(settled.boot)}`)
+    check('origin', await win.webContents.executeJavaScript('location.origin') === 'dsh://app')
+    check('page-errors', pageErrors === 0, `${pageErrors} console errors`)
+  } catch (error) {
+    check('smoke', false, String(error))
+  }
+  const pass = results.every(([, ok]) => ok)
+  console.log(`SUMMARY ${pass ? 'ALL-PASS' : 'HAS-FAIL'}`)
+  app.exit(pass ? 0 : 1)
+}

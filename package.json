@@ -12,9 +12,19 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
+    "stage": "node scripts/stage-harness.mjs",
+    "stage:local": "node scripts/stage-harness.mjs --local-only",
+    "fetch-node": "node scripts/fetch-node.mjs",
+    "build": "tsc && node scripts/build-client.mjs && node scripts/stage-harness.mjs --local-only",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p packages/connection",
+    "dev": "npm run build && electron .",
+    "smoke": "npm run build && DSH_DESKTOP_SMOKE=1 electron .",
     "test": "vitest run tests"
   },
   "devDependencies": {
-    "electron": "43.4.0"
+    "@types/node": "26.2.0",
+    "electron": "43.4.0",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
   }
 }
