@@ -4,7 +4,7 @@
 // extraResource and what the contract tests boot.
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -45,11 +45,18 @@ if (existsSync(packagesDir)) {
     if (!existsSync(pkgJsonPath)) continue
     const pkgName = JSON.parse(readFileSync(pkgJsonPath, 'utf8')).name
     const dest = join(stageDir, 'node_modules', ...pkgName.split('/'))
+    const sourceDir = join(packagesDir, entry.name)
     rmSync(dest, { recursive: true, force: true })
     mkdirSync(dirname(dest), { recursive: true })
-    cpSync(join(packagesDir, entry.name), dest, {
+    cpSync(sourceDir, dest, {
       recursive: true,
-      filter: (src) => !src.includes(`${entry.name}/node_modules`) && !src.endsWith('.map'),
+      // Exclude the package's own node_modules (a resolution symlink back
+      // into this staged tree — copying it creates a cycle). Compared on
+      // normalized separators: on Windows the paths carry backslashes.
+      filter: (src) => {
+        const rel = relative(sourceDir, src).split(sep).join('/')
+        return rel !== 'node_modules' && !rel.startsWith('node_modules/') && !src.endsWith('.map')
+      },
     })
     console.log(`staged local package ${pkgName}`)
   }
