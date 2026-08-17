@@ -1,0 +1,48 @@
+appId: com.github.xxsluna.deepseek-harness-desktop
+productName: DeepSeek Harness Desktop
+copyright: MIT — bundles DeepSeek Harness (c) DeepSeek AI
+
+directories:
+  output: out
+
+# The asar holds only this shell's compiled main; the harness tree and the
+# stock Node runtime ship beside it so native prebuilds and spawned binaries
+# stay ordinary files on disk (no asar unpacking, no Electron ABI rebuilds).
+# They are copied by the afterPack hook — the builder's file matcher
+# hard-excludes node_modules paths, and the harness tree is one.
+files:
+  - dist/**
+  - package.json
+asar: true
+npmRebuild: false
+afterPack: scripts/after-pack.mjs
+
+# Unsigned v1: both switches are single-line reversals once certificates exist.
+mac:
+  target: [dmg, zip]
+  category: public.app-category.developer-tools
+  identity: null
+
+win:
+  target: [nsis, zip]
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  target: [AppImage, deb]
+  category: Development
+  maintainer: Luna <xxs.main@gmail.com>
+
+protocols:
+  - name: DeepSeek Harness
+    schemes: [dsh-app]
+
+publish:
+  - provider: github
+    owner: xxsLuna
+    repo: deepseek-harness-desktop
+    releaseType: draft
