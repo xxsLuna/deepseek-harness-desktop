@@ -36,6 +36,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LATEST: ${{ steps.versions.outputs.latest }}
+          PR_BODY: |
+            Automated bump: `harness.json` and `package.json` now pin the latest published harness.
+
+            The build workflow on this PR re-runs the sidecar contract suite and five-target packaging against the new version. Green checks mean the coupling contracts held; a red check names the exact seam that changed.
         run: |
           BRANCH="upstream-bump/$LATEST"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
@@ -61,6 +65,4 @@ jobs:
           gh pr create \
             --title "Track upstream @deepseek-ai/dsh $LATEST" \
             --label upstream-bump \
-            --body "Automated bump: \`harness.json\` and \`package.json\` now pin \`$LATEST\`.
-
-The build workflow on this PR re-runs the sidecar contract suite and five-target packaging against the new version. Green checks mean the coupling contracts held; a red check names the exact seam that changed."
+            --body "$PR_BODY"
