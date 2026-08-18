@@ -280,6 +280,26 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(requests.status).toBe(200)
   })
 
+  it('carries the server-to-client interaction plane', async () => {
+    // Approvals and ask-user questions arrive as SERVER-initiated requests on
+    // the mux stream and are answered through /api/respond. Both directions
+    // must survive the app scheme, which cannot open a WebSocket.
+    const mux = await socketRequest(socketPath, { path: '/api/events.mux', firstChunkOnly: true })
+    expect(mux.status).toBe(200)
+    expect(String(mux.headers['content-type'])).toContain('text/event-stream')
+
+    const answered = await socketRequest(socketPath, {
+      path: '/api/respond',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-response', rpcId: crypto.randomUUID(), result: { ok: true, value: {} } }),
+    })
+    // An unknown rpcId is refused with a receipt, not an error: the reply path
+    // is reachable and correlating.
+    expect(answered.status).toBe(200)
+    expect(answered.body).toContain('not-pending')
+  })
+
   it('reports a working directory that is not the filesystem root', async () => {
     // A GUI launch inherits the session manager's cwd; upstream derives the
     // sandbox workspace-write fallback root from it, so `/` would widen the
