@@ -23,7 +23,7 @@ Download the installer for your platform from [Releases](https://github.com/xxsL
 | Windows x64 | `.exe` (NSIS) |
 | Linux x64 / arm64 | `.AppImage`, `.deb` |
 
-Builds are currently **unsigned**: macOS will ask you to right-click → Open the first time, and Windows SmartScreen will show a warning.
+Builds are currently **unsigned**: macOS will ask you to right-click → Open the first time, and Windows SmartScreen will show a warning. For the same reason macOS cannot self-update — Squirrel.Mac validates the signature — so the app points you at the releases page there, while Windows and Linux update themselves.
 
 ## First run
 
@@ -69,6 +69,8 @@ npm run test:contract  # boot the sidecar over a socket and assert the coupling 
 ```
 
 Docker equivalents (checks and Linux packaging): `docker compose -f docker/compose.yml run --rm ci` / `... run --rm build`.
+
+`tests/contract` is the version-tracking canary: it boots the staged harness over a socket without Electron and asserts every seam this app depends on — the transport, the agent presets, session creation and export, the interaction plane, and the native tool paths (`node-pty`, the packaged ripgrep, `node:sqlite`). An upstream bump that breaks one of them fails there by name.
 
 Packaging locally: `npm run fetch-node && npx electron-builder --<mac|win|linux>` then `node scripts/verify-payload.mjs <resources dir>` and `node scripts/smoke-packaged.mjs`.
 
