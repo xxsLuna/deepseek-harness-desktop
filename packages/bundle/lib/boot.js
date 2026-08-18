@@ -37,13 +37,48 @@ const bundlePatch = (pkg) => join(dirname(require.resolve(`${pkg}/package.json`)
 const home = resolveDshHome()
 const environment = loadLayeredEnv(NAME, home)
 
-const patches = [
+const layers = [
   ...loadOverlayPatches(NAME, bundlePatch('@deepseek-ai/dsh-base')),
   ...loadOverlayPatches(NAME, bundlePatch('@deepseek-ai/dsh-web-app')),
   ...loadOverlayPatches(NAME, fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))),
   // The user's home-level overrides keep working exactly as they do for the CLI.
   ...(loadOptionalPatches(NAME, join(home, 'cordis.patch.yml')) ?? []),
 ]
+
+// Resolve the composed rows the way the upstream launcher does, so the two
+// overlays it appends can be applied on the same terms. A patch layer carries
+// both top-level rows and `- insert:` groups, and the rows we need to patch
+// (agent-presets, the telemetry row) are inserted ones — scanning only the top
+// level silently finds nothing.
+const rows = new Map()
+for (const entry of layers) {
+  for (const row of Array.isArray(entry?.insert) ? entry.insert : [entry]) {
+    if (typeof row?.id === 'string') rows.set(row.id, row)
+  }
+}
+
+const overlays = []
+
+// Agent presets ship inside the dsh package and are pointed at by the
+// launcher, not by any bundle — without this overlay no preset exists and
+// every session.create fails with `agent-preset-not-found`.
+if (rows.has('agent-presets')) {
+  const presetRoot = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
+  overlays.push({
+    id: 'agent-presets',
+    config: {
+      ...rows.get('agent-presets')?.config ?? {},
+      roots: [{ path: `${presetRoot}/`, trust: 'system' }],
+    },
+  })
+}
+
+// Same opt-out the CLI honours: any non-empty value disables the row.
+if ((process.env.DSH_TELEMETRY_DISABLED ?? '') !== '' && rows.has('session-telemetry-otel')) {
+  overlays.push({ id: 'session-telemetry-otel', disabled: true })
+}
+
+const patches = [...layers, ...overlays]
 
 const rootConfig = fileURLToPath(new URL('../config/cordis.yml', import.meta.url))
 

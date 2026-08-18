@@ -18,6 +18,7 @@ import { Sidecar, type SidecarPaths } from './sidecar.js'
 import { createMainWindow, MERGED_TITLE_BAR } from './window.js'
 import { installMenu } from './menu.js'
 import { installTray } from './tray.js'
+import { installDownloads } from './downloads.js'
 import { startNotifications } from './notifications.js'
 import { startPickerHost } from './picker-host.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
@@ -196,6 +197,9 @@ async function run(): Promise<void> {
 
   const tray = installTray(win)
   void tray
+
+  const stopDownloads = installDownloads(win.webContents.session, win)
+  app.on('before-quit', () => stopDownloads())
 
   if (!app.isPackaged) {
     const { installDevTuning } = await import('./dev-tuning.js')

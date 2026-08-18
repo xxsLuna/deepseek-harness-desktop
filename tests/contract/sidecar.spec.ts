@@ -59,6 +59,22 @@ function socketRequest(socketPath: string, options: {
   })
 }
 
+/** One unary RPC over the socket, unwrapped to its result. */
+async function rpc(socketPath: string, method: string, payload: Record<string, unknown> = {}): Promise<{
+  ok: boolean
+  value?: unknown
+  error?: { code: string }
+}> {
+  const res = await socketRequest(socketPath, {
+    path: `/api/${method}`,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload }),
+  })
+  if (res.status !== 200) throw new Error(`${method}: HTTP ${String(res.status)}`)
+  return (JSON.parse(res.body) as { result: { ok: boolean, value?: unknown, error?: { code: string } } }).result
+}
+
 describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   let child: ChildProcess
   let home: string
@@ -207,6 +223,45 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     })
     expect(answer.status).toBe(200)
     expect(answer.body).toContain('"accepted":false')
+  })
+
+  it('composes the shipped agent presets, so sessions can be created', async () => {
+    // The preset roots are an assembly fact the upstream LAUNCHER patches in,
+    // not any bundle — miss that overlay and every session.create fails with
+    // agent-preset-not-found while the app otherwise looks healthy.
+    const list = await rpc(socketPath, 'agentPreset.list')
+    expect(list.ok, JSON.stringify(list)).toBe(true)
+    const ids = (list.value as { presets: { id: string, trust: string }[] }).presets.map((p) => p.id)
+    expect(ids).toContain('standard')
+    for (const preset of (list.value as { presets: { trust: string }[] }).presets) {
+      expect(preset.trust).toBe('system')
+    }
+  })
+
+  it('creates a session and exports it as a downloadable archive', async () => {
+    // A fresh home has no workspace; create one through the same API the UI
+    // uses after the picker returns a path.
+    const created = await rpc(socketPath, 'workspace.create', { path: home })
+    expect(created.ok, JSON.stringify(created)).toBe(true)
+    const workspaces = await rpc(socketPath, 'workspace.list')
+    expect(workspaces.ok).toBe(true)
+    const items = (workspaces.value as { items: { workspaceId: string }[] }).items
+    const workspaceId = items[0]?.workspaceId
+    expect(workspaceId, 'workspace.create did not produce a workspace').toBeDefined()
+
+    const session = await rpc(socketPath, 'session.create', { workspaceId })
+    expect(session.ok, JSON.stringify(session)).toBe(true)
+    const sessionId = (session.value as { sessionId?: string }).sessionId
+    expect(typeof sessionId).toBe('string')
+
+    // GET/HEAD /api/session.export is a query-param boundary, not an RPC
+    // envelope; the export is what the UI's download affordance fetches.
+    const res = await socketRequest(socketPath, {
+      path: `/api/session.export?sessionId=${String(sessionId)}&includeDescendants=true`,
+      method: 'HEAD',
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers['content-disposition']).toContain('attachment')
   })
 
   it.skipIf(process.platform === 'win32')('holds no TCP listeners', async () => {
