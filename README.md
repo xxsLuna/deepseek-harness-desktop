@@ -55,6 +55,28 @@ browser. Those assumptions are met here rather than patched upstream:
 - **Exports.** A page-initiated download is a no-op in Electron without a handler; session exports land in the OS download folder and the notice reveals the file.
 - **The title bar** is merged into the UI on macOS only. Windows and Linux keep their native frame, and the served stylesheet insets nothing there.
 
+## Branching
+
+`main` is protected and only moves through a pull request whose checks passed:
+
+```sh
+git switch dev
+# commit your work
+git push
+gh pr create --base main --head dev --fill
+# once all-targets-built is green
+gh pr merge --squash   # or --merge
+```
+
+`dev` is the integration branch — commit there, and the daily upstream bump
+opens its pull request against it too. Releases are cut from `main`: pushing a
+`v*` tag refuses to build unless the tagged commit is on `main`.
+
+The one required check is `all-targets-built`, which passes only when all five
+platform jobs did. The matrix jobs are not required individually because their
+check names embed the matrix values, so editing an entry would rename a
+required check and block every pull request.
+
 ## Development
 
 Everything is project-local (`node_modules`), nothing is installed system-wide:

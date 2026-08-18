@@ -121,3 +121,23 @@ jobs:
             out/*.deb
             out/latest*.yml
           if-no-files-found: warn
+
+  # The one required status check on main.
+  #
+  # The matrix jobs cannot be required directly: their check names embed every
+  # matrix value ("build (mac-x64, macos-latest, --mac --x64, x64, true)"), so
+  # editing an entry renames the check, and a required check that no longer
+  # exists blocks every pull request forever. This name never changes.
+  #
+  # `always()` plus an explicit result test is required: without it a skipped or
+  # cancelled matrix would skip this job too, and a skipped required check
+  # counts as passing.
+  all-targets-built:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every target built
+        run: |
+          echo "build matrix result: ${{ needs.build.result }}"
+          test "${{ needs.build.result }}" = "success"

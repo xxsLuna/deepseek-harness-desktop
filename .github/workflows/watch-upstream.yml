@@ -16,7 +16,12 @@ jobs:
   watch:
     runs-on: ubuntu-24.04
     steps:
+      # Branch the bump off dev and open the pull request against it: every
+      # change reaches main the same way, and a bump cut from main would carry
+      # an unrelated diff once dev is ahead.
       - uses: actions/checkout@v4
+        with:
+          ref: dev
 
       - uses: actions/setup-node@v4
         with:
@@ -63,6 +68,7 @@ jobs:
           git push -u origin "$BRANCH"
           gh label create upstream-bump --color 0E8A16 --description "Automated harness version bump" 2>/dev/null || true
           gh pr create \
+            --base dev \
             --title "Track upstream @deepseek-ai/dsh $LATEST" \
             --label upstream-bump \
             --body "$PR_BODY"

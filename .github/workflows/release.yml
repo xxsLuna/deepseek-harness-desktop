@@ -11,7 +11,25 @@ permissions:
   contents: write
 
 jobs:
+  # Releases come from main. A tag can point at any commit, so the branch
+  # protection on main does not cover this by itself — check it here.
+  verify-tag-on-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a tag that is not on main
+        run: |
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main; release from main only"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is on main"
+
   release:
+    needs: verify-tag-on-main
     uses: ./.github/workflows/build.yml
     with:
       publish: true
