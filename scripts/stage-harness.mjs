@@ -27,12 +27,31 @@ if (!localOnly) {
     dependencies: { '@deepseek-ai/dsh': pin.harness },
   }, null, 2))
 
-  // npm is npm.cmd on Windows, which spawnSync only resolves through a shell.
-  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
-    cwd: stageDir,
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  })
+  // The registry occasionally serves a 404 for a tarball its own metadata
+  // still points at (seen on @tanstack/virtual-core, a transitive dependency of
+  // the harness). That is not something this repo can fix, and a one-shot
+  // install turns it into a red build, so retry with a cleared cache before
+  // giving up.
+  const attempts = 3
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      // npm is npm.cmd on Windows, which spawnSync only resolves through a shell.
+      execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
+        cwd: stageDir,
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+      })
+      break
+    } catch (error) {
+      if (attempt === attempts) throw error
+      console.warn(`stage-harness: install attempt ${attempt} of ${attempts} failed; retrying`)
+      execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['cache', 'clean', '--force', '--loglevel=error'], {
+        stdio: 'ignore',
+        shell: process.platform === 'win32',
+      })
+      await new Promise((resolve) => setTimeout(resolve, attempt * 5_000))
+    }
+  }
 }
 
 // Copy this repo's desktop plugin packages into the staged node_modules.
