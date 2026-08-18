@@ -24,9 +24,15 @@ jobs:
           - target: mac-arm64
             runner: macos-latest
             builder: --mac --arm64
+          # Cross-built on Apple Silicon: the macos-13 Intel runners are being
+          # retired and their queue no longer clears. The payload is a stock
+          # Node binary plus stock prebuilds, both fetched per target arch, so
+          # nothing here is compiled against the host.
           - target: mac-x64
-            runner: macos-13
+            runner: macos-latest
             builder: --mac --x64
+            nodeArch: x64
+            cross: true
           - target: win-x64
             runner: windows-latest
             builder: --win --x64
@@ -51,7 +57,7 @@ jobs:
         run: npm run stage
 
       - name: Fetch bundled Node
-        run: npm run fetch-node
+        run: npm run fetch-node -- --arch ${{ matrix.nodeArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Build
         run: npm run build
@@ -97,8 +103,10 @@ jobs:
 
       # Promoted to a required gate: an unsigned .app does launch and render on
       # a hosted runner (proven on mac-arm64), so a regression here is real.
+      # A cross-built app cannot run on this host, so only the payload is
+      # verified there — its own arch runs it at release time.
       - name: Packaged smoke (macOS)
-        if: startsWith(matrix.target, 'mac')
+        if: startsWith(matrix.target, 'mac') && !matrix.cross
         run: node scripts/smoke-packaged.mjs
 
       - name: Upload installers
