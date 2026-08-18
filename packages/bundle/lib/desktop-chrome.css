@@ -48,6 +48,13 @@
   box-sizing: border-box !important;
 }
 
+/*
+ * The strip has to BE the hit target: app-region is read from the hit-tested
+ * element, so pointer-events:none hands the test to the column underneath —
+ * which has no drag region — and window dragging stops working (measured, not
+ * assumed). It therefore sits one step below the top, and the two things that
+ * legitimately live inside the band are raised above it below.
+ */
 #dsh-drag-strip {
   position: fixed;
   top: 0;
@@ -56,14 +63,26 @@
   height: var(--dsh-title-band);
   -webkit-app-region: drag;
   user-select: none;
-  z-index: 2147483647;
+  z-index: 2147483646;
 }
 
 /*
- * A draggable rect swallows every pointer event inside it regardless of
- * z-order; only an explicit no-drag removes an element from the region. Grant
- * it back to interactive elements so anything rendered into the top band stays
- * clickable.
+ * Raised over the strip so their first 38px stays usable: the column resize
+ * handle, and the overlay layer that hosts modals and their scrim (a click on
+ * the scrim dismisses, and the strip would otherwise eat the top of it).
+ * Upstream keeps these at z-index 2 and 20 within the frame.
+ */
+[class*='_handle'],
+[class*='_overlayLayer'] {
+  z-index: 2147483647 !important;
+}
+
+/*
+ * Two conditions must hold for something in the band to stay usable: the hit
+ * test has to reach it (the strip's pointer-events:none above) and the element
+ * itself must opt out of the drag region, or a press on it starts a window
+ * drag instead. Grant no-drag to interactive elements, the resize handles, and
+ * overlay children (a modal scrim is neither a button nor inside the dialog).
  */
 button,
 a,
@@ -71,6 +90,10 @@ input,
 select,
 textarea,
 [role='button'],
-[role='dialog'] * {
+[role='dialog'],
+[role='dialog'] *,
+[role='presentation'] > *,
+[class*='_handle'],
+[class*='_overlayLayer'] > * {
   -webkit-app-region: no-drag;
 }

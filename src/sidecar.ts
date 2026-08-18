@@ -20,6 +20,10 @@ export interface SidecarOptions extends SidecarPaths {
   readonly address: SidecarAddress
   /** Whether the launcher hid the native title bar, so the served chrome insets for a band. */
   readonly mergedTitleBar: boolean
+  /** PATH for the harness and everything it spawns; undefined inherits the launcher's. */
+  readonly path: string | undefined
+  /** Working directory the harness resolves relative paths against. */
+  readonly cwd: string
   /** Called with stderr/stdout lines for diagnostics. */
   readonly onLog: (line: string) => void
   /** Called when the process exits without stop() being requested. */
@@ -56,11 +60,15 @@ export class Sidecar {
 
   /** Spawn and resolve once the socket answers (rejects after timeoutMs). */
   async start(timeoutMs = 60_000): Promise<void> {
-    const { nodeBinary, harnessRoot, address, mergedTitleBar, onLog, onUnexpectedExit } = this.options
+    const { nodeBinary, harnessRoot, address, mergedTitleBar, path, cwd, onLog, onUnexpectedExit } = this.options
     const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
     const child = spawn(nodeBinary, [entry], {
+      // A GUI launch inherits the session manager's cwd (often `/`), which the
+      // harness would use as its relative-path base and sandbox root.
+      cwd,
       env: {
         ...process.env,
+        ...(path === undefined ? {} : { PATH: path }),
         DSH_DESKTOP_SOCKET: address.socketPath,
         DSH_DESKTOP_TOKEN: address.token,
         DSH_DESKTOP_PARENT_PID: String(process.pid),
@@ -68,6 +76,9 @@ export class Sidecar {
         ELECTRON_RUN_AS_NODE: undefined,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // node.exe is a console binary: without this, a GUI launch on Windows
+      // pops a console window, and every grandchild shell inherits it.
+      windowsHide: true,
     })
     this.child = child
     const forward = (chunk: Buffer): void => {

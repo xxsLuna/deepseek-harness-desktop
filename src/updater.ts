@@ -53,7 +53,7 @@ export function startUpdater(): () => void {
       notified = true
       const { response: button } = await dialog.showMessageBox({
         type: 'info',
-        message: `DeepSeek Harness Desktop ${version} is available`,
+        message: `DeepSeek Harness ${version} is available`,
         detail: 'Unsigned macOS builds cannot self-update; download the new version from the releases page.',
         buttons: ['Open Releases', 'Later'],
         defaultId: 0,

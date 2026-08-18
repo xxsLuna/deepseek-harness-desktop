@@ -1,18 +1,24 @@
 // Run the packaged app's built-in smoke (DSH_DESKTOP_SMOKE=1) against a
 // throwaway DSH_HOME and assert ALL-PASS. Locates the unpacked build in out/.
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Derive the names from the manifest, never spell them here: a productName
+// change would otherwise leave this gate looking for a bundle that no longer
+// exists and reporting "no packaged binary" instead of a real result.
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+const product = manifest.productName ?? manifest.name
+const linuxName = manifest.name
 
 const candidates = process.platform === 'darwin'
-  ? [
-      join('out', 'mac-arm64', 'DeepSeek Harness Desktop.app', 'Contents', 'MacOS', 'DeepSeek Harness Desktop'),
-      join('out', 'mac', 'DeepSeek Harness Desktop.app', 'Contents', 'MacOS', 'DeepSeek Harness Desktop'),
-    ]
+  ? ['mac-arm64', 'mac', 'mac-universal'].map((dir) => join('out', dir, `${product}.app`, 'Contents', 'MacOS', product))
   : process.platform === 'win32'
-    ? [join('out', 'win-unpacked', 'DeepSeek Harness Desktop.exe')]
-    : [join('out', 'linux-unpacked', 'deepseek-harness-desktop'), join('out', 'linux-arm64-unpacked', 'deepseek-harness-desktop')]
+    ? [join('out', 'win-unpacked', `${product}.exe`)]
+    : ['linux-unpacked', 'linux-arm64-unpacked'].map((dir) => join('out', dir, linuxName))
 
 const binary = candidates.find((path) => existsSync(path))
 if (binary === undefined) {
@@ -44,6 +50,11 @@ child.on('exit', (code) => {
   clearTimeout(timer)
   rmSync(home, { recursive: true, force: true })
   const pass = code === 0 && output.includes('SUMMARY ALL-PASS')
+  if (!pass && output.trim() === '') {
+    // The single-instance lock makes a second copy quit before it prints
+    // anything — the usual cause of a silent failure on a dev machine.
+    console.error('the app exited without output; another instance may hold the single-instance lock')
+  }
   console.log(pass ? 'packaged smoke: PASS' : `packaged smoke: FAIL (exit ${String(code)})`)
   process.exit(pass ? 0 : 1)
 })

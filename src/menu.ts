@@ -13,5 +13,8 @@ export function installMenu(): void {
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
+    // The macOS app menu carries About; elsewhere no role menu does, so the
+    // configured About panel would be unreachable.
+    ...(isMac ? [] : [{ role: 'help' as const, submenu: [{ role: 'about' as const }] }]),
   ]))
 }

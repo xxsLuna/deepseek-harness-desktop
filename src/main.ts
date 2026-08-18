@@ -8,7 +8,7 @@
  * Shutdown tears the sidecar down before the app exits.
  */
 import { app, BrowserWindow, crashReporter, protocol, screen } from 'electron'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,7 @@ import { createMainWindow, MERGED_TITLE_BAR } from './window.js'
 import { installMenu } from './menu.js'
 import { installTray } from './tray.js'
 import { installDownloads } from './downloads.js'
+import { resolveSidecarPath } from './login-path.js'
 import { startNotifications } from './notifications.js'
 import { startPickerHost } from './picker-host.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
@@ -104,6 +105,8 @@ async function run(): Promise<void> {
     ...paths,
     address,
     mergedTitleBar: MERGED_TITLE_BAR,
+    path: resolveSidecarPath(process.env, process.platform),
+    cwd: homedir(),
     onLog: (line) => console.log(`[sidecar] ${line}`),
     onUnexpectedExit: (code) => {
       console.error(`[sidecar] exited unexpectedly (code ${String(code)}); restarting`)
@@ -198,7 +201,7 @@ async function run(): Promise<void> {
   const tray = installTray(win)
   void tray
 
-  const stopDownloads = installDownloads(win.webContents.session, win)
+  const stopDownloads = installDownloads(win.webContents.session)
   app.on('before-quit', () => stopDownloads())
 
   if (!app.isPackaged) {

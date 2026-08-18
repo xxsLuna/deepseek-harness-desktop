@@ -125,7 +125,12 @@ export function startPickerHost(address: SidecarAddress, win: BrowserWindow): ()
       res.on('end', retry)
       res.on('close', retry)
     })
-    req.on('error', retry)
+    // A reset while stopping is the teardown itself, not a fault.
+    req.on('error', (error: NodeJS.ErrnoException) => {
+      if (stopped) return
+      if (error.code !== 'ECONNRESET') console.warn('[picker] subscription error:', error.message)
+      retry()
+    })
     req.end()
     active = req
   }

@@ -18,6 +18,13 @@ files:
   - harness.json
 asar: true
 npmRebuild: false
+
+# The tray reads its image from disk at runtime, so the assets ship unpacked
+# beside the app rather than only feeding the icon generator.
+extraResources:
+  - from: assets
+    to: assets
+    filter: ['*.png']
 extraMetadata:
   desktop:
     macUpdatesSigned: false

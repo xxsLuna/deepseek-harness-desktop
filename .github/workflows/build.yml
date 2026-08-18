@@ -69,7 +69,9 @@ jobs:
 
       - name: Verify payload (macOS)
         if: startsWith(matrix.target, 'mac')
-        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/DeepSeek\ Harness\ Desktop.app | head -1)/Contents/Resources"
+        # Glob the bundle rather than naming it: a productName change must not
+        # silently turn this gate into a no-op.
+        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources"
 
       - name: Verify payload (Windows)
         if: startsWith(matrix.target, 'win')

@@ -72,7 +72,11 @@ export function createMainWindow(): BrowserWindow {
   win.webContents.on('did-finish-load', publishFullscreen)
 
   win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(`${APP_ORIGIN}/`)) event.preventDefault()
+    if (url.startsWith(`${APP_ORIGIN}/`)) return
+    event.preventDefault()
+    // Model output links without target="_blank" navigate the tab; dropping
+    // them silently would make a plain link, or a mailto:, do nothing.
+    if (/^(?:https?|mailto):/.test(url)) void shell.openExternal(url)
   })
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://') || url.startsWith('http://')) void shell.openExternal(url)
