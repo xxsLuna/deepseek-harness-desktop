@@ -264,6 +264,33 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(res.headers['content-disposition']).toContain('attachment')
   })
 
+  it('keeps the desktop transport decisions even under a hostile home overlay', async () => {
+    // The home layer is applied for CLI parity and lands AFTER our patch, so
+    // without re-asserting these a user file could bind a real TCP port, mount
+    // a WebSocket carrier the app scheme cannot serve, or restore an OS chooser
+    // this process cannot bring to the front.
+    const graph = await socketRequest(socketPath, { path: '/' })
+    const manifest = /window\.__DSH_BOOT__ = (\{.*?\})<\/script>/.exec(graph.body)
+    const ids = (JSON.parse(manifest![1]!) as { entries: { id: string }[] }).entries.map((e) => e.id)
+    expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
+    expect(ids).toContain('@dsh-desktop/connection')
+    // The picker must be ours, i.e. the native interaction served by the
+    // launcher rather than a chooser the sidecar spawns.
+    const requests = await socketRequest(socketPath, { path: '/desktop/picker/requests', firstChunkOnly: true })
+    expect(requests.status).toBe(200)
+  })
+
+  it('reports a working directory that is not the filesystem root', async () => {
+    // A GUI launch inherits the session manager's cwd; upstream derives the
+    // sandbox workspace-write fallback root from it, so `/` would widen the
+    // boundary to the whole filesystem.
+    const described = await rpc(socketPath, 'host.describe')
+    expect(described.ok).toBe(true)
+    const cwd = (described.value as { cwd: string }).cwd
+    expect(cwd).not.toBe('/')
+    expect(cwd.length).toBeGreaterThan(1)
+  })
+
   it.skipIf(process.platform === 'win32')('holds no TCP listeners', async () => {
     const { execFileSync } = await import('node:child_process')
     try {

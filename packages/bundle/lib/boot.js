@@ -59,6 +59,16 @@ for (const entry of layers) {
 
 const overlays = []
 
+// The home layer is applied for CLI parity, but it must not be able to revert
+// the decisions this surface is BUILT on: re-enabling `webserver`/`connection`
+// would bind a real TCP port and mount a WebSocket carrier the app scheme
+// cannot serve, and re-enabling `directory-picker` restores an OS chooser this
+// process cannot bring to the front (or fails boot on a duplicate service).
+// Everything else in the home layer still applies.
+for (const id of ['web-startup', 'webserver', 'web-runtime', 'connection', 'client-hmr', 'directory-picker']) {
+  overlays.push({ id, disabled: true })
+}
+
 // Agent presets ship inside the dsh package and are pointed at by the
 // launcher, not by any bundle — without this overlay no preset exists and
 // every session.create fails with `agent-preset-not-found`.
