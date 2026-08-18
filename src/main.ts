@@ -19,6 +19,7 @@ import { createMainWindow } from './window.js'
 import { installMenu } from './menu.js'
 import { installTray } from './tray.js'
 import { startNotifications } from './notifications.js'
+import { startPickerHost } from './picker-host.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
 import { DEEP_LINK_SCHEME, deepLinkFromArgv, parseDeepLink } from './deep-link.js'
 import { startUpdater } from './updater.js'
@@ -162,12 +163,21 @@ async function run(): Promise<void> {
   const tray = installTray(win)
   void tray
 
+  if (!app.isPackaged) {
+    const { installDevTuning } = await import('./dev-tuning.js')
+    installDevTuning(win, fileURLToPath(new URL('..', import.meta.url)))
+  }
+
   win.once('ready-to-show', () => win.show())
   await win.loadURL('dsh://app/')
 
   void sidecarReady.then(() => {
     const stopNotifications = startNotifications(address, win)
-    app.on('before-quit', () => stopNotifications())
+    const stopPickerHost = startPickerHost(address, win)
+    app.on('before-quit', () => {
+      stopNotifications()
+      stopPickerHost()
+    })
   })
 
   const stopUpdater = startUpdater()

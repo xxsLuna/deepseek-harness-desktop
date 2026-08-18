@@ -1,0 +1,13 @@
+{
+  "name": "@dsh-desktop/picker",
+  "version": "0.1.0-rc.6",
+  "description": "directoryPicker provider that delegates to the launcher's window-owned Electron dialog",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-host-directory-picker": "*"
+  }
+}

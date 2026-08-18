@@ -22,6 +22,23 @@ export const APP_ORIGIN = 'dsh://app'
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'proxy-connection', 'upgrade'])
 
 /**
+ * Route prefix the launcher owns and the renderer must never reach. This proxy
+ * injects the bearer token on every forwarded request, so without this fence a
+ * page could subscribe to launcher-only channels and forge their answers — for
+ * the picker that means opening a workspace at a path it chose.
+ */
+const HOST_ONLY_PREFIX = '/desktop/'
+
+/**
+ * Whether a pathname belongs to the launcher-only surface.
+ * @param pathname - decoded request pathname.
+ * @returns true when the renderer must be refused.
+ */
+export function isHostOnlyPath(pathname: string): boolean {
+  return pathname === '/desktop' || pathname.startsWith(HOST_ONLY_PREFIX)
+}
+
+/**
  * Whether a renderer request may reach the sidecar at all.
  * @param req - the protocol-handler request.
  * @returns true for same-origin (or marker-less) requests only.
@@ -43,6 +60,9 @@ export function createSocketProxy(address: SidecarAddress): (req: Request) => Pr
       return new Response('forbidden', { status: 403 })
     }
     const url = new URL(req.url)
+    if (isHostOnlyPath(decodeURIComponent(url.pathname))) {
+      return new Response('forbidden', { status: 403 })
+    }
 
     const headers: Record<string, string> = {}
     req.headers.forEach((value, name) => {

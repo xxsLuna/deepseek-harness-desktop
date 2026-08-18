@@ -6,3 +6,9 @@ spike/
 packages/connection/lib/client.js
 *.log
 .DS_Store
+dev-overrides.css
+dev-eval.js
+dev-eval.out.json
+dev-capture.request
+dev-capture.png
+dev-click.request

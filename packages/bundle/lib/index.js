@@ -14,6 +14,7 @@ import z from '@deepseek-ai/schemastery'
 import { addHarnessSourceSection } from '@deepseek-ai/dsh-app-boot'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import * as FrontendStatic from '@deepseek-ai/dsh-host-frontend-static'
+import { injectDesktopChrome } from './chrome.js'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-runtime'
@@ -73,6 +74,11 @@ async function pipeResponse(response, res) {
  */
 export function apply(ctx, config) {
   ctx.plugin(FrontendStatic, { distIndex: resolveDistIndex() })
+
+  // The merged title band: served with the document so it is present before
+  // the renderer parses anything (no flash, and it survives every reload —
+  // frontend-static re-runs the taps per index response).
+  ctx.effect(() => ctx.webServer.tapIndex(injectDesktopChrome), 'desktop-runtime: chrome index tap')
 
   // SSE downlink: exact routes beat the /api prefix route, so these two paths
   // reach the gateway's fetch handler (which streams SSE) instead of the web

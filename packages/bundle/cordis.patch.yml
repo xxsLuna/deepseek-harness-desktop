@@ -23,6 +23,13 @@
 - id: client-hmr
   disabled: true
 
+# The auto-chooser would pick the -native backend, whose OS chooser is spawned
+# by the harness process. That assumes the harness is the foreground GUI app;
+# here it is a background sidecar, so the dialog opens but can never come
+# forward. Our provider delegates the pick to the launcher's own dialog.
+- id: directory-picker
+  disabled: true
+
 - insert:
     # The socket-path carrier: provides `webServer` with no TCP port. The
     # launcher (Electron main) supplies the socket path and bearer token.
@@ -45,3 +52,14 @@
       name: '@dsh-desktop/connection'
       config:
         trustedHosts: []
+
+    # directoryPicker with the `native` interaction, delegated over the carrier
+    # socket to the launcher's window-owned Electron dialog. Replaces the
+    # disabled auto-chooser row above.
+    - id: desktop-picker
+      name: '@dsh-desktop/picker'
+
+    # The auto-chooser used to mount the matching client surface itself; with
+    # it disabled the surface row is composed explicitly.
+    - id: ui-directory-picker
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-native'

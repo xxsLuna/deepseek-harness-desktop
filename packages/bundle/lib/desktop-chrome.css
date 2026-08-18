@@ -1,0 +1,68 @@
+/*
+ * Desktop chrome: the UI paints the title band itself.
+ *
+ * Injected at the END of <body> by the desktop-runtime index tap. The body
+ * anchor is load-bearing, not cosmetic: client bundles append
+ * <style data-plugin> to document.head when their module materializes,
+ * including dsh-client-ui-layout, which owns the column classes below at the
+ * same (0,1,0) specificity as these attribute selectors. Equal specificity
+ * breaks on document position, so a <head> anchor loses to those sheets while
+ * an element at body end follows all of them.
+ */
+:root {
+  --dsh-title-band: 38px;
+}
+
+/*
+ * macOS fullscreen hides the traffic lights, so the band would be dead space.
+ * The launcher publishes the state as this attribute (src/window.ts).
+ */
+:root[data-dsh-fullscreen='true'] {
+  --dsh-title-band: 0px;
+}
+
+/*
+ * Columns reach the window top; only their CONTENT is inset, so the sidebar
+ * fill and its 1px separator continue up into the band and a collapsed sidebar
+ * tracks automatically — nothing is faked. Padding, never margin: a top margin
+ * collapses through #root and body, pushing body to y=38 and adding a viewport
+ * scrollbar. box-sizing is required: upstream leaves the columns at content-box.
+ *
+ * The substrings match the emitted `<hash>_<local>` CSS-module names. Upstream
+ * owes us nothing for those locals, so tests/contract asserts each one still
+ * matches exactly one element — a rename fails loudly instead of shipping a
+ * broken layout.
+ */
+[class*="_sidebarCol"],
+[class*="_centerCol"],
+[class*="_detailsCol"] {
+  padding-top: var(--dsh-title-band) !important;
+  box-sizing: border-box !important;
+}
+
+#dsh-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--dsh-title-band);
+  -webkit-app-region: drag;
+  user-select: none;
+  z-index: 2147483647;
+}
+
+/*
+ * A draggable rect swallows every pointer event inside it regardless of
+ * z-order; only an explicit no-drag removes an element from the region. Grant
+ * it back to interactive elements so anything rendered into the top band stays
+ * clickable.
+ */
+button,
+a,
+input,
+select,
+textarea,
+[role='button'],
+[role='dialog'] * {
+  -webkit-app-region: no-drag;
+}

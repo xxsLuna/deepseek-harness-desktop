@@ -176,6 +176,39 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(res.body).toContain('__ModuleLoader__.load')
   })
 
+  it('serves the title-band chrome with the document', async () => {
+    const res = await socketRequest(socketPath, { path: '/' })
+    // The block must follow the app root: client plugin CSS lands in <head> at
+    // runtime and would win the cascade at equal specificity otherwise.
+    expect(res.body.indexOf('data-dsh-desktop-chrome')).toBeGreaterThan(res.body.indexOf('id="root"'))
+    expect(res.body).toContain('--dsh-title-band')
+    expect(res.body).toContain('-webkit-app-region: drag')
+  })
+
+  it('still emits the column classes the title band insets', async () => {
+    // The band selects upstream CSS-module locals by substring. A rename would
+    // silently un-inset the UI, so fail here instead: each local must appear in
+    // the layout bundle that owns the frame.
+    const res = await socketRequest(socketPath, { path: '/plugins/@deepseek-ai/dsh-client-ui-layout/client.js' })
+    expect(res.status).toBe(200)
+    for (const local of ['_sidebarCol', '_centerCol', '_detailsCol']) {
+      expect(res.body, `upstream no longer emits ${local}`).toContain(local)
+    }
+  })
+
+  it('exposes the launcher-only picker channel, which rejects an unknown pick id', async () => {
+    // The picker replaces the upstream native backend, whose OS chooser cannot
+    // be fronted from this background sidecar.
+    const answer = await socketRequest(socketPath, {
+      path: '/desktop/picker/answer',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'no-such-pick', path: '/tmp' }),
+    })
+    expect(answer.status).toBe(200)
+    expect(answer.body).toContain('"accepted":false')
+  })
+
   it.skipIf(process.platform === 'win32')('holds no TCP listeners', async () => {
     const { execFileSync } = await import('node:child_process')
     try {
