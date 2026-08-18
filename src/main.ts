@@ -18,6 +18,7 @@ import { Sidecar, type SidecarPaths } from './sidecar.js'
 import { createMainWindow, MERGED_TITLE_BAR } from './window.js'
 import { installMenu } from './menu.js'
 import { installTray } from './tray.js'
+import { installShortcuts } from './shortcuts.js'
 import { installDownloads } from './downloads.js'
 import { resolveSidecarPath } from './login-path.js'
 import { startNotifications } from './notifications.js'
@@ -202,7 +203,11 @@ async function run(): Promise<void> {
   void tray
 
   const stopDownloads = installDownloads(win.webContents.session)
-  app.on('before-quit', () => stopDownloads())
+  const stopShortcuts = installShortcuts(win)
+  app.on('before-quit', () => {
+    stopDownloads()
+    stopShortcuts()
+  })
 
   if (!app.isPackaged) {
     const { installDevTuning } = await import('./dev-tuning.js')
