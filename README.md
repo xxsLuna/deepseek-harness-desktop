@@ -41,9 +41,19 @@ The app version tracks the upstream harness version exactly. A desktop release `
 
 The app is a thin Electron shell around the **unmodified** published harness:
 
-- `scripts/stage-harness.mjs` installs the pinned `@deepseek-ai/dsh` tree; three small plugin packages of ours are composed in through the harness's own patch-layer system (no upstream file is edited): a `webServer` provider that listens on a socket path with a bearer token, an SSE browser carrier replacing the WebSocket one (WebSockets cannot ride a custom scheme), and the desktop bundle overlay.
-- The main process spawns that tree under a bundled stock Node (no Electron ABI rebuilds), and `protocol.handle('dsh')` proxies the window's requests to the socket.
+- `scripts/stage-harness.mjs` installs the pinned `@deepseek-ai/dsh` tree; four small plugin packages of ours are composed in through the harness's own patch-layer system (no upstream file is edited): a `webServer` provider that listens on a socket path with a bearer token, an SSE browser carrier replacing the WebSocket one (WebSockets cannot ride a custom scheme), a directory picker that delegates to the launcher's dialog, and the desktop bundle overlay.
+- The main process spawns that tree under a bundled stock Node, so every native prebuild stays valid — no Electron ABI rebuilds, and `node-pty`, the packaged ripgrep and `node:sqlite` all keep working. `protocol.handle('dsh')` proxies the window's requests to the socket.
 - Coupling to upstream is confined to the seams asserted by `tests/contract` — the version-tracking canary.
+
+### What running inside a desktop app changes
+
+Some upstream behaviour assumes the harness is the foreground GUI process, or a
+browser. Those assumptions are met here rather than patched upstream:
+
+- **The folder picker.** Upstream opens an OS chooser from the harness process; a background sidecar can create one but never bring it forward. The pick is delegated to the launcher's own window-modal dialog.
+- **PATH.** A Finder, Dock, or `.desktop` launch inherits the session manager's minimal environment, so the agent's shell tools would not find `git`, `node`, or anything else installed through a shell profile. The user's login shell is asked once at startup.
+- **Exports.** A page-initiated download is a no-op in Electron without a handler; session exports land in the OS download folder and the notice reveals the file.
+- **The title bar** is merged into the UI on macOS only. Windows and Linux keep their native frame, and the served stylesheet insets nothing there.
 
 ## Development
 
