@@ -99,3 +99,4 @@ Packaging locally: `npm run fetch-node && npx electron-builder --<mac|win|linux>
 ## License
 
 [MIT](LICENSE). DeepSeek Harness is © DeepSeek AI, MIT-licensed — see [NOTICE](NOTICE).
+
