@@ -111,6 +111,7 @@ export function startNotifications(address: SidecarAddress, win: BrowserWindow):
   // A turn-finished notice only makes sense after a run actually started;
   // session-status fires running:false at creation too, so track transitions.
   const runningSessions = new Set<string>()
+  console.log('[notifications] watching approvals, questions, and finished turns')
   const host = subscribeSse(address, '/api/events.host', (frame) => {
     if (frame.type !== 'host/session-status' || typeof frame.sessionId !== 'string') return
     if (frame.running === true) {
