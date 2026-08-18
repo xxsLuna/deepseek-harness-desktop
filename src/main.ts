@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { createSidecarAddress } from './socket-path.js'
 import { createSocketProxy } from './socket-proxy.js'
 import { Sidecar, type SidecarPaths } from './sidecar.js'
-import { createMainWindow } from './window.js'
+import { createMainWindow, MERGED_TITLE_BAR } from './window.js'
 import { installMenu } from './menu.js'
 import { installTray } from './tray.js'
 import { startNotifications } from './notifications.js'
@@ -23,6 +23,31 @@ import { startPickerHost } from './picker-host.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
 import { DEEP_LINK_SCHEME, deepLinkFromArgv, parseDeepLink } from './deep-link.js'
 import { startUpdater } from './updater.js'
+
+/** Product name shown in the menu bar, Dock, About panel, and notifications. */
+const APP_NAME = 'DeepSeek Harness'
+
+/**
+ * The bundled harness version, read from the pin this app was built against.
+ * Shown in the About panel so a bug report names the harness, not just the
+ * shell — the two track each other but the shell can be re-released.
+ */
+const HARNESS_VERSION = (() => {
+  try {
+    const pin = JSON.parse(readFileSync(fileURLToPath(new URL('../harness.json', import.meta.url)), 'utf8')) as { harness?: string }
+    return pin.harness ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
+// Unpackaged Electron reports its own name, and the menu bar / notification
+// source read app.getName() — so set it before ready, ahead of anything that
+// builds a menu or shows a notification. In a packaged app the bundle metadata
+// already says this; calling it here keeps dev and packaged identical.
+app.setName(APP_NAME)
+// Windows groups taskbar entries and toast notifications by this id.
+if (process.platform === 'win32') app.setAppUserModelId('com.github.xxsluna.deepseek-harness-desktop')
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'dsh',
@@ -77,6 +102,7 @@ async function run(): Promise<void> {
   const sidecar = new Sidecar({
     ...paths,
     address,
+    mergedTitleBar: MERGED_TITLE_BAR,
     onLog: (line) => console.log(`[sidecar] ${line}`),
     onUnexpectedExit: (code) => {
       console.error(`[sidecar] exited unexpectedly (code ${String(code)}); restarting`)
@@ -102,6 +128,14 @@ async function run(): Promise<void> {
   })
 
   await app.whenReady()
+
+  // The About panel is otherwise labelled from the Electron bundle in dev.
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    applicationVersion: app.getVersion(),
+    version: `harness ${HARNESS_VERSION}`,
+    copyright: 'MIT — bundles DeepSeek Harness (c) DeepSeek AI',
+  })
 
   // Requests queue on this gate until the sidecar answers; a startup failure
   // resolves the gate to an error page instead of a dead window.

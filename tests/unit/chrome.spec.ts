@@ -27,9 +27,21 @@ describe('injectDesktopChrome', () => {
       '-webkit-app-region: drag',
       "data-dsh-fullscreen='true'",
       "id = 'dsh-drag-strip'",
+      '--dsh-title-band',
     ]) {
       expect(block).toContain(needle)
     }
+  })
+
+  it('bakes the band height from the launcher decision, not a runtime attribute', () => {
+    // Publishing the height at runtime would flash an unbanded layout on every
+    // load; a platform keeping its native title bar must get no inset at all.
+    process.env.DSH_DESKTOP_TITLE_BAND = 'merged'
+    expect(chromeBlock()).toContain('--dsh-title-band:38px')
+    process.env.DSH_DESKTOP_TITLE_BAND = 'native'
+    expect(chromeBlock()).toContain('--dsh-title-band:0px')
+    delete process.env.DSH_DESKTOP_TITLE_BAND
+    expect(chromeBlock()).toContain('--dsh-title-band:0px')
   })
 
   it('never uses a top margin for the inset', () => {

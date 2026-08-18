@@ -1,9 +1,11 @@
 appId: com.github.xxsluna.deepseek-harness-desktop
-productName: DeepSeek Harness Desktop
+productName: DeepSeek Harness
 copyright: MIT — bundles DeepSeek Harness (c) DeepSeek AI
 
 directories:
   output: out
+  # build/ is the harness staging dir, so icons live in assets/
+  buildResources: assets
 
 # The asar holds only this shell's compiled main; the harness tree and the
 # stock Node runtime ship beside it so native prebuilds and spawned binaries
@@ -13,6 +15,7 @@ directories:
 files:
   - dist/**
   - package.json
+  - harness.json
 asar: true
 npmRebuild: false
 extraMetadata:

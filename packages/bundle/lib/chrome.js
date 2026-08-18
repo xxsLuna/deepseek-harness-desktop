@@ -26,11 +26,23 @@ function readAsset(file) {
 }
 
 /**
+ * The band height this launch serves. The launcher owns the decision (it is the
+ * process that hid, or kept, the native title bar) and passes it in the
+ * sidecar's environment; anything other than `merged` means the platform draws
+ * its own title bar, so the UI must not be inset.
+ * @returns {string} a CSS length.
+ */
+function bandHeight() {
+  return process.env.DSH_DESKTOP_TITLE_BAND === 'merged' ? '38px' : '0px'
+}
+
+/**
  * Build the chrome block appended to the served index document.
  * @returns {string} the `<style>` + `<script>` block.
  */
 export function chromeBlock() {
-  return `<style data-dsh-desktop-chrome>${readAsset('desktop-chrome.css')}</style>`
+  const root = `:root{--dsh-title-band:${bandHeight()}}`
+  return `<style data-dsh-desktop-chrome>${root}${readAsset('desktop-chrome.css')}</style>`
     + `<script data-dsh-desktop-chrome>${readAsset('desktop-chrome.js')}</script>`
 }
 

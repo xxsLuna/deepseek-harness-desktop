@@ -9,9 +9,12 @@
  * breaks on document position, so a <head> anchor loses to those sheets while
  * an element at body end follows all of them.
  */
-:root {
-  --dsh-title-band: 38px;
-}
+/*
+ * The band height is baked in by the index tap from the launcher's decision
+ * (DSH_DESKTOP_TITLE_BAND): a platform keeping its own title bar gets 0 and no
+ * inset. Baking it, rather than publishing an attribute at runtime, keeps a
+ * load from flashing an unbanded layout.
+ */
 
 /*
  * macOS fullscreen hides the traffic lights, so the band would be dead space.
@@ -19,6 +22,11 @@
  */
 :root[data-dsh-fullscreen='true'] {
   --dsh-title-band: 0px;
+}
+
+/* No band, no drag strip — it would swallow pointer events for nothing. */
+:root[data-dsh-fullscreen='true'] #dsh-drag-strip {
+  display: none;
 }
 
 /*

@@ -18,6 +18,8 @@ export interface SidecarPaths {
 
 export interface SidecarOptions extends SidecarPaths {
   readonly address: SidecarAddress
+  /** Whether the launcher hid the native title bar, so the served chrome insets for a band. */
+  readonly mergedTitleBar: boolean
   /** Called with stderr/stdout lines for diagnostics. */
   readonly onLog: (line: string) => void
   /** Called when the process exits without stop() being requested. */
@@ -54,7 +56,7 @@ export class Sidecar {
 
   /** Spawn and resolve once the socket answers (rejects after timeoutMs). */
   async start(timeoutMs = 60_000): Promise<void> {
-    const { nodeBinary, harnessRoot, address, onLog, onUnexpectedExit } = this.options
+    const { nodeBinary, harnessRoot, address, mergedTitleBar, onLog, onUnexpectedExit } = this.options
     const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
     const child = spawn(nodeBinary, [entry], {
       env: {
@@ -62,6 +64,7 @@ export class Sidecar {
         DSH_DESKTOP_SOCKET: address.socketPath,
         DSH_DESKTOP_TOKEN: address.token,
         DSH_DESKTOP_PARENT_PID: String(process.pid),
+        DSH_DESKTOP_TITLE_BAND: mergedTitleBar ? 'merged' : 'native',
         ELECTRON_RUN_AS_NODE: undefined,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
