@@ -95,10 +95,10 @@ jobs:
         if: startsWith(matrix.target, 'win')
         run: node scripts/smoke-packaged.mjs
 
-      # Observational until unsigned-.app launch on hosted runners is proven.
+      # Promoted to a required gate: an unsigned .app does launch and render on
+      # a hosted runner (proven on mac-arm64), so a regression here is real.
       - name: Packaged smoke (macOS)
         if: startsWith(matrix.target, 'mac')
-        continue-on-error: true
         run: node scripts/smoke-packaged.mjs
 
       - name: Upload installers
