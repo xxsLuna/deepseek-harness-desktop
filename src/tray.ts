@@ -32,8 +32,9 @@ function trayImage(): Electron.NativeImage {
  * Install the tray. Returns the Tray to keep it referenced (GC otherwise
  * removes the icon on some platforms).
  * @param win - the window the tray controls.
+ * @param checkForUpdates - manual update check; omitted leaves the item out.
  */
-export function installTray(win: BrowserWindow): Tray {
+export function installTray(win: BrowserWindow, checkForUpdates?: () => void): Tray {
   const tray = new Tray(trayImage())
   tray.setToolTip('DeepSeek Harness')
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -52,7 +53,8 @@ export function installTray(win: BrowserWindow): Tray {
       label: 'Open Data Folder',
       click: () => void shell.openPath(resolveDshHome()),
     },
-    { type: 'separator' },
+    ...(checkForUpdates === undefined ? [] : [{ label: 'Check for Updates…', click: checkForUpdates }]),
+    { type: 'separator' as const },
     { role: 'quit' },
   ]))
   tray.on('click', () => {

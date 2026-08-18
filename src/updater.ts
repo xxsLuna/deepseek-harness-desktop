@@ -32,24 +32,40 @@ function isDifferentVersion(remote: string, local: string): boolean {
 }
 
 /** Start periodic checks; returns a disposer. */
-export function startUpdater(): () => void {
+export function startUpdater(): { stop: () => void, checkNow: () => void } {
   const mode = updateMode({
     platform: process.platform,
     packaged: app.isPackaged,
     macUpdatesSigned: macUpdatesSigned(),
   })
-  if (mode === 'disabled') return () => {}
+  if (mode === 'disabled') {
+    return {
+      stop: () => {},
+      // An unpackaged or unsupported build has nothing to check; say so rather
+      // than leaving a menu item that appears to do nothing.
+      checkNow: () => {
+        void dialog.showMessageBox({
+          type: 'info',
+          message: 'Updates are not available for this build',
+          detail: app.isPackaged
+            ? 'This platform cannot self-update; download new versions from the releases page.'
+            : 'Development builds are not updated.',
+        })
+      },
+    }
+  }
 
   let timer: NodeJS.Timeout | undefined
   let notified = false
 
-  const checkNotifyOnly = async (): Promise<void> => {
+  const checkNotifyOnly = async (manual = false): Promise<void> => {
     try {
       const response = await fetch(FEED_MAC_YML, { redirect: 'follow' })
       if (!response.ok) return
       const text = await response.text()
       const version = /^version:\s*(.+)$/m.exec(text)?.[1]
-      if (version === undefined || !isDifferentVersion(version, app.getVersion()) || notified) return
+      if (version === undefined || !isDifferentVersion(version, app.getVersion())) return
+      if (notified && !manual) return
       notified = true
       const { response: button } = await dialog.showMessageBox({
         type: 'info',
@@ -77,5 +93,18 @@ export function startUpdater(): () => void {
   const check = mode === 'auto' ? checkAuto : checkNotifyOnly
   void check()
   timer = setInterval(() => void check(), CHECK_INTERVAL_MS)
-  return () => clearTimeout(timer)
+  return {
+    stop: () => clearInterval(timer),
+    // A manual check reports "up to date" too; the scheduled one stays quiet.
+    checkNow: () => {
+      if (mode === 'auto') {
+        void checkAuto()
+        return
+      }
+      void checkNotifyOnly(true).then(() => {
+        if (notified) return
+        void dialog.showMessageBox({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
+      })
+    },
+  }
 }

@@ -199,7 +199,10 @@ async function run(): Promise<void> {
     win.hide()
   })
 
-  const tray = installTray(win)
+  const updater = startUpdater()
+  app.on('before-quit', () => updater.stop())
+
+  const tray = installTray(win, updater.checkNow)
   void tray
 
   const stopDownloads = installDownloads(win.webContents.session)
@@ -225,9 +228,6 @@ async function run(): Promise<void> {
       stopPickerHost()
     })
   })
-
-  const stopUpdater = startUpdater()
-  app.on('before-quit', () => stopUpdater())
 
   if (process.env.DSH_DESKTOP_SMOKE === '1') await runSmoke(win, () => sidecar.stop())
 }
