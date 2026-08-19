@@ -16,6 +16,7 @@
  * inherits whichever the page is painting.
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { navDividerCss } from './nav-divider.js'
 
 /** Mirrors src/desktop-settings.ts; the launcher is the authority. */
 interface DesktopSettings {
@@ -317,9 +318,22 @@ export const inject = ['slots']
  */
 export function apply(ctx: {
   slots: { register: (options: object, component: () => ReactNode) => () => void }
+  effect: (execute: () => () => void, label?: string) => unknown
 }): void {
   ctx.slots.register(
     { name: 'settings.section', id: 'desktop', order: 100, label: 'Desktop Settings', registrant: '@dsh-desktop/settings' },
     DesktopSettingsSection,
   )
+  // Through ctx.effect, so unloading this plugin takes the rule with it —
+  // otherwise the divider would outlive the entry it belongs to and point at
+  // whichever section happened to end up last.
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.dataset.plugin = '@dsh-desktop/settings'
+    style.textContent = navDividerCss
+    document.head.append(style)
+    return () => {
+      style.remove()
+    }
+  }, 'desktop-settings-nav-divider')
 }
