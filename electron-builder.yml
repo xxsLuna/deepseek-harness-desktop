@@ -19,6 +19,12 @@ files:
 asar: true
 npmRebuild: false
 
+# Electron ships 55 Chromium locale packs (47MB) by default. The app's own UI
+# is English and Korean, and the harness sends its own strings, so the rest are
+# 45MB and 53 files of pure install cost. Chromium falls back to en-US for any
+# locale not listed.
+electronLanguages: [en-US, ko]
+
 # The tray and the window icon are read from disk at runtime, so the assets
 # ship unpacked beside the app rather than only feeding the icon generator.
 extraResources:
@@ -37,11 +43,12 @@ mac:
   identity: null
 
 # zip is omitted on Windows: NSIS + latest.yml is the updater feed there, and
-# 7za exhausts hosted-runner memory zipping the ~700MB payload. The same 7za
-# failure hits the NSIS differential package and its max-compression internal
-# archive, so differential updates are off (updates download the full
-# installer) and compression is store — trading installer size for a build
-# that fits hosted-runner memory.
+# 7za exhausted hosted-runner memory zipping the ~700MB payload this used to
+# be. scripts/prune-payload.mjs removed 112MB and ~20,000 files from the
+# harness tree and electronLanguages another 45MB, which is what makes
+# compression affordable again — see the `compression` note below.
+# Differential packages stay off: they need their own max-compression pass over
+# the whole payload, which is the exact 7za failure this is recovering from.
 win:
   target: [nsis]
   # signExecutable, NOT signAndEditExecutable: the latter also skips rcedit,
@@ -58,7 +65,12 @@ nsis:
   allowToChangeInstallationDirectory: true
   differentialPackage: false
 
-compression: store
+# `normal` rather than `store` or `maximum`. store (no compression) made the
+# installer as large as the payload; maximum is what exhausted 7za's memory on
+# a hosted runner. normal is LZMA at a modest dictionary size — most of the
+# ratio, a fraction of the peak memory. Revisit maximum only with a CI run to
+# prove it, not on the assumption that a smaller payload made it safe.
+compression: normal
 
 linux:
   target: [AppImage, deb]

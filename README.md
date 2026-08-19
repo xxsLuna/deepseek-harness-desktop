@@ -98,6 +98,7 @@ Everything is project-local (`node_modules`), nothing is installed system-wide:
 npm ci
 npm run stage        # install the pinned harness into build/harness
 npm run build        # compile main, build the client bundle, restage local packages
+npm run prune:dry    # report what packaging would strip from build/harness
 npm run dev          # launch the app
 npm test             # unit tests
 npm run test:contract  # boot the sidecar over a socket and assert the coupling contract
@@ -107,7 +108,20 @@ Docker equivalents (checks and Linux packaging): `docker compose -f docker/compo
 
 `tests/contract` is the version-tracking canary: it boots the staged harness over a socket without Electron and asserts every seam this app depends on — the transport, the agent presets, session creation and export, the interaction plane, and the native tool paths (`node-pty`, the packaged ripgrep, `node:sqlite`). An upstream bump that breaks one of them fails there by name.
 
-Packaging locally: `npm run fetch-node && npx electron-builder --<mac|win|linux>` then `node scripts/verify-payload.mjs <resources dir>` and `node scripts/smoke-packaged.mjs`.
+Packaging locally: `npm run fetch-node && npm run prune && npx electron-builder --<mac|win|linux>` then `node scripts/verify-payload.mjs <resources dir>` and `node scripts/smoke-packaged.mjs`.
+
+`npm run prune` is destructive on `build/harness` and pass-specific: it strips
+the sourcemaps, declarations, docs, test trees and foreign-platform prebuilds
+that the staged tree carries but the app never loads, taking it from 221MB and
+32,796 files to 109MB and 12,903 files. Add `--platform`/`--arch` when
+cross-building. Run it after `npm run build`, never before — `build` restages
+the local packages.
+
+It is a packaging step, not a dev step: `npm run typecheck` compiles
+`packages/connection` and `packages/settings` against the staged tree's
+declarations, so run `npm run stage` to restore the full tree before
+typechecking. `npm test` and `npm run test:contract` pass either way, and CI
+prunes after building so the contract suite exercises the tree that ships.
 
 ## License
 
