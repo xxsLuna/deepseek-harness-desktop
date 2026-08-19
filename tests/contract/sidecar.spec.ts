@@ -96,6 +96,14 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // Electron's own binary, as the launcher spawns it — not this runner's Node.
     // The harness boots on Electron's Node in the shipped app, so booting it on
     // anything else here would leave the one runtime that matters untested.
+    //
+    // This is why `test:contract` passes --no-file-parallelism. Two spec files
+    // spawning the same executable at once made the kernel refuse the exec:
+    // ETXTBSY (errno -26) on both Linux runners and EBUSY (-4082) on Windows,
+    // while macOS tolerated it and native-tools.spec.ts — which reaches the same
+    // binary through execFileSync — passed in the same run. Serialising the
+    // files is the fix; these are integration tests that boot a real harness, so
+    // they were never good parallelism candidates anyway.
     child = spawn(electronBinary, [entry], {
       env: {
         ...process.env,
