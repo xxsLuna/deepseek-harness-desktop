@@ -62,11 +62,30 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Before the tests on a native build: the contract suite then boots the
+      # same pruned tree the installer ships, so a rule that deletes something
+      # load-bearing fails here rather than on a user's machine.
+      - name: Prune payload
+        if: ${{ !matrix.cross }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.nodeArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+
       - name: Unit tests
         run: npm test
 
       - name: Contract tests
         run: npm run test:contract
+
+      # A cross build prunes AFTER the suite instead. Pruning targets the build's
+      # arch, which on a cross build is not the runner's, so the host's own
+      # prebuilds are gone by design — node-pty then fails to load and takes the
+      # sidecar boot and the PTY probe with it. Nothing is lost by testing the
+      # full tree here: this runner could only ever have exercised its own arch,
+      # which is exactly what the mac-arm64 job already does. The target's arch
+      # is verified by verify-payload below, and by mac-arm64 running this same
+      # rule natively.
+      - name: Prune payload (cross build)
+        if: ${{ matrix.cross }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.nodeArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Package
         env:

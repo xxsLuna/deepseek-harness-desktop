@@ -71,6 +71,43 @@ the launcher. Cross the boundary instead:
 - **Launcher → page:** `webContents.executeJavaScript` writing a root
   attribute the CSS keys off (the fullscreen and navigation states).
 
+## The payload is pruned, never bundled
+
+`scripts/prune-payload.mjs` strips what the app never loads from the staged
+tree — sourcemaps, declarations, TypeScript sources, PDBs, docs, test trees,
+foreign-platform prebuilds, sharp's wasm fallback. On 0.1.0-rc.6/win32-x64 that
+is 112MB and 19,893 of 32,796 files. The **file count** is the goal, not the
+bytes: NSIS writes files one at a time and Defender scans each, which is what
+made installation slow.
+
+Do not replace this with a bundler. The harness resolves plugins by *name at
+runtime* — `import(name)` in `@deepseek-ai/cordis-plugin-loader`, where `name`
+is a string read from a patch YAML — so no static analysis can see the roster
+(195 `@deepseek-ai` packages, 574 manifests). A bundle would also break
+`dsh plugin add`, which installs into a profile with pnpm and resolves peers
+upward through this very `node_modules`. Pruning keeps the tree a real,
+resolvable npm tree, which is why it costs the plugin architecture nothing.
+
+Two rules hold the safety:
+
+- **Manifest-derived guard.** `entryPointPaths` reads every `main`, `bin` and
+  `exports` target, so a blanket glob can never delete a live entry. This is
+  what protects `node-fetch` (main is `src/index.js`) and the `.mts` in
+  `eventsource`'s exports map — and protects the *next* such package by
+  construction, rather than by an allowlist someone must remember.
+- **Wildcard exports yield to `NEVER_RUNTIME`.** A package exporting
+  `"./lib/*"` nominally exposes every file under it, but nothing imports a map
+  or a declaration through it. Letting those wildcards win silently kept half
+  the tree's sourcemaps.
+
+`src/` is deliberately **not** swept: two packages resolve their entry into it,
+and 18MB is not worth a resolution failure class that shifts on every bump.
+
+`tests/contract/pruned-payload.spec.ts` asserts the whole roster still resolves
+after pruning. Its assertions read the surviving tree rather than the removal
+list, so they hold whether or not the prune has already run — CI prunes before
+the contract suite, so the boot tests exercise the tree the installer ships.
+
 ## Conventions
 
 - Comments say **why**, not what — especially where a line encodes something

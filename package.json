@@ -14,6 +14,8 @@
   "scripts": {
     "stage": "node scripts/stage-harness.mjs",
     "stage:local": "node scripts/stage-harness.mjs --local-only",
+    "prune": "node scripts/prune-payload.mjs",
+    "prune:dry": "node scripts/prune-payload.mjs --dry-run",
     "fetch-node": "node scripts/fetch-node.mjs",
     "build": "tsc && node scripts/build-client.mjs && node scripts/stage-harness.mjs --local-only",
     "typecheck": "tsc --noEmit && tsc --noEmit -p packages/connection && tsc --noEmit -p packages/settings",
