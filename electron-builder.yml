@@ -42,6 +42,16 @@ extraMetadata:
 afterPack: scripts/after-pack.mjs
 
 # Unsigned v1: both switches are single-line reversals once certificates exist.
+#
+# BEFORE turning macOS auto-update on, fix the update feed. Both mac jobs publish
+# into the same release and app-builder-lib arch-suffixes the update manifest only
+# on Linux, so mac-arm64 and mac-x64 both write `latest-mac.yml` and whichever
+# finishes last wins — the released feed names one architecture's dmg/zip and
+# never mentions the other's. It is inert while macUpdatesSigned is false, because
+# updateMode() returns notify-only and src/updater.ts reads nothing from that file
+# but `^version:` before opening the releases page. Flip signing on and it bites:
+# electron-updater's findFile() falls back to filteredFiles.shift() when no url
+# matches process.arch, so an Intel Mac would be handed the arm64 build.
 mac:
   target: [dmg, zip]
   category: public.app-category.developer-tools
