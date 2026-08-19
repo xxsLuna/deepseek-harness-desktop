@@ -19,12 +19,12 @@ files:
 asar: true
 npmRebuild: false
 
-# The tray reads its image from disk at runtime, so the assets ship unpacked
-# beside the app rather than only feeding the icon generator.
+# The tray and the window icon are read from disk at runtime, so the assets
+# ship unpacked beside the app rather than only feeding the icon generator.
 extraResources:
   - from: assets
     to: assets
-    filter: ['*.png']
+    filter: ['*.png', '*.ico']
 extraMetadata:
   desktop:
     macUpdatesSigned: false
@@ -44,7 +44,13 @@ mac:
 # that fits hosted-runner memory.
 win:
   target: [nsis]
-  signAndEditExecutable: false
+  # signExecutable, NOT signAndEditExecutable: the latter also skips rcedit,
+  # which is what writes the icon and version strings into the .exe — leaving
+  # the stock Electron icon on the window, the taskbar and Alt+Tab while the
+  # NSIS installer (which compiles its own) looked correct. Unsigned v1 wants
+  # only the signing half skipped; it is a single-line reversal once a
+  # certificate exists.
+  signExecutable: false
 
 nsis:
   oneClick: false

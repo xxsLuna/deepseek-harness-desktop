@@ -5,9 +5,9 @@
  * release page instead (see update-gate.ts). Errors are logged, never fatal:
  * an unreachable feed must not affect the app.
  */
-import { app, dialog, shell } from 'electron'
+import { app, dialog, shell, type BrowserWindow } from 'electron'
 import { createRequire } from 'node:module'
-import { updateMode } from './update-gate.js'
+import { isNewerVersion, updateMode } from './update-gate.js'
 
 const require = createRequire(import.meta.url)
 
@@ -26,13 +26,23 @@ function macUpdatesSigned(): boolean {
   }
 }
 
-/** Compare two semver-ish tags loosely: returns true when remote differs from local. */
-function isDifferentVersion(remote: string, local: string): boolean {
-  return remote.trim() !== '' && remote.trim() !== local.trim()
-}
-
-/** Start periodic checks; returns a disposer. */
-export function startUpdater(): { stop: () => void, checkNow: () => void } {
+/**
+ * Start periodic checks against this repo's GitHub Releases.
+ * @param enabled - reads the Desktop Settings auto-update preference. Only the
+ * scheduled check consults it; an explicit "Check now" always runs, because
+ * the user asked for that one.
+ * @returns the scheduler's disposer and the manual check.
+ */
+export function startUpdater(
+  enabled: () => boolean = () => true,
+  win?: BrowserWindow,
+): { stop: () => void, checkNow: () => void } {
+  // Parented, every dialog below is a sheet. A parentless showMessageBox on
+  // macOS runs a modal loop that blocks the main thread outright: no window
+  // load, no sidecar output, nothing until someone clicks it (which is a hang
+  // on a headless runner, and how this was found).
+  const ask = async (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
+    (win === undefined || win.isDestroyed() ? dialog.showMessageBox(options) : dialog.showMessageBox(win, options))
   const mode = updateMode({
     platform: process.platform,
     packaged: app.isPackaged,
@@ -44,7 +54,7 @@ export function startUpdater(): { stop: () => void, checkNow: () => void } {
       // An unpackaged or unsupported build has nothing to check; say so rather
       // than leaving a menu item that appears to do nothing.
       checkNow: () => {
-        void dialog.showMessageBox({
+        void ask({
           type: 'info',
           message: 'Updates are not available for this build',
           detail: app.isPackaged
@@ -64,10 +74,10 @@ export function startUpdater(): { stop: () => void, checkNow: () => void } {
       if (!response.ok) return
       const text = await response.text()
       const version = /^version:\s*(.+)$/m.exec(text)?.[1]
-      if (version === undefined || !isDifferentVersion(version, app.getVersion())) return
+      if (version === undefined || !isNewerVersion(version, app.getVersion())) return
       if (notified && !manual) return
       notified = true
-      const { response: button } = await dialog.showMessageBox({
+      const { response: button } = await ask({
         type: 'info',
         message: `DeepSeek Harness ${version} is available`,
         detail: 'Unsigned macOS builds cannot self-update; download the new version from the releases page.',
@@ -91,8 +101,11 @@ export function startUpdater(): { stop: () => void, checkNow: () => void } {
   }
 
   const check = mode === 'auto' ? checkAuto : checkNotifyOnly
-  void check()
-  timer = setInterval(() => void check(), CHECK_INTERVAL_MS)
+  const checkIfEnabled = (): void => {
+    if (enabled()) void check()
+  }
+  checkIfEnabled()
+  timer = setInterval(checkIfEnabled, CHECK_INTERVAL_MS)
   return {
     stop: () => clearInterval(timer),
     // A manual check reports "up to date" too; the scheduled one stays quiet.
@@ -103,7 +116,7 @@ export function startUpdater(): { stop: () => void, checkNow: () => void } {
       }
       void checkNotifyOnly(true).then(() => {
         if (notified) return
-        void dialog.showMessageBox({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
+        void ask({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
       })
     },
   }

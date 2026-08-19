@@ -17,8 +17,10 @@
  */
 
 /*
- * macOS fullscreen hides the traffic lights, so the band would be dead space.
- * The launcher publishes the state as this attribute (src/window.ts).
+ * Fullscreen takes the window controls away on both merged platforms — macOS
+ * hides the traffic lights, Windows drops the overlay — so the band would be
+ * dead space. The launcher publishes the state as this attribute
+ * (src/window.ts), and this rule outranks the baked default by specificity.
  */
 :root[data-dsh-fullscreen='true'] {
   --dsh-title-band: 0px;
@@ -58,12 +60,110 @@
 #dsh-drag-strip {
   position: fixed;
   top: 0;
-  left: 0;
-  right: 0;
+  /*
+   * Windows draws its caption buttons over the right of the band and reports
+   * what is left as the titlebar area, so the strip stops there rather than
+   * claiming a drag region under native buttons.
+   *
+   * The measurement comes from the page script, not the matching env() vars:
+   * those read 0 while the page is hidden (minimised, occluded), which would
+   * collapse the strip and lose the first drag after the window comes back.
+   * The script only publishes a width while the overlay reports itself
+   * visible, so every other case falls back to the whole window.
+   */
+  left: var(--dsh-titlebar-area-x, 0px);
+  width: var(--dsh-titlebar-area-width, 100%);
   height: var(--dsh-title-band);
   -webkit-app-region: drag;
   user-select: none;
   z-index: 2147483646;
+}
+
+/*
+ * The band's own controls, inside the strip so they inherit its geometry and
+ * vanish with it in fullscreen. `lead` clears whatever the platform already
+ * floats over the band — the macOS traffic lights sit exactly there.
+ */
+#dsh-title-controls,
+#dsh-title-nav {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 6px;
+}
+
+/* The menu button sits over the sidebar, which is what it opens onto. */
+#dsh-title-controls {
+  left: var(--dsh-title-band-lead, 0px);
+}
+
+/*
+ * Back and forward belong over the CONTENT, not the sidebar: collapsed to its
+ * rail the sidebar is narrower than these two buttons, so anchoring them to
+ * the left would leave them straddling its edge. The page script measures the
+ * sidebar's trailing edge and publishes it here; with no measurement yet they
+ * fall in beside the menu button.
+ */
+#dsh-title-nav {
+  left: var(--dsh-title-nav-x, calc(var(--dsh-title-band-lead, 0px) + 34px));
+}
+
+/*
+ * Colour is inherited, never stated: the UI has a light theme and a dark one,
+ * and the band sits on whichever the page is painting.
+ */
+#dsh-title-controls button,
+#dsh-title-nav button {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+}
+
+#dsh-title-controls button:hover,
+#dsh-title-nav button:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+#dsh-title-controls button:active,
+#dsh-title-nav button:active {
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+#dsh-title-controls svg,
+#dsh-title-nav svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+#dsh-menu-button {
+  display: var(--dsh-title-menu-display, none) !important;
+}
+
+/*
+ * Back and forward follow the window's real navigation history, which the
+ * launcher publishes here (it is the only side that knows). Unreachable
+ * directions are dimmed and inert rather than hidden, so the control does not
+ * shift under the pointer.
+ */
+:root:not([data-dsh-nav~='back']) #dsh-nav-back,
+:root:not([data-dsh-nav~='forward']) #dsh-nav-forward {
+  opacity: 0.28;
+  pointer-events: none;
 }
 
 /*

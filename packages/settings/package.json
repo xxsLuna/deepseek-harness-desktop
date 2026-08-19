@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-desktop/connection",
+  "name": "@dsh-desktop/settings",
   "version": "0.1.0-rc.6-2",
-  "description": "Desktop transport row: upstream /api node half + an SSE browser carrier instead of the WebSocket one",
+  "description": "Desktop Settings: the settings section for the preferences only the launcher can act on",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -14,11 +14,9 @@
   "dsh": {
     "client": {
       "platform": "web",
-      "inject": [],
-      "immediately": true
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-client-connection": "*"
   }
 }

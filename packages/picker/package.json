@@ -1,6 +1,6 @@
 {
   "name": "@dsh-desktop/picker",
-  "version": "0.1.0-rc.6",
+  "version": "0.1.0-rc.6-2",
   "description": "directoryPicker provider that delegates to the launcher's window-owned Electron dialog",
   "private": true,
   "license": "MIT",

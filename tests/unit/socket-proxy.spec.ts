@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { APP_ORIGIN, isHostOnlyPath, isTrustedRendererRequest } from '../../src/socket-proxy.js'
+import { APP_ORIGIN, desktopHostAction, isDesktopHostPath, isHostOnlyPath, isTrustedRendererRequest } from '../../src/socket-proxy.js'
 
 describe('isHostOnlyPath', () => {
   it('refuses the launcher-only surface', () => {
@@ -20,6 +20,32 @@ describe('isHostOnlyPath', () => {
   it('does not treat a lookalike prefix as launcher-only', () => {
     expect(isHostOnlyPath('/desktops')).toBe(false)
     expect(isHostOnlyPath('/api/desktop/x')).toBe(false)
+  })
+})
+
+describe('isDesktopHostPath', () => {
+  it('claims what the launcher answers itself', () => {
+    for (const path of ['/__desktop-host/chrome/menu', '/__desktop-host/settings/read', '/__desktop-host/settings/write']) {
+      expect(isDesktopHostPath(path)).toBe(true)
+    }
+    expect(desktopHostAction('/__desktop-host/chrome/menu')).toBe('chrome/menu')
+    expect(desktopHostAction('/__desktop-host/settings/read')).toBe('settings/read')
+  })
+
+  it('leaves the harness surface alone', () => {
+    // A path this claims never reaches the sidecar, so a collision with an
+    // upstream route would black-hole it.
+    for (const path of ['/', '/api/session.list', '/plugins/@scope/pkg/client.js', '/__desktop-host', '/x/__desktop-host/chrome/menu']) {
+      expect(isDesktopHostPath(path), path).toBe(false)
+    }
+  })
+
+  it('does not overlap the launcher-only surface', () => {
+    // The two prefixes mean opposite things — one is for the renderer, one is
+    // refused to it — so a path must never satisfy both.
+    for (const path of ['/desktop/picker/requests', '/__desktop-host/chrome/menu']) {
+      expect(isDesktopHostPath(path) && isHostOnlyPath(path), path).toBe(false)
+    }
   })
 })
 

@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { join } from 'node:path'
 import type { SidecarAddress } from './socket-path.js'
+import type { TitleBand } from './window.js'
 
 export interface SidecarPaths {
   /** The bundled node binary (or a PATH command in dev). */
@@ -18,8 +19,12 @@ export interface SidecarPaths {
 
 export interface SidecarOptions extends SidecarPaths {
   readonly address: SidecarAddress
-  /** Whether the launcher hid the native title bar, so the served chrome insets for a band. */
-  readonly mergedTitleBar: boolean
+  /**
+   * The band the launcher freed by hiding the native title bar (zero height
+   * where the platform kept its own). The served chrome draws itself from
+   * this, so the launcher stays the one place the decision is made.
+   */
+  readonly titleBand: TitleBand
   /** PATH for the harness and everything it spawns; undefined inherits the launcher's. */
   readonly path: string | undefined
   /** Working directory the harness resolves relative paths against. */
@@ -60,7 +65,7 @@ export class Sidecar {
 
   /** Spawn and resolve once the socket answers (rejects after timeoutMs). */
   async start(timeoutMs = 60_000): Promise<void> {
-    const { nodeBinary, harnessRoot, address, mergedTitleBar, path, cwd, onLog, onUnexpectedExit } = this.options
+    const { nodeBinary, harnessRoot, address, titleBand, path, cwd, onLog, onUnexpectedExit } = this.options
     const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
     const child = spawn(nodeBinary, [entry], {
       // A GUI launch inherits the session manager's cwd (often `/`), which the
@@ -72,7 +77,11 @@ export class Sidecar {
         DSH_DESKTOP_SOCKET: address.socketPath,
         DSH_DESKTOP_TOKEN: address.token,
         DSH_DESKTOP_PARENT_PID: String(process.pid),
-        DSH_DESKTOP_TITLE_BAND: mergedTitleBar ? 'merged' : 'native',
+        // Read back by the desktop-chrome plugin row's config in the patch
+        // layer, not by any module: the band is a plugin's configuration.
+        DSH_DESKTOP_BAND_HEIGHT: String(titleBand.height),
+        DSH_DESKTOP_BAND_LEAD: String(titleBand.lead),
+        DSH_DESKTOP_BAND_MENU: titleBand.menuButton ? '1' : '0',
         ELECTRON_RUN_AS_NODE: undefined,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

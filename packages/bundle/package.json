@@ -1,6 +1,6 @@
 {
   "name": "@dsh-desktop/bundle",
-  "version": "0.1.0-rc.6",
+  "version": "0.1.0-rc.6-2",
   "description": "Desktop composition over dsh-base + dsh-web-app: row swaps, SSE bypass, surface prompt, and the sidecar boot entry",
   "private": true,
   "license": "MIT",

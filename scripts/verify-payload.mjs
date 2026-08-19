@@ -42,6 +42,11 @@ const harness = join(resources, 'harness')
 assertExists(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), 'harness')
 assertExists(join(harness, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'), 'desktop bundle')
 assertExists(join(harness, 'node_modules', '@dsh-desktop', 'connection', 'lib', 'client.js'), 'desktop client bundle')
+// The band ships as page assets read at request time, so a missing one is only
+// found when a window opens; assert them here instead.
+for (const asset of ['index.js', 'block.js', 'desktop-chrome.css', 'desktop-chrome.js']) {
+  assertExists(join(harness, 'node_modules', '@dsh-desktop', 'chrome', 'lib', asset), 'desktop chrome')
+}
 // Tripwire: a copied resolution symlink here points back into this tree and
 // turns the payload into an infinite directory cycle.
 if (existsSync(join(harness, 'node_modules', '@dsh-desktop', 'connection', 'node_modules'))) {

@@ -1,13 +1,12 @@
 {
-  "name": "@dsh-desktop/carrier",
+  "name": "@dsh-desktop/chrome",
   "version": "0.1.0-rc.6-2",
-  "description": "webServer provider over a Unix domain socket / Windows named pipe — no TCP port",
+  "description": "Window chrome: the merged title band, injected into the served document",
   "private": true,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
     "@deepseek-ai/schemastery": "*"
   }
 }

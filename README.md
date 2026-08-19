@@ -41,7 +41,18 @@ The app version tracks the upstream harness version exactly. A desktop release `
 
 The app is a thin Electron shell around the **unmodified** published harness:
 
-- `scripts/stage-harness.mjs` installs the pinned `@deepseek-ai/dsh` tree; four small plugin packages of ours are composed in through the harness's own patch-layer system (no upstream file is edited): a `webServer` provider that listens on a socket path with a bearer token, an SSE browser carrier replacing the WebSocket one (WebSockets cannot ride a custom scheme), a directory picker that delegates to the launcher's dialog, and the desktop bundle overlay.
+- `scripts/stage-harness.mjs` installs the pinned `@deepseek-ai/dsh` tree; six small plugin packages of ours are composed in through the harness's own patch-layer system (no upstream file is edited):
+
+| package | what it is |
+| --- | --- |
+| `@dsh-desktop/carrier` | a `webServer` provider listening on a socket path with a bearer token, instead of a TCP port |
+| `@dsh-desktop/connection` | the transport row: upstream's `/api` node half, with an SSE browser carrier replacing the WebSocket one (WebSockets cannot ride a custom scheme) |
+| `@dsh-desktop/picker` | a `directoryPicker` provider delegating the pick to the launcher's window-owned dialog |
+| `@dsh-desktop/chrome` | the merged title band, injected into the served document; the launcher configures its height, leading inset and menu button through the patch layer |
+| `@dsh-desktop/settings` | the **Desktop Settings** section, registered into upstream's `settings.section` slot. Its values are launcher facts (close behaviour, notifications, title bar, auto-update), so its browser half talks to the launcher rather than the sidecar |
+| `@dsh-desktop/bundle` | the surface glue — dist fallback owner, the two SSE event routes, the desktop-surface prompt section and `DSH_SURFACE` — plus the sidecar boot entry and the patch layer that composes all of the above |
+
+  Everything the harness process does differently for the desktop is one of those rows. What cannot be a row is the Electron launcher in `src/`: it is the host process that *spawns* the harness, so it runs before any plugin exists and owns things no plugin can reach — the window and its title bar, the tray, native menus, notifications, downloads, the updater, and the `dsh://` protocol handler.
 - The main process spawns that tree under a bundled stock Node, so every native prebuild stays valid — no Electron ABI rebuilds, and `node-pty`, the packaged ripgrep and `node:sqlite` all keep working. `protocol.handle('dsh')` proxies the window's requests to the socket.
 - Coupling to upstream is confined to the seams asserted by `tests/contract` — the version-tracking canary.
 
@@ -53,7 +64,9 @@ browser. Those assumptions are met here rather than patched upstream:
 - **The folder picker.** Upstream opens an OS chooser from the harness process; a background sidecar can create one but never bring it forward. The pick is delegated to the launcher's own window-modal dialog.
 - **PATH.** A Finder, Dock, or `.desktop` launch inherits the session manager's minimal environment, so the agent's shell tools would not find `git`, `node`, or anything else installed through a shell profile. The user's login shell is asked once at startup.
 - **Exports.** A page-initiated download is a no-op in Electron without a handler; session exports land in the OS download folder and the notice reveals the file.
-- **The title bar** is merged into the UI on macOS only. Windows and Linux keep their native frame, and the served stylesheet insets nothing there.
+- **The title bar** is merged into the UI on macOS and Windows: macOS floats the traffic lights over the page, Windows hides the frame and keeps its caption buttons in a transparent Window Controls Overlay, and in both cases the page paints the band the launcher freed. Linux keeps its native frame, and the served stylesheet insets nothing there.
+- **Desktop preferences** live with the launcher, not the harness: what closing the window does, which events raise an OS notification, whether the title bar is merged, whether the app updates itself. `@dsh-desktop/settings` renders them as a Settings section and reads and writes them over the same `/__desktop-host/` route the band's controls use. The title bar is a window-construction option, so changing it says so and applies on restart.
+- **The menu bar** is hidden where the window would draw one (Windows, Linux) rather than sitting between the band and the UI; Alt still reveals it, and the band's menu button pops the same template up as a list. The band's controls are drawn by the page but acted on by the launcher — no preload ships, so they post to a `/__desktop-host/` route the protocol handler answers ahead of the sidecar. Back and forward follow the window's real navigation history, which a single-page harness UI never adds to, so they stay dimmed.
 
 ## Branching
 

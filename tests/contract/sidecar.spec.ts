@@ -93,6 +93,11 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
         DSH_HOME: home,
         DSH_DESKTOP_SOCKET: socketPath,
         DSH_DESKTOP_TOKEN: token,
+        // Boot as a merged-title-bar launch would, so the title-band row is
+        // composed and its index tap can be asserted below.
+        DSH_DESKTOP_BAND_HEIGHT: '38',
+        DSH_DESKTOP_BAND_LEAD: '0',
+        DSH_DESKTOP_BAND_MENU: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -193,12 +198,17 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   })
 
   it('serves the title-band chrome with the document', async () => {
+    // Asserts the whole seam, not just the asset: @dsh-desktop/chrome resolved
+    // as a plugin row, took its config through the patch layer, and reached
+    // the fallback owner's index taps.
     const res = await socketRequest(socketPath, { path: '/' })
     // The block must follow the app root: client plugin CSS lands in <head> at
     // runtime and would win the cascade at equal specificity otherwise.
     expect(res.body.indexOf('data-dsh-desktop-chrome')).toBeGreaterThan(res.body.indexOf('id="root"'))
-    expect(res.body).toContain('--dsh-title-band')
+    expect(res.body).toContain('--dsh-title-band:var(--dsh-title-band-wco,38px)')
+    expect(res.body).toContain('--dsh-title-menu-display:inline-flex')
     expect(res.body).toContain('-webkit-app-region: drag')
+    expect(res.body).toContain('/__desktop-host/chrome/')
   })
 
   it('still emits the column classes the title band insets', async () => {

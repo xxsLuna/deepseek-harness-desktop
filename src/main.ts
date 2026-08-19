@@ -13,10 +13,13 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSidecarAddress } from './socket-path.js'
-import { createSocketProxy } from './socket-proxy.js'
+import { createSocketProxy, isDesktopHostPath } from './socket-proxy.js'
 import { Sidecar, type SidecarPaths } from './sidecar.js'
-import { createMainWindow, MERGED_TITLE_BAR } from './window.js'
+import { createMainWindow, MERGED_TITLE_BAR_PLATFORM, titleBand } from './window.js'
 import { installMenu } from './menu.js'
+import { createDesktopHost } from './desktop-host.js'
+import { DesktopSettingsStore } from './settings-host.js'
+import { updateMode } from './update-gate.js'
 import { installTray } from './tray.js'
 import { installShortcuts } from './shortcuts.js'
 import { installDownloads } from './downloads.js'
@@ -49,8 +52,21 @@ const HARNESS_VERSION = (() => {
 // builds a menu or shows a notification. In a packaged app the bundle metadata
 // already says this; calling it here keeps dev and packaged identical.
 app.setName(APP_NAME)
-// Windows groups taskbar entries and toast notifications by this id.
-if (process.platform === 'win32') app.setAppUserModelId('com.github.xxsluna.deepseek-harness-desktop')
+/**
+ * Windows groups taskbar entries and toast notifications by this id — and,
+ * when an installer has registered a Start Menu shortcut carrying it, resolves
+ * the taskbar icon through that shortcut rather than from the window.
+ *
+ * A dev run therefore must NOT claim the installed app's id: it would inherit
+ * the installed build's icon and taskbar group, so the window's own icon never
+ * shows however right the artwork is (measured on a machine with an older
+ * release installed). It is also simply true — a checkout is not the installed
+ * application.
+ */
+const APP_USER_MODEL_ID = 'com.github.xxsluna.deepseek-harness-desktop'
+if (process.platform === 'win32') {
+  app.setAppUserModelId(app.isPackaged ? APP_USER_MODEL_ID : `${APP_USER_MODEL_ID}.dev`)
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'dsh',
@@ -102,10 +118,16 @@ async function run(): Promise<void> {
   const address = createSidecarAddress(process.platform, tmpdir())
   const paths = resolvePaths()
 
+  // Read before anything is built: the title bar the window is constructed
+  // with, and the band the sidecar bakes into the served stylesheet, are both
+  // this preference.
+  const settings = new DesktopSettingsStore()
+  const band = titleBand(settings.get().mergedTitleBar)
+
   const sidecar = new Sidecar({
     ...paths,
     address,
-    mergedTitleBar: MERGED_TITLE_BAR,
+    titleBand: band,
     path: resolveSidecarPath(process.env, process.platform),
     cwd: homedir(),
     onLog: (line) => console.log(`[sidecar] ${line}`),
@@ -154,7 +176,28 @@ async function run(): Promise<void> {
       )
     },
   )
-  protocol.handle('dsh', async (request) => (await sidecarReady)(request))
+  // The launcher's own routes are answered here, ahead of the proxy: they are
+  // launcher business, and they must work while the sidecar gate is still
+  // pending rather than queue behind it. `updater` is assigned below, after
+  // the window; nothing can call this before then.
+  let updater: { stop: () => void, checkNow: () => void } | undefined
+  const desktopHost = createDesktopHost({
+    getWindow: () => BrowserWindow.getAllWindows()[0],
+    settings,
+    harnessVersion: HARNESS_VERSION,
+    updatable: updateMode({
+      platform: process.platform,
+      packaged: app.isPackaged,
+      macUpdatesSigned: true,
+    }) !== 'disabled',
+    titleBarMergeable: MERGED_TITLE_BAR_PLATFORM,
+    checkForUpdates: () => updater?.checkNow(),
+  })
+  protocol.handle('dsh', async (request) => {
+    const pathname = decodeURIComponent(new URL(request.url).pathname)
+    if (isDesktopHostPath(pathname)) return await desktopHost(request, pathname)
+    return await (await sidecarReady)(request)
+  })
 
   installMenu()
 
@@ -169,7 +212,7 @@ async function run(): Promise<void> {
   }
   const state = clampWindowState(parseWindowState(readState()), screen.getAllDisplays().map((d) => d.workArea))
 
-  const win = createMainWindow()
+  const win = createMainWindow(band)
   if (!Number.isNaN(state.x)) win.setBounds({ x: state.x, y: state.y, width: state.width, height: state.height })
   else win.setSize(state.width, state.height)
   if (state.maximized) win.maximize()
@@ -191,19 +234,28 @@ async function run(): Promise<void> {
   win.on('maximize', scheduleSave)
   win.on('unmaximize', scheduleSave)
 
-  // Close hides to the tray; quitting is the explicit menu/tray/Cmd+Q path.
+  // Closing hides to the tray by default; Desktop Settings can make it quit.
+  // Read per close, not captured: the preference changes while the app runs.
   win.on('close', (event) => {
     if (quitting) return
-    event.preventDefault()
     saveState()
+    if (settings.get().closeAction === 'quit') {
+      // Let the close through; before-quit tears the sidecar down.
+      app.quit()
+      return
+    }
+    event.preventDefault()
     win.hide()
   })
 
-  const updater = startUpdater()
-  app.on('before-quit', () => updater.stop())
+  updater = startUpdater(() => settings.get().autoUpdate, win)
+  app.on('before-quit', () => updater?.stop())
 
-  const tray = installTray(win, updater.checkNow)
-  void tray
+  // The tray is unconditional: it is how a hidden window comes back, and with
+  // "quit on close" the app is gone anyway, so hiding the icon would only ever
+  // remove the data folder and update entries.
+  const tray = installTray(win, () => updater?.checkNow())
+  app.on('before-quit', () => tray.destroy())
 
   const stopDownloads = installDownloads(win.webContents.session)
   const stopShortcuts = installShortcuts(win)
@@ -221,7 +273,7 @@ async function run(): Promise<void> {
   await win.loadURL('dsh://app/')
 
   void sidecarReady.then(() => {
-    const stopNotifications = startNotifications(address, win)
+    const stopNotifications = startNotifications(address, win, () => settings.get())
     const stopPickerHost = startPickerHost(address, win)
     app.on('before-quit', () => {
       stopNotifications()

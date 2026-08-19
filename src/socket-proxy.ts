@@ -39,6 +39,35 @@ export function isHostOnlyPath(pathname: string): boolean {
 }
 
 /**
+ * Route prefix the launcher answers itself instead of forwarding. Some of what
+ * the page shows is launcher business — a native menu, the window's navigation
+ * history, the caption-button colour, the desktop preferences — and no preload
+ * ships to carry it, so the page posts here and main answers.
+ *
+ * Distinct from HOST_ONLY_PREFIX, which the renderer is refused: this one is
+ * *for* the renderer. Neither reaches the sidecar.
+ */
+const DESKTOP_HOST_PREFIX = '/__desktop-host/'
+
+/**
+ * Whether a pathname is one the launcher answers itself.
+ * @param pathname - decoded request pathname.
+ * @returns true when the launcher answers instead of the sidecar.
+ */
+export function isDesktopHostPath(pathname: string): boolean {
+  return pathname.startsWith(DESKTOP_HOST_PREFIX)
+}
+
+/**
+ * The action a launcher request names, e.g. `chrome/menu`, `settings/read`.
+ * @param pathname - decoded pathname, already matched by isDesktopHostPath.
+ * @returns the trailing path.
+ */
+export function desktopHostAction(pathname: string): string {
+  return pathname.slice(DESKTOP_HOST_PREFIX.length)
+}
+
+/**
  * Whether a renderer request may reach the sidecar at all.
  * @param req - the protocol-handler request.
  * @returns true for same-origin (or marker-less) requests only.

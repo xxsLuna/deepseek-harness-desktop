@@ -1,0 +1,109 @@
+/**
+ * Desktop preferences: the settings only this launcher can act on, and the
+ * only place their defaults are written down.
+ *
+ * The harness owns everything about a session; these are about the window it
+ * lives in — what closing it does, which events are worth an OS notification,
+ * whether the title bar is merged into the UI, and whether the app updates
+ * itself. None of that is reachable from a sidecar plugin, so the launcher
+ * stores and applies it, and the Desktop Settings section
+ * (@dsh-desktop/settings) is a view onto this file.
+ *
+ * Parsing is pure and total: a hand-edited or half-written file must not stop
+ * the app from starting, so every field falls back to its default alone.
+ */
+
+/** What closing the window does. */
+export type CloseAction = 'tray' | 'quit'
+
+export interface DesktopSettings {
+  /**
+   * Close to the tray (the default) or quit the app outright. The tray icon
+   * itself is not a separate preference: with 'quit' the app is gone the
+   * moment the window closes, so an icon that only exists while a window is
+   * already open buys nothing — and 'tray' with no icon would hide the window
+   * with no way to bring it back.
+   */
+  readonly closeAction: CloseAction
+  /** Notify when the agent asks for approval. */
+  readonly notifyApprovals: boolean
+  /** Notify when the agent asks a question. */
+  readonly notifyQuestions: boolean
+  /** Notify when a turn finishes (only while the window is unfocused). */
+  readonly notifyTurns: boolean
+  /** Merge the title bar into the UI, where the platform supports it. */
+  readonly mergedTitleBar: boolean
+  /** Check GitHub Releases for a newer version in the background. */
+  readonly autoUpdate: boolean
+}
+
+/**
+ * The shipped behaviour, unchanged from before any of this was configurable:
+ * closing hides to the tray, every notification fires, the band is merged, and
+ * the app keeps itself up to date.
+ */
+export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
+  closeAction: 'tray',
+  notifyApprovals: true,
+  notifyQuestions: true,
+  notifyTurns: true,
+  mergedTitleBar: true,
+  autoUpdate: true,
+}
+
+/** The fields that are plain on/off switches. */
+type BooleanField = Exclude<keyof DesktopSettings, 'closeAction'>
+
+/** Those fields, enumerable — the write path walks them. */
+const BOOLEAN_FIELDS: readonly BooleanField[] = [
+  'notifyApprovals', 'notifyQuestions', 'notifyTurns', 'mergedTitleBar', 'autoUpdate',
+]
+
+/**
+ * Parse a stored settings file; anything malformed falls back per field.
+ * @param raw - the file content, or undefined when absent.
+ * @returns a structurally valid settings object.
+ */
+export function parseDesktopSettings(raw: string | undefined): DesktopSettings {
+  if (raw === undefined) return DEFAULT_DESKTOP_SETTINGS
+  let record: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return DEFAULT_DESKTOP_SETTINGS
+    record = parsed as Record<string, unknown>
+  } catch {
+    return DEFAULT_DESKTOP_SETTINGS
+  }
+  const flag = (key: BooleanField): boolean =>
+    typeof record[key] === 'boolean' ? record[key] : DEFAULT_DESKTOP_SETTINGS[key]
+  return {
+    closeAction: record.closeAction === 'quit' ? 'quit' : 'tray',
+    notifyApprovals: flag('notifyApprovals'),
+    notifyQuestions: flag('notifyQuestions'),
+    notifyTurns: flag('notifyTurns'),
+    mergedTitleBar: flag('mergedTitleBar'),
+    autoUpdate: flag('autoUpdate'),
+  }
+}
+
+/**
+ * Apply a patch from the settings UI onto the stored settings.
+ *
+ * A field is taken only when it is present AND of the right shape; anything
+ * else leaves the STORED value alone. Reparsing the merge instead would reset
+ * a rejected field to its default, which is a worse answer than "the write
+ * did not happen" — the user would see an unrelated preference move.
+ * @param patch - the incoming JSON body, of unknown shape.
+ * @param current - the settings to merge onto.
+ * @returns the merged settings.
+ */
+export function mergeDesktopSettings(patch: unknown, current: DesktopSettings): DesktopSettings {
+  if (typeof patch !== 'object' || patch === null) return current
+  const record = patch as Record<string, unknown>
+  const next = { ...current } as { -readonly [K in keyof DesktopSettings]: DesktopSettings[K] }
+  for (const key of BOOLEAN_FIELDS) {
+    if (typeof record[key] === 'boolean') next[key] = record[key]
+  }
+  if (record.closeAction === 'tray' || record.closeAction === 'quit') next.closeAction = record.closeAction
+  return next
+}

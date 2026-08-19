@@ -44,6 +44,19 @@
     - id: desktop-runtime
       name: '@dsh-desktop/bundle'
 
+    # The merged title band, injected into the served document. Its own row
+    # rather than part of desktop-runtime: it is window chrome, not transport,
+    # and a platform that kept its native title bar composes it with a zero
+    # height and it injects nothing. Every number is the launcher's — it is the
+    # process that hid the title bar, and on Windows it sizes the
+    # window-controls overlay from the same values.
+    - id: desktop-chrome
+      name: '@dsh-desktop/chrome'
+      config:
+        height: !!js Number(process.env.DSH_DESKTOP_BAND_HEIGHT ?? 0)
+        lead: !!js Number(process.env.DSH_DESKTOP_BAND_LEAD ?? 0)
+        menuButton: !!js process.env.DSH_DESKTOP_BAND_MENU === '1'
+
     # Dual-face transport row: the node half delegates to the upstream
     # client-connection apply (the /api route, trust fence, and host
     # ctx.connection), while the browser half is this package's own SSE
@@ -52,6 +65,14 @@
       name: '@dsh-desktop/connection'
       config:
         trustedHosts: []
+
+    # Desktop Settings: one settings section for the preferences only the
+    # launcher can act on (tray, close behaviour, notifications, title bar,
+    # auto-update). The row carries no config — the launcher owns the values
+    # and the browser half reads them from it directly, because none of them
+    # is a harness fact.
+    - id: desktop-settings
+      name: '@dsh-desktop/settings'
 
     # directoryPicker with the `native` interaction, delegated over the carrier
     # socket to the launcher's window-owned Electron dialog. Replaces the

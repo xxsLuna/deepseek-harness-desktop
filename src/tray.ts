@@ -16,15 +16,21 @@ const ASSETS = app.isPackaged
   : join(fileURLToPath(new URL('..', import.meta.url)), 'assets')
 
 /**
- * The tray image. macOS reads a template image from its ALPHA channel and
- * recolours it per menu-bar appearance; the `Template` filename suffix marks it
- * as one, and the `@2x` sibling is picked up automatically for Retina.
+ * The tray image: the app's own mark, sized for a tray slot.
+ *
+ * macOS reads a template image from its ALPHA channel and recolours it per
+ * menu-bar appearance, so it gets the silhouette — the `Template` filename
+ * suffix marks it as one. Windows and Linux draw what they are given and would
+ * render that silhouette as a black shape, invisible on a dark taskbar, so
+ * they get the coloured mark instead. Both have an `@2x` sibling, which
+ * nativeImage picks up for high-DPI screens.
  * @returns the tray image, or an empty image when the asset is missing (an
  * empty tray icon beats crashing the launch over artwork).
  */
 function trayImage(): Electron.NativeImage {
-  const image = nativeImage.createFromPath(join(ASSETS, 'trayTemplate.png'))
-  if (process.platform === 'darwin') image.setTemplateImage(true)
+  const isMac = process.platform === 'darwin'
+  const image = nativeImage.createFromPath(join(ASSETS, isMac ? 'trayTemplate.png' : 'tray.png'))
+  if (isMac) image.setTemplateImage(true)
   return image
 }
 

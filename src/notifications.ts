@@ -7,6 +7,7 @@
 import { app, Notification, type BrowserWindow } from 'electron'
 import { request as httpRequest } from 'node:http'
 import type { SidecarAddress } from './socket-path.js'
+import type { DesktopSettings } from './desktop-settings.js'
 
 interface SseSubscription {
   stop(): void
@@ -68,11 +69,21 @@ function subscribeSse(
 
 /**
  * Start notification subscriptions for one window.
+ *
+ * The subscriptions themselves are unconditional — the approval badge counts
+ * whether or not the user wants a toast for it, and a stream torn down and
+ * rebuilt on a preference change would drop events in between. Only the toast
+ * is gated, read per event so a change takes effect immediately.
  * @param address - the sidecar socket address.
  * @param win - the window to focus on notification click.
+ * @param settings - reads the desktop preferences in force.
  * @returns disposer stopping both subscriptions.
  */
-export function startNotifications(address: SidecarAddress, win: BrowserWindow): () => void {
+export function startNotifications(
+  address: SidecarAddress,
+  win: BrowserWindow,
+  settings: () => DesktopSettings,
+): () => void {
   const pendingApprovals = new Set<string>()
   const updateBadge = (): void => {
     if (process.platform !== 'win32') app.setBadgeCount(pendingApprovals.size)
@@ -93,7 +104,7 @@ export function startNotifications(address: SidecarAddress, win: BrowserWindow):
       case 'approval/requested': {
         if (typeof frame.approvalId === 'string') pendingApprovals.add(frame.approvalId)
         updateBadge()
-        if (!win.isFocused()) notify('Approval requested', 'The agent is waiting for your approval.')
+        if (!win.isFocused() && settings().notifyApprovals) notify('Approval requested', 'The agent is waiting for your approval.')
         break
       }
       case 'approval/resolved': {
@@ -102,7 +113,7 @@ export function startNotifications(address: SidecarAddress, win: BrowserWindow):
         break
       }
       case 'question/requested': {
-        if (!win.isFocused()) notify('Question', 'The agent asked you a question.')
+        if (!win.isFocused() && settings().notifyQuestions) notify('Question', 'The agent asked you a question.')
         break
       }
       default:
@@ -119,7 +130,7 @@ export function startNotifications(address: SidecarAddress, win: BrowserWindow):
       return
     }
     if (!runningSessions.delete(frame.sessionId)) return
-    if (!win.isFocused()) notify('Turn finished', 'The agent finished its turn.')
+    if (!win.isFocused() && settings().notifyTurns) notify('Turn finished', 'The agent finished its turn.')
   })
 
   return () => {

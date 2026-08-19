@@ -12,11 +12,49 @@
  *    controls, so driving the real input path is the only reliable way to
  *    exercise them while tuning.
  *
- * All files are gitignored working files.
+ * All files are gitignored working files, so they come and go: deleting one is
+ * itself a watch event, and every handler here runs inside an fs.watch
+ * callback where a throw is an uncaught exception in the MAIN process — which
+ * Electron shows as a crash dialog over the app. Nothing below is allowed to
+ * throw for a file that is simply not there.
  */
 import type { BrowserWindow } from 'electron'
-import { existsSync, readFileSync, watch, writeFileSync } from 'node:fs'
+import { readFileSync, watch, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+/**
+ * Read a watched working file.
+ * @param path - the file to read.
+ * @returns its contents, or undefined when it is missing or unreadable — the
+ * file can be deleted, renamed or replaced between the event and the read, so
+ * an existsSync guard would still race.
+ */
+function read(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Wrap a watch handler so nothing it does can reach the main process as an
+ * uncaught exception or an unhandled rejection.
+ * @param label - name used when reporting a failure.
+ * @param run - the handler.
+ * @returns the guarded handler.
+ */
+function guard(label: string, run: () => void | Promise<void>): () => void {
+  const report = (error: unknown): void => console.error(`[dev] ${label} failed:`, error)
+  return () => {
+    try {
+      const result = run()
+      if (result instanceof Promise) void result.catch(report)
+    } catch (error) {
+      report(error)
+    }
+  }
+}
 
 /**
  * Install the watchers on the main window.
@@ -31,8 +69,8 @@ export function installDevTuning(win: BrowserWindow, repoRoot: string): void {
 
   let cssKey: string | undefined
   const applyCss = async (): Promise<void> => {
-    if (!existsSync(cssPath)) return
-    const css = readFileSync(cssPath, 'utf8')
+    const css = read(cssPath)
+    if (css === undefined) return
     const next = await win.webContents.insertCSS(css)
     if (cssKey !== undefined) await win.webContents.removeInsertedCSS(cssKey)
     cssKey = next
@@ -40,9 +78,8 @@ export function installDevTuning(win: BrowserWindow, repoRoot: string): void {
   }
 
   const runEval = async (): Promise<void> => {
-    if (!existsSync(evalPath)) return
-    const code = readFileSync(evalPath, 'utf8')
-    if (code.trim() === '') return
+    const code = read(evalPath)
+    if (code === undefined || code.trim() === '') return
     try {
       const result: unknown = await win.webContents.executeJavaScript(code)
       writeFileSync(join(repoRoot, 'dev-eval.out.json'), JSON.stringify(result, null, 2))
@@ -62,8 +99,8 @@ export function installDevTuning(win: BrowserWindow, repoRoot: string): void {
   const click = (): void => {
     // Consume the request: fs.watch fires more than once per write, and a
     // repeated click silently undoes whatever the first one toggled.
-    const raw = readFileSync(clickPath, 'utf8').trim()
-    if (raw === '') return
+    const raw = read(clickPath)?.trim()
+    if (raw === undefined || raw === '') return
     writeFileSync(clickPath, '')
     const [x = NaN, y = NaN] = raw.split(',').map(Number)
     if (!Number.isFinite(x) || !Number.isFinite(y)) return
@@ -82,17 +119,23 @@ export function installDevTuning(win: BrowserWindow, repoRoot: string): void {
     }
   }
 
-  win.webContents.on('did-finish-load', () => {
+  win.webContents.on('did-finish-load', guard('css', () => {
     cssKey = undefined
-    void applyCss()
-  })
+    return applyCss()
+  }))
   // fs.watch needs the file to exist; seed empty working files.
   for (const path of [cssPath, evalPath, capturePath, clickPath]) {
-    if (!existsSync(path)) writeFileSync(path, '')
+    if (read(path) === undefined) writeFileSync(path, '')
   }
-  watch(cssPath, debounce(() => void applyCss()))
-  watch(evalPath, debounce(() => void runEval()))
-  watch(capturePath, debounce(() => void capture()))
-  watch(clickPath, debounce(() => click()))
+  // An FSWatcher throws its 'error' event when nothing is listening, and
+  // deleting a watched file is one way to raise one.
+  for (const [path, label, run] of [
+    [cssPath, 'css', applyCss],
+    [evalPath, 'eval', runEval],
+    [capturePath, 'capture', capture],
+    [clickPath, 'click', click],
+  ] as const) {
+    watch(path, debounce(guard(label, run))).on('error', (error) => console.error(`[dev] watch ${label} failed:`, error))
+  }
   console.log('[dev] live tuning active: dev-overrides.css / dev-eval.js / dev-capture.request / dev-click.request')
 }
