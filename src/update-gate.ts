@@ -3,6 +3,11 @@
  * (Squirrel.Mac verifies the signature), so unsigned macOS builds fall back
  * to a notify-only path. The signed flag is baked by the build config
  * (extraMetadata), not sniffed at runtime.
+ *
+ * The notify-only path is also what currently hides a broken macOS update feed —
+ * both mac jobs overwrite one `latest-mac.yml`, so it covers a single
+ * architecture. See the note above `mac:` in electron-builder.yml before setting
+ * macUpdatesSigned true.
  */
 export interface UpdateGateInput {
   platform: NodeJS.Platform

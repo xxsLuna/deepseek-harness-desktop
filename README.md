@@ -37,6 +37,10 @@ Sessions, credentials, and settings live in `~/.dsh`, shared with the `dsh` CLI 
 
 The app version tracks the upstream harness version exactly. A desktop release `v0.1.0-rc.6` bundles `@deepseek-ai/dsh@0.1.0-rc.6`; a desktop-only fix appends a build counter (`v0.1.0-rc.6-2`). A daily workflow watches npm and opens a bump PR when upstream publishes; the PR's checks re-run the sidecar contract suite, so a green bump PR is releasable as-is.
 
+**Once a build counter has shipped, keep it on every later version.** The counter is appended with a hyphen, so `0.1.0-rc.6-3` splits its pre-release into `['rc', '6-3']`, and semver ranks the non-numeric `6-3` *above* the numeric `7` in `0.1.0-rc.7`. A plain `0.1.0-rc.7` release is therefore **older** than `0.1.0-rc.6-3` and would never be offered to anyone running it — the app's gate and electron-updater's both refuse it. So upstream `0.1.0-rc.7` ships as `v0.1.0-rc.7-1`, not `v0.1.0-rc.7`. The automated bump PR sets the bare upstream version and has to be corrected before release.
+
+Non-numeric identifiers compare as strings, so the counter holds to `rc.9-1` and breaks at `rc.10-1` (which sorts below `rc.9-1`). At that point leave the pre-release line — `0.2.0` outranks every version above and has no ordering traps left. `tests/unit/update-gate.spec.ts` asserts all of this, so picking an unreachable version fails a check rather than stranding users.
+
 ## How it works
 
 The app is a thin Electron shell around the **unmodified** published harness:
@@ -91,6 +95,8 @@ check names embed the matrix values, so editing an entry would rename a
 required check and block every pull request.
 
 ## Development
+
+Only the root `package.json` carries the release version — electron-builder reads it, and everything at runtime goes through `app.getVersion()` or `harness.json`. The `packages/*` manifests are not maintained against it and drift.
 
 Everything is project-local (`node_modules`), nothing is installed system-wide:
 
