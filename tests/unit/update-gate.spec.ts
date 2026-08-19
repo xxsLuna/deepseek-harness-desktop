@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { isNewerVersion, updateMode } from '../../src/update-gate.js'
 
@@ -67,11 +69,23 @@ describe('isNewerVersion', () => {
 })
 
 /**
- * Every version this project has published, oldest first. A release that is not
- * newer than ALL of these is unreachable: the client compares against the one it
- * is running, not the highest one.
+ * Every version published BEFORE the one in package.json, oldest first.
+ *
+ * A release that is not newer than ALL of these is unreachable, because a client
+ * compares the feed against the version IT is running — not against the highest
+ * one ever shipped. Someone still on the oldest build has to be able to move.
+ *
+ * When bumping package.json for the next release, append the version being
+ * superseded. That is the only manual step: the assertion below reads the new
+ * version from the manifest, so it is checked against this list automatically —
+ * which is the point, because the bump that caused all this was automated.
  */
 const PUBLISHED = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3']
+
+/** The version this working tree would ship, straight from the manifest. */
+const shipping = (JSON.parse(
+  readFileSync(join(import.meta.dirname, '..', '..', 'package.json'), 'utf8'),
+) as { version: string }).version
 
 describe('release version reachability', () => {
   it('refuses the version the build-counter convention would have produced next', () => {
@@ -90,11 +104,13 @@ describe('release version reachability', () => {
     expect(isNewerVersion('0.1.0-rc.7.1', '0.1.0-rc.6-3')).toBe(false)
   })
 
-  it('accepts the version the next release actually uses', () => {
-    // Keeping the counter makes the comparison non-numeric on both sides, where
-    // precedence is a plain string compare and '7-1' > '6-3'.
+  it('ships a version every published build can reach', () => {
+    // The guard that matters, and the one that catches the mistake above before it
+    // reaches a user rather than after. Reads package.json rather than a literal,
+    // so it covers whatever the next bump writes there — including an automated
+    // one, which is exactly where the bare-upstream version came from.
     for (const published of PUBLISHED) {
-      expect(isNewerVersion('0.1.0-rc.7-1', published), published).toBe(true)
+      expect(isNewerVersion(shipping, published), `${shipping} must be newer than ${published}`).toBe(true)
     }
   })
 
