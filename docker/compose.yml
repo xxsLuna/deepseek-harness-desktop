@@ -29,7 +29,7 @@ services:
       - /work/build
       - /work/dist
     command: >-
-      bash -lc "npm ci && npm run stage && npm run fetch-node && npm run build
+      bash -lc "npm ci && npm run stage && npm run build
       && npx electron-builder --linux --publish never
       && node scripts/verify-payload.mjs out/linux-unpacked/resources
       && node scripts/verify-payload.mjs out/linux-arm64-unpacked/resources || true"

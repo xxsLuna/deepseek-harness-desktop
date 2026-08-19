@@ -25,13 +25,14 @@ jobs:
             runner: macos-latest
             builder: --mac --arm64
           # Cross-built on Apple Silicon: the macos-13 Intel runners are being
-          # retired and their queue no longer clears. The payload is a stock
-          # Node binary plus stock prebuilds, both fetched per target arch, so
-          # nothing here is compiled against the host.
+          # retired and their queue no longer clears. The payload is stock
+          # prebuilds and no compiled-here code at all, so nothing is built
+          # against the host. targetArch tells the prune which arch to keep,
+          # since it cannot read that from the runner.
           - target: mac-x64
             runner: macos-latest
             builder: --mac --x64
-            nodeArch: x64
+            targetArch: x64
             cross: true
           - target: win-x64
             runner: windows-latest
@@ -56,9 +57,6 @@ jobs:
       - name: Stage harness
         run: npm run stage
 
-      - name: Fetch bundled Node
-        run: npm run fetch-node -- --arch ${{ matrix.nodeArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-
       - name: Build
         run: npm run build
 
@@ -67,7 +65,7 @@ jobs:
       # load-bearing fails here rather than on a user's machine.
       - name: Prune payload
         if: ${{ !matrix.cross }}
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.nodeArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.targetArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Unit tests
         run: npm test
@@ -85,7 +83,7 @@ jobs:
       # rule natively.
       - name: Prune payload (cross build)
         if: ${{ matrix.cross }}
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.nodeArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.targetArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Package
         env:

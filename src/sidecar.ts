@@ -1,7 +1,7 @@
 /**
- * Sidecar supervision: spawn the harness under the bundled stock Node, wait
- * for the socket to answer, restart on unexpected exit, and terminate on
- * quit. The harness process is the only writer of $DSH_HOME state, and the
+ * Sidecar supervision: spawn the harness on Electron's own Node, wait for the
+ * socket to answer, restart on unexpected exit, and terminate on quit. The
+ * harness process is the only writer of $DSH_HOME state, and the
  * single-instance lock in main guarantees at most one per machine user.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -11,8 +11,6 @@ import type { SidecarAddress } from './socket-path.js'
 import type { TitleBand } from './window.js'
 
 export interface SidecarPaths {
-  /** The bundled node binary (or a PATH command in dev). */
-  readonly nodeBinary: string
   /** The staged harness root (holding node_modules). */
   readonly harnessRoot: string
 }
@@ -65,9 +63,17 @@ export class Sidecar {
 
   /** Spawn and resolve once the socket answers (rejects after timeoutMs). */
   async start(timeoutMs = 60_000): Promise<void> {
-    const { nodeBinary, harnessRoot, address, titleBand, path, cwd, onLog, onUnexpectedExit } = this.options
+    const { harnessRoot, address, titleBand, path, cwd, onLog, onUnexpectedExit } = this.options
     const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
-    const child = spawn(nodeBinary, [entry], {
+    // process.execPath is this app's own Electron binary, and
+    // ELECTRON_RUN_AS_NODE below makes it behave as plain node. It replaces the
+    // second stock Node binary this used to ship beside the harness — 89MB for
+    // one file. Safe because the ABI matches where it has to: Electron 43
+    // carries Node 24.18 at NAPI 10 against the stock 24.19 at NAPI 10, so every
+    // prebuild in the staged tree loads unchanged. Asserted in
+    // tests/contract/native-tools.spec.ts, node:sqlite included — Electron has
+    // historically omitted that one, and the sqlite backends need it.
+    const child = spawn(process.execPath, [entry], {
       // A GUI launch inherits the session manager's cwd (often `/`), which the
       // harness would use as its relative-path base and sandbox root.
       cwd,
@@ -82,11 +88,16 @@ export class Sidecar {
         DSH_DESKTOP_BAND_HEIGHT: String(titleBand.height),
         DSH_DESKTOP_BAND_LEAD: String(titleBand.lead),
         DSH_DESKTOP_BAND_MENU: titleBand.menuButton ? '1' : '0',
-        ELECTRON_RUN_AS_NODE: undefined,
+        // Runs execPath as plain node instead of booting a second app window.
+        // Inherited by everything the harness spawns, which is what keeps a
+        // subagent or a worker_thread re-executing execPath in Node mode too.
+        ELECTRON_RUN_AS_NODE: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
-      // node.exe is a console binary: without this, a GUI launch on Windows
-      // pops a console window, and every grandchild shell inherits it.
+      // Kept from the stock-Node era, where node.exe was a console binary and a
+      // GUI launch popped a window every grandchild shell inherited. Electron's
+      // binary is GUI-subsystem so it no longer applies to this process, but the
+      // shells the harness spawns are still console binaries.
       windowsHide: true,
     })
     this.child = child

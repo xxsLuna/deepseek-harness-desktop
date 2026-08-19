@@ -71,6 +71,23 @@ the launcher. Cross the boundary instead:
 - **Launcher → page:** `webContents.executeJavaScript` writing a root
   attribute the CSS keys off (the fullscreen and navigation states).
 
+The launcher also supplies the harness's **runtime**. It spawns the staged tree
+on its own Electron binary under `ELECTRON_RUN_AS_NODE`, rather than shipping a
+stock Node beside it — 89MB and one file. That is safe only because every native
+prebuild in the tree is NAPI, so Electron's Node (24.18, NAPI 10) loads what the
+stock one (24.19, NAPI 10) did; the differing module ABI (148 vs 137) never comes
+into play. `harness.json`'s `node` field is therefore a constraint on Electron's
+Node, not a binary to fetch.
+
+Do not take that on faith when bumping Electron. It is a patched Node, and the
+regressions are silent and specific — `node:sqlite` has been absent from Electron
+before now, and the sqlite persistence and search backends need it.
+`tests/contract/native-tools.spec.ts` boots every one of these under the real
+binary (Node major against the pin, NAPI level, `node:sqlite`, worker threads,
+`node-pty`, the packaged ripgrep) and `tests/contract/sidecar.spec.ts` boots the
+whole tree on it, so a bad bump fails by name instead of at a user's first
+terminal.
+
 ## The payload is pruned, never bundled
 
 `scripts/prune-payload.mjs` strips what the app never loads from the staged

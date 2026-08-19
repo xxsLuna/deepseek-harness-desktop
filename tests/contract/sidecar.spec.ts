@@ -4,11 +4,14 @@
  * every seam this app depends on. When an upstream version bump breaks one of
  * these, the failure names the exact broken contract.
  *
- * Requires a staged harness (npm run stage) and runs without Electron.
+ * Requires a staged harness (npm run stage). Boots on Electron's binary under
+ * ELECTRON_RUN_AS_NODE, which is the runtime the shipped app uses, but starts no
+ * browser window — so this still runs headless.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -17,6 +20,9 @@ const root = join(import.meta.dirname, '..', '..')
 const harnessRoot = join(root, 'build', 'harness')
 const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
 const token = 'contract-test-token'
+// Resolved through the electron package rather than guessed at, so it follows
+// the version pinned in package.json.
+const electronBinary = createRequire(import.meta.url)('electron') as string
 
 interface SocketResponse {
   status: number
@@ -87,9 +93,13 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     socketPath = process.platform === 'win32'
       ? `\\\\.\\pipe\\dsh-contract-${Date.now()}-${process.pid}`
       : join(socketDir, 's')
-    child = spawn(process.execPath, [entry], {
+    // Electron's own binary, as the launcher spawns it — not this runner's Node.
+    // The harness boots on Electron's Node in the shipped app, so booting it on
+    // anything else here would leave the one runtime that matters untested.
+    child = spawn(electronBinary, [entry], {
       env: {
         ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
         DSH_HOME: home,
         DSH_DESKTOP_SOCKET: socketPath,
         DSH_DESKTOP_TOKEN: token,
