@@ -53,7 +53,7 @@ The app is a thin Electron shell around the **unmodified** published harness:
 | `@dsh-desktop/bundle` | the surface glue — dist fallback owner, the two SSE event routes, the desktop-surface prompt section and `DSH_SURFACE` — plus the sidecar boot entry and the patch layer that composes all of the above |
 
   Everything the harness process does differently for the desktop is one of those rows. What cannot be a row is the Electron launcher in `src/`: it is the host process that *spawns* the harness, so it runs before any plugin exists and owns things no plugin can reach — the window and its title bar, the tray, native menus, notifications, downloads, the updater, and the `dsh://` protocol handler.
-- The main process spawns that tree under a bundled stock Node, so every native prebuild stays valid — no Electron ABI rebuilds, and `node-pty`, the packaged ripgrep and `node:sqlite` all keep working. `protocol.handle('dsh')` proxies the window's requests to the socket.
+- The main process spawns that tree on its own Electron binary under `ELECTRON_RUN_AS_NODE`, so every native prebuild stays valid — no Electron ABI rebuilds, and `node-pty`, the packaged ripgrep and `node:sqlite` all keep working. No second Node runtime ships, which is 89MB the installer does not carry; `tests/contract/native-tools.spec.ts` asserts the ABI holds rather than assuming it. `protocol.handle('dsh')` proxies the window's requests to the socket.
 - Coupling to upstream is confined to the seams asserted by `tests/contract` — the version-tracking canary.
 
 ### What running inside a desktop app changes
@@ -108,7 +108,7 @@ Docker equivalents (checks and Linux packaging): `docker compose -f docker/compo
 
 `tests/contract` is the version-tracking canary: it boots the staged harness over a socket without Electron and asserts every seam this app depends on — the transport, the agent presets, session creation and export, the interaction plane, and the native tool paths (`node-pty`, the packaged ripgrep, `node:sqlite`). An upstream bump that breaks one of them fails there by name.
 
-Packaging locally: `npm run fetch-node && npm run prune && npx electron-builder --<mac|win|linux>` then `node scripts/verify-payload.mjs <resources dir>` and `node scripts/smoke-packaged.mjs`.
+Packaging locally: `npm run prune && npx electron-builder --<mac|win|linux>` then `node scripts/verify-payload.mjs <resources dir>` and `node scripts/smoke-packaged.mjs`.
 
 `npm run prune` is destructive on `build/harness` and pass-specific: it strips
 the sourcemaps, declarations, docs, test trees and foreign-platform prebuilds

@@ -9,7 +9,7 @@
  */
 import { app, BrowserWindow, crashReporter, protocol, screen } from 'electron'
 import { homedir, tmpdir } from 'node:os'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSidecarAddress } from './socket-path.js'
@@ -96,22 +96,18 @@ function focusMainWindow(): void {
   win.focus()
 }
 
-/** Resolve the node binary and harness root for this launch (packaged vs dev). */
+/**
+ * Resolve the harness root for this launch (packaged vs dev).
+ *
+ * No runtime to resolve any more: the sidecar runs the harness on this app's
+ * own Electron binary under ELECTRON_RUN_AS_NODE, which is correct in both
+ * modes without a branch — packaged it is the installed executable, in dev it
+ * is node_modules/electron. That also removes the old dev/packaged skew, where
+ * dev fell back to whatever `node` PATH offered when build/node was absent.
+ */
 function resolvePaths(): SidecarPaths {
-  if (app.isPackaged) {
-    const resources = process.resourcesPath
-    return {
-      nodeBinary: join(resources, 'node', process.platform === 'win32' ? 'node.exe' : 'node'),
-      harnessRoot: join(resources, 'harness'),
-    }
-  }
-  const repoRoot = fileURLToPath(new URL('..', import.meta.url))
-  const fetched = join(repoRoot, 'build', 'node', process.platform === 'win32' ? 'node.exe' : 'node')
-  return {
-    // Dev prefers the fetched runtime when present so dev matches the package.
-    nodeBinary: existsSync(fetched) ? fetched : 'node',
-    harnessRoot: join(repoRoot, 'build', 'harness'),
-  }
+  if (app.isPackaged) return { harnessRoot: join(process.resourcesPath, 'harness') }
+  return { harnessRoot: join(fileURLToPath(new URL('..', import.meta.url)), 'build', 'harness') }
 }
 
 async function run(): Promise<void> {

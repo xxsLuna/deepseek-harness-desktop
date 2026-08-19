@@ -81,12 +81,15 @@ if (existsSync(packagesDir)) {
   }
 }
 
-// The staged harness decides which Node it needs; fail loud on a mismatch
-// with the Node major this repo pins for bundling.
+// The staged harness decides which Node it needs; report it against the major
+// this repo pins, and fail loud on a version mismatch.
 if (!localOnly) {
   const dshManifest = JSON.parse(readFileSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
   const engines = dshManifest.engines?.node ?? '(unspecified)'
-  console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines}; bundling Node ${pin.node}.x`)
+  // The pin is no longer a Node binary to fetch: the harness runs on Electron's
+  // own Node, so harness.json's `node` is a constraint on THAT, asserted in
+  // tests/contract/native-tools.spec.ts.
+  console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines}; requires Node ${pin.node}.x (supplied by Electron)`)
   if (dshManifest.version !== pin.harness) {
     throw new Error(`staged version ${dshManifest.version} does not match pin ${pin.harness}`)
   }

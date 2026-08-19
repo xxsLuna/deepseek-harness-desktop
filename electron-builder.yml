@@ -7,11 +7,16 @@ directories:
   # build/ is the harness staging dir, so icons live in assets/
   buildResources: assets
 
-# The asar holds only this shell's compiled main; the harness tree and the
-# stock Node runtime ship beside it so native prebuilds and spawned binaries
-# stay ordinary files on disk (no asar unpacking, no Electron ABI rebuilds).
-# They are copied by the afterPack hook — the builder's file matcher
-# hard-excludes node_modules paths, and the harness tree is one.
+# The asar holds only this shell's compiled main; the harness tree ships beside
+# it so native prebuilds and spawned binaries stay ordinary files on disk (no
+# asar unpacking, no Electron ABI rebuilds). It is copied by the afterPack hook
+# — the builder's file matcher hard-excludes node_modules paths, and the harness
+# tree is one.
+#
+# No second Node runtime ships: the harness runs on this app's own Electron
+# binary under ELECTRON_RUN_AS_NODE (src/sidecar.ts), which is 89MB the installer
+# no longer carries. The ABI question that decision turns on is asserted in
+# tests/contract/native-tools.spec.ts, not assumed.
 files:
   - dist/**
   - package.json

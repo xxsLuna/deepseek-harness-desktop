@@ -33,9 +33,12 @@ const assertExecutable = (path, label) => {
 // 1. the shell's own asar
 assertExists(join(resources, 'app.asar'), 'shell')
 
-// 2. the bundled Node runtime
-const nodeBinary = join(resources, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
-assertExecutable(nodeBinary, 'node runtime')
+// 2. no bundled Node runtime: the harness runs on the app's own Electron binary
+// under ELECTRON_RUN_AS_NODE. A stray one means afterPack regressed and the
+// installer grew 89MB again.
+if (existsSync(join(resources, 'node'))) {
+  failures.push(`node runtime: unexpected ${join(resources, 'node')} — the harness runs on Electron's own Node`)
+}
 
 // 3. the staged harness: entry, our packages, and the pinned version
 const harness = join(resources, 'harness')
