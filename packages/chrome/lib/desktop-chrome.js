@@ -88,8 +88,13 @@
     const placeNav = () => {
       const sidebar = document.querySelector('[class*="_sidebarCol"]')
       const edge = sidebar === null ? 0 : sidebar.getBoundingClientRect().right
-      // Never behind the menu button, whatever the sidebar is doing.
-      const floor = menu.getBoundingClientRect().right
+      // Never over what is already at the left of the band, whatever the
+      // sidebar is doing. The floor is the CONTROLS box, not the menu button:
+      // where the platform draws its own window controls the button is
+      // display:none — its rect reads 0 — while the box still spans the `lead`
+      // reserved for them. Measured: with a collapsed rail those buttons
+      // otherwise land at x=62, inside macOS's traffic lights.
+      const floor = controls.getBoundingClientRect().right
       root.style.setProperty('--dsh-title-nav-x', `${String(Math.round(Math.max(edge, floor)))}px`)
     }
 
