@@ -60,9 +60,17 @@ const bundlePatch = (pkg) => join(dirname(require.resolve(`${pkg}/package.json`)
 const home = resolveDshHome()
 const environment = loadLayeredEnv(NAME, home)
 
-const layers = [
+// Kept separate rather than concatenated straight away, because "does upstream
+// still have a row called X" is a different question from "is X anywhere in the
+// composition" — and only the first one can be answered by a layer we do not
+// write. See requireUpstreamRows below.
+const upstreamLayers = [
   ...loadOverlayPatches(NAME, bundlePatch('@deepseek-ai/dsh-base')),
   ...loadOverlayPatches(NAME, bundlePatch('@deepseek-ai/dsh-web-app')),
+]
+
+const layers = [
+  ...upstreamLayers,
   ...loadOverlayPatches(NAME, fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))),
   // The user's home-level overrides keep working exactly as they do for the CLI.
   ...(loadOptionalPatches(NAME, join(home, 'cordis.patch.yml')) ?? []),
@@ -73,11 +81,50 @@ const layers = [
 // both top-level rows and `- insert:` groups, and the rows we need to patch
 // (agent-presets, the telemetry row) are inserted ones — scanning only the top
 // level silently finds nothing.
-const rows = new Map()
-for (const entry of layers) {
-  for (const row of Array.isArray(entry?.insert) ? entry.insert : [entry]) {
-    if (typeof row?.id === 'string') rows.set(row.id, row)
+/**
+ * Index patch rows by id, following `- insert:` groups as well as top-level rows.
+ * @param entries - patch layer entries.
+ * @returns the rows by id.
+ */
+function indexRows(entries) {
+  const map = new Map()
+  for (const entry of entries) {
+    for (const row of Array.isArray(entry?.insert) ? entry.insert : [entry]) {
+      if (typeof row?.id === 'string') map.set(row.id, row)
+    }
   }
+  return map
+}
+
+const rows = indexRows(layers)
+const upstreamRows = indexRows(upstreamLayers)
+
+/**
+ * Fail now if upstream no longer has a row this composition patches by id.
+ *
+ * Upstream's applier **warns and skips** an id it cannot find — `warn("patch:
+ * entry %C not found", id)` in `dsh-app-boot`. It does not throw, and the warning
+ * does not reach the app log, so a renamed row leaves our patch a silent no-op
+ * and the upstream row at its default. For the rows below that default is "on".
+ *
+ * The check has to run against the UPSTREAM layers. Testing `rows` would always
+ * pass: our own `cordis.patch.yml` names these same ids, so they are in the
+ * composition whether or not upstream still defines them. That is why the
+ * `rows.has()` guards that already existed did not cover this — the ids they
+ * guard (`agent-presets`, `session-telemetry-otel`) happen to come from upstream,
+ * so for those it works by luck of where they are declared.
+ * @param ids - upstream row ids this app depends on existing.
+ * @param why - what breaks if they are gone, for the error message.
+ * @returns nothing; throws when any is missing.
+ */
+function requireUpstreamRows(ids, why) {
+  const missing = ids.filter((id) => !upstreamRows.has(id))
+  if (missing.length === 0) return
+  throw new Error(
+    `${NAME}: upstream no longer defines the patch row(s) ${missing.join(', ')}. `
+    + `${why} Check the row ids in @deepseek-ai/dsh-base and @deepseek-ai/dsh-web-app `
+    + 'against packages/bundle/cordis.patch.yml — a rename here is silent otherwise.',
+  )
 }
 
 const overlays = []
@@ -88,26 +135,44 @@ const overlays = []
 // cannot serve, and re-enabling `directory-picker` restores an OS chooser this
 // process cannot bring to the front (or fails boot on a duplicate service).
 // Everything else in the home layer still applies.
-for (const id of ['web-startup', 'webserver', 'web-runtime', 'connection', 'client-hmr', 'directory-picker']) {
+const DISABLED_UPSTREAM_ROWS = ['web-startup', 'webserver', 'web-runtime', 'connection', 'client-hmr', 'directory-picker']
+requireUpstreamRows(
+  DISABLED_UPSTREAM_ROWS,
+  'This app requires them off: webserver/connection would bind a real TCP port and mount a WebSocket '
+  + 'carrier the app scheme cannot serve, and directory-picker restores an OS chooser this process '
+  + 'cannot bring to the front. Refusing to boot rather than starting with them on.',
+)
+for (const id of DISABLED_UPSTREAM_ROWS) {
   overlays.push({ id, disabled: true })
 }
 
 // Agent presets ship inside the dsh package and are pointed at by the
 // launcher, not by any bundle — without this overlay no preset exists and
 // every session.create fails with `agent-preset-not-found`.
-if (rows.has('agent-presets')) {
-  const presetRoot = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
-  overlays.push({
-    id: 'agent-presets',
-    config: {
-      ...rows.get('agent-presets')?.config ?? {},
-      roots: [{ path: `${presetRoot}/`, trust: 'system' }],
-    },
-  })
-}
+requireUpstreamRows(
+  ['agent-presets'],
+  'Without this overlay no preset exists and every session.create fails with agent-preset-not-found, '
+  + 'which is an app that opens and can do nothing.',
+)
+const presetRoot = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
+overlays.push({
+  id: 'agent-presets',
+  config: {
+    ...rows.get('agent-presets')?.config ?? {},
+    roots: [{ path: `${presetRoot}/`, trust: 'system' }],
+  },
+})
 
 // Same opt-out the CLI honours: any non-empty value disables the row.
-if ((process.env.DSH_TELEMETRY_DISABLED ?? '') !== '' && rows.has('session-telemetry-otel')) {
+if ((process.env.DSH_TELEMETRY_DISABLED ?? '') !== '') {
+  // Loud on purpose, and only when the switch is actually set. This is a privacy
+  // request: silently failing open because the row was renamed is worse than not
+  // starting, and the old `rows.has()` guard did exactly that.
+  requireUpstreamRows(
+    ['session-telemetry-otel'],
+    'DSH_TELEMETRY_DISABLED is set, and the row it disables is gone — so telemetry would stay ON '
+    + 'while the switch appears honoured.',
+  )
   overlays.push({ id: 'session-telemetry-otel', disabled: true })
 }
 
