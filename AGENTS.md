@@ -30,6 +30,23 @@ commit, so a trailer left on any `dev` commit reaches `main` anyway. Prefer
 
 Referencing the filename `CLAUDE.md` is fine — it names a file, not an author.
 
+**The rewrite cleaned `main`; it did not clean GitHub.** `main` is clean (checked
+anonymously: 0 trailers in 50 commits), but GitHub keeps the pre-rewrite objects
+and still serves them to anonymous readers:
+
+- `refs/pull/3/head` — a live server-side ref. `pulls/3/commits` returns
+  `67e46a3`, `8153843`, `396cfe3`, each with GitHub login `Minsang-MICUBE` and a
+  `Co-Authored-By: Claude Opus 5` trailer. The PR's Commits tab shows this.
+- `19c3e80` — the orphaned squash-merge commit of PR #3, unreachable from any
+  branch yet still `200` at `/commit/19c3e80…`, with five trailer lines naming
+  both Claude and `Minsang Cho`.
+
+Nothing local removes these: no branch points at them, so `git push --force` and
+another rewrite change nothing. Removal needs GitHub Support to purge the
+unreachable objects and PR refs, or the repo to be recreated (which forfeits the
+releases and their download counts). **Do not report this rule as satisfied on the
+strength of a clean `git log`** — check the PR refs too.
+
 ---
 
 ## Taking a new upstream version
@@ -208,11 +225,55 @@ electron-updater's channel walk picks the new tag, fails to fetch its
 the error handler. **Every existing client's update check is broken for as long
 as the draft sits.** Verify the feed, write the notes, publish.
 
+### Count the drafts before you publish one
+
+**The five build jobs race to create the release, and can end up creating two.**
+All five run `electron-builder --publish always` in parallel (`build.yml`, the
+`Package` step); each one creates the draft if it does not already see one, and
+two jobs that check at the same moment both create it. On
+`0.1.0-desktop-v0.8.0` that produced **two drafts on the same tag** with the
+assets split 9/7 and a `latest-mac.yml` in each. `gh release view <tag>` resolves
+to just one of them, so publishing "the draft" ships an incomplete release and
+orphans the rest — and the feed it publishes describes files that are not there.
+
+Earlier releases got one draft by luck, not by design: the jobs happened to start
+far enough apart. Assume it will recur, and check by id rather than by tag:
+
+```sh
+gh api repos/xxsLuna/deepseek-harness-desktop/releases \
+  --jq '.[] | select(.tag_name=="v<version>") | "\(.id) draft=\(.draft) assets=\(.assets|length)"'
+```
+
+There is no move-asset API, so consolidating means download-and-re-upload. Keep
+the draft holding the larger byte total and move the other's assets into it — and
+**verify each transfer by hash, not by size**: the feeds carry the build's own
+`sha512` for every artifact, so a truncated download cannot slip through as a
+published installer. Then `DELETE /releases/{id}` the duplicate (by **id** — a
+tag-based delete can take the tag with it, and the tag is what `release.yml`
+already gated).
+
+A proper fix is to stop the matrix jobs from creating the release at all — one
+job creates the draft, the five upload into it. Untested here; it can only be
+validated by cutting a release.
+
 Before publishing, check the feed rather than assuming:
 
 ```sh
 curl -sSL https://github.com/xxsLuna/deepseek-harness-desktop/releases/download/v<version>/latest.yml
 # version: must match package.json exactly
+```
+
+**Publish as Latest — never tick "Set as a pre-release".** The macOS path fetches
+`releases/latest/download/latest-mac.yml` (`src/updater.ts`), so it reads whatever
+GitHub currently calls Latest rather than this release's own feed. Leave an older
+release as Latest and every mac client on the new version is offered the **older**
+one, because `isNewerVersion('0.1.0-rc.7-1', '0.1.0-desktop-v0.8.0')` is `true` —
+`rc` outranks `desktop-v0`. electron-publish creates the draft
+`prerelease: false`, so the default is already right; this is about not changing
+it. Confirm after publishing:
+
+```sh
+curl -s -o /dev/null -w '%{redirect_url}\n' https://github.com/xxsLuna/deepseek-harness-desktop/releases/latest
 ```
 
 Release notes are hand-written user-facing prose on the GitHub release (there is
@@ -359,10 +420,23 @@ It does **not** cover these, and each one fails with no error:
   of Node.
 - **`harness.json`'s node major vs upstream's `engines.node`** — never compared.
   It has been `(unspecified)` upstream so far.
-- **The macOS update feed covers one architecture.** Both mac jobs write one
-  `latest-mac.yml` and the last upload wins. Inert while `macUpdatesSigned` is
-  false; **fix it before enabling mac signing** — see the note above `mac:` in
-  `electron-builder.yml`.
+- **The macOS update feed covers one architecture.** Each mac job writes a
+  `latest-mac.yml` listing only its own arch. The mechanism is not
+  last-upload-wins as this once said: on `0.1.0-desktop-v0.8.0` the two landed in
+  *separate* drafts (see the release section), and consolidating can only keep
+  one. Inert while `macUpdatesSigned` is false — the mac path reads nothing from
+  the file but `version:` — so it is invisible until the day signing is enabled,
+  which is precisely why it is written down. **Fix it before enabling mac
+  signing**; see the note above `mac:` in `electron-builder.yml`. That release
+  ships a hand-merged feed listing all four mac artifacts, x64 first, because
+  electron-updater's `findFile` matches a url containing `process.arch` and
+  otherwise falls back to the first entry — and the x64 names carry no `x64`.
+- **`NODE_OPTIONS` is appended for every Node descendant on Windows**
+  (`packages/bundle/lib/boot.js`) with no version check. `--import` needs Node
+  18.18+ / 20.6+; a project whose own tooling runs an older Node inside the
+  harness shell gets a hard startup failure on every `node` invocation, not a
+  degraded console fix. Nothing tests this, because the harness's own Node is far
+  newer.
 - **`test:contract` skips silently without a staged harness.** A skip is
   indistinguishable from a pass in exactly the situation the suite exists for.
 
