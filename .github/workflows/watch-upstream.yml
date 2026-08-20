@@ -32,12 +32,40 @@ jobs:
         run: |
           PINNED=$(node -p "require('./harness.json').harness")
           LATEST=$(npm view @deepseek-ai/dsh version)
+          # Ahead, not merely different. The pin can legitimately sit ABOVE the
+          # `latest` tag — upstream publishes to `next` first, and a release cut
+          # from a `next` version leaves the pin ahead until `latest` catches up.
+          # Gating on inequality made the watch open a PR walking that pin back
+          # down, every day, until it was closed by hand.
+          AHEAD=$(node -e "
+            const parts = (v) => {
+              const [core, pre = ''] = v.replace(/^v/, '').split(/-(.*)/s)
+              return { core: core.split('.').map(Number), pre: pre === '' ? [] : pre.split('.') }
+            }
+            const a = parts(process.argv[1]), b = parts(process.argv[2])
+            let ahead = null
+            for (let i = 0; i < 3; i += 1) if (a.core[i] !== b.core[i]) { ahead = a.core[i] > b.core[i]; break }
+            if (ahead === null) {
+              if (a.pre.length === 0 || b.pre.length === 0) ahead = b.pre.length > 0
+              else for (let i = 0; ahead === null; i += 1) {
+                const l = a.pre[i], r = b.pre[i]
+                if (l === undefined && r === undefined) { ahead = false; break }
+                if (l === undefined) { ahead = false; break }
+                if (r === undefined) { ahead = true; break }
+                if (l === r) continue
+                const ln = /^\d+\$/.test(l), rn = /^\d+\$/.test(r)
+                ahead = ln !== rn ? rn : ln ? Number(l) > Number(r) : l > r
+              }
+            }
+            console.log(ahead ? 'yes' : 'no')
+          " "$LATEST" "$PINNED")
           echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
           echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
-          echo "pinned $PINNED / latest $LATEST"
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          echo "pinned $PINNED / latest $LATEST / latest ahead of pin: $AHEAD"
 
       - name: Open bump PR
-        if: steps.versions.outputs.pinned != steps.versions.outputs.latest
+        if: steps.versions.outputs.ahead == 'yes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LATEST: ${{ steps.versions.outputs.latest }}

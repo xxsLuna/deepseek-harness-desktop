@@ -1,5 +1,10 @@
 # Working on this repo
 
+This file holds the architecture rules. **`AGENTS.md` holds the procedures** —
+taking an upstream version, the release version scheme, cutting a release,
+running the app, and the list of couplings that fail silently so a green build
+cannot be read as proof. Read both.
+
 This is an **unofficial desktop port of DeepSeek Harness**, and it keeps the
 harness's own motto: *everything is a plugin*. Two commitments follow from that
 and they outrank convenience:

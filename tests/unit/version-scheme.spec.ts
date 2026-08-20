@@ -83,14 +83,31 @@ describe('version scheme ordering', () => {
     expect(isNewerVersion(version(0, 8, 10), version(0, 8, 9))).toBe(true)
   })
 
-  it('lets the leading desktop number override everything after it', () => {
+  it('lets the leading desktop number override everything after it, up to 9', () => {
     // The escape hatch, if the scheme itself ever needs to change again.
     expect(isNewerVersion(version(1, 0, 0), version(0, 99, 99))).toBe(true)
+    expect(isNewerVersion(version(9, 0, 0), version(8, 99, 99))).toBe(true)
+  })
+
+  it('is honest that the leading number is NOT a third numeric axis', () => {
+    // It is fused into the text field — semver reads the pre-release of
+    // 0.1.0-desktop-v0.8.0 as ['desktop-v0', 8, 0], so the leading number is
+    // compared character by character with the word, not as a number. The other
+    // two escaped that by being dot-separated; this one did not.
+    //
+    // Asserted rather than left to be discovered, because the sweep below
+    // deliberately stops at 1 and would otherwise read as full coverage. The
+    // field is an escape hatch meant to move roughly never; if it ever has to
+    // reach 10, the scheme needs a different shape and this test will say so.
+    expect(isNewerVersion(version(10, 0, 0), version(9, 0, 0))).toBe(false)
   })
 
   it('never inverts across a wide sweep', () => {
     // The old scheme looked fine on the cases anyone thought to try and broke on
-    // the first two-digit number. This checks every ordered pair instead.
+    // the first two-digit number. This checks every ordered pair instead —
+    // across two-digit upstream numbers and two-digit build numbers, which are
+    // the two fields that actually move. `ours` stays single-digit on purpose;
+    // its limit is asserted above rather than swept here.
     const sweep: string[] = []
     for (const ours of [0, 1]) {
       for (const upstream of [7, 8, 9, 10, 11, 19, 20, 99]) {

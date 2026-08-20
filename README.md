@@ -52,15 +52,20 @@ pre-release part:
 `harness.json` stays the authority on which upstream is pinned; this is just the
 same fact carried where an installer filename and an update feed can see it.
 
-**Each number is its own dot-separated field on purpose.** semver compares a
-pre-release field as a *number* only when it contains nothing else, and as TEXT
-otherwise — and text compares character by character, so `10` sorts below `9`.
-The previous scheme appended a build counter with a hyphen (`0.1.0-rc.6-3`),
-which put the upstream number inside a text field and meant a plain
-`0.1.0-rc.7` was *older* than `0.1.0-rc.6-3` and would have been offered to
-nobody. Splitting the numbers out removes that entirely:
-`tests/unit/version-scheme.spec.ts` checks every ordered pair across a wide
-sweep and expects no inversion.
+**The upstream number and the build number are each their own dot-separated
+field on purpose.** The scheme number in front is not: semver reads the
+pre-release as `["desktop-v0", 8, 0]`, so that one is fused into the text field
+and only overrides the rest while it stays single-digit.
+
+**Two different semver rules bite here, and confusing them leads to the wrong
+conclusion.** First: a field of nothing but digits ranks *below* any field
+containing a letter or hyphen. That is why the retired scheme broke — with a
+hyphenated build counter, `0.1.0-rc.7` compared `7` against `6-3`, and the
+numeric `7` lost to the non-numeric `6-3`, making a plain rc.7 **older** than the
+published rc.6-3 and offerable to nobody. Second: two non-numeric fields compare
+character by character, so `10-1` sorts below `9-1`. Giving each number its own
+all-digits field escapes both: `tests/unit/version-scheme.spec.ts` checks every
+ordered pair over a wide sweep.
 
 Releases before `0.1.0-desktop-v0.8.0` were named `0.1.0-rc.<n>[-<build>]`, and
 the new scheme is **deliberately unreachable from them** — `desktop-v0` sorts
