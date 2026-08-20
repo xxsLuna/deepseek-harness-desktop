@@ -284,6 +284,58 @@ node scripts/smoke-packaged.mjs
 
 ---
 
+## Windows: where a spawned command actually comes from
+
+Worth reading before debugging anything about how the harness runs commands on
+Windows, because the obvious answer is wrong and cost four failed attempts.
+
+**A console child with no console to inherit gets a fresh, VISIBLE one.** The
+launcher spawns the sidecar with `windowsHide`, which stops the sidecar showing a
+window and leaves it no console to pass down. Upstream's own use never sees this:
+run `dsh` from a terminal and the terminal's console is there to inherit. It only
+appears when a GUI process hosts the harness.
+
+**The shell does not come through `child_process`.** On Windows the ACL sandbox
+(`@deepseek-ai/dsh-sandbox-windows-acl`) calls `CreateProcessAsUserW` through
+koffi, in a *separate runner process*. Defaulting `windowsHide` on
+`child_process` — first `spawn`, then the whole family, then carried into
+descendants — changed nothing. A tool call logs exactly one `child_process`
+spawn, of `process.execPath`, and never the shell.
+
+**Do not "fix" it with a creation flag.** That module's own doc records the
+attempt: `CREATE_NO_WINDOW`/`CREATE_NEW_CONSOLE` are *intentionally absent*
+because under its restriction scheme hidden-console children die with
+`STATUS_DLL_INIT_FAILED (0xC0000142)`. Forcing the flag trades a cosmetic flash
+for commands that do not run.
+
+**What works** is the last clause of that same sentence — "the child shares the
+host console". `packages/bundle/lib/hide-console.mjs` gives each process a
+console without ever showing one: `AttachConsole(ATTACH_PARENT_PROCESS)` first,
+which creates no window, and `AllocConsole` + `ShowWindow(SW_HIDE)` only as a
+fallback. It resolves differently per level on purpose — the sidecar's parent is
+the GUI launcher so it allocates once at startup; the runner's parent is the
+sidecar so it just attaches. No creation flags move, so nothing the sandbox
+depends on moves.
+
+It reaches the runner through `NODE_OPTIONS=--import`, set in `boot.js`. Each
+link was measured: `scrubbedParentEnv` keeps `NODE_OPTIONS`; Electron honours
+`--import` under `ELECTRON_RUN_AS_NODE`, **including the packaged binary**, which
+mattered because Electron is documented to ignore `NODE_OPTIONS` for packaged
+apps.
+
+### Two instrumentation traps this walked into
+
+Both wasted a round, and both look like a result rather than a broken instrument:
+
+- **A spawned child's stderr never reaches the launcher log** —
+  `dsh-subprocess-local` pipes it and collects it as command output. Trace to a
+  FILE. `HARNESS_DESKTOP_SPAWN_TRACE=<path>` does that.
+- **`scrubbedParentEnv` strips every `DSH_*` variable.** A `DSH_`-named trace
+  switch reaches the sidecar and nothing below it, so descendants run with
+  tracing silently off. That is why the switch above is *not* `DSH_`-prefixed —
+  the first version was, and produced a trace that proved nothing about the
+  processes it existed to observe.
+
 ## What a green build does not prove
 
 The contract suite is the version-tracking canary and it is worth trusting for
