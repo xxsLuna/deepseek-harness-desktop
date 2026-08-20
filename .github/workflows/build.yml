@@ -24,16 +24,15 @@ jobs:
           - target: mac-arm64
             runner: macos-latest
             builder: --mac --arm64
-          # Cross-built on Apple Silicon: the macos-13 Intel runners are being
-          # retired and their queue no longer clears. The payload is stock
-          # prebuilds and no compiled-here code at all, so nothing is built
-          # against the host. targetArch tells the prune which arch to keep,
-          # since it cannot read that from the runner.
-          - target: mac-x64
-            runner: macos-latest
-            builder: --mac --x64
-            targetArch: x64
-            cross: true
+          # No Intel macOS target. It was cross-built on Apple Silicon once the
+          # macos-13 runners stopped clearing their queue, on the reasoning that
+          # the payload is stock prebuilds with no compiled-here code — true, and
+          # beside the point: npm chooses which prebuilt platform packages to
+          # DOWNLOAD from the host os/cpu, so the x64 app shipped arm64 koffi,
+          # ripgrep and sharp. Four releases went out that way and CI could not
+          # see it, because a cross-built app cannot be booted on the runner that
+          # made it. Intel is not supported; verify-payload asserts the arch so
+          # re-adding a cross build fails instead of shipping.
           - target: win-x64
             runner: windows-latest
             builder: --win --x64
@@ -64,8 +63,7 @@ jobs:
       # same pruned tree the installer ships, so a rule that deletes something
       # load-bearing fails here rather than on a user's machine.
       - name: Prune payload
-        if: ${{ !matrix.cross }}
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.targetArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Unit tests
         run: npm test
@@ -73,36 +71,27 @@ jobs:
       - name: Contract tests
         run: npm run test:contract
 
-      # A cross build prunes AFTER the suite instead. Pruning targets the build's
-      # arch, which on a cross build is not the runner's, so the host's own
-      # prebuilds are gone by design — node-pty then fails to load and takes the
-      # sidecar boot and the PTY probe with it. Nothing is lost by testing the
-      # full tree here: this runner could only ever have exercised its own arch,
-      # which is exactly what the mac-arm64 job already does. The target's arch
-      # is verified by verify-payload below, and by mac-arm64 running this same
-      # rule natively.
-      - name: Prune payload (cross build)
-        if: ${{ matrix.cross }}
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.targetArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-
       - name: Package
         env:
           GH_TOKEN: ${{ inputs.publish && secrets.GITHUB_TOKEN || '' }}
         run: npx electron-builder ${{ matrix.builder }} --publish ${{ inputs.publish && 'always' || 'never' }}
 
+      # --platform/--arch make it assert that every platform-specific package was
+      # chosen for the target rather than for the build host. That is the check
+      # the retired Intel cross build needed and did not have.
       - name: Verify payload (macOS)
         if: startsWith(matrix.target, 'mac')
         # Glob the bundle rather than naming it: a productName change must not
         # silently turn this gate into a no-op.
-        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources"
+        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources" --platform darwin --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Verify payload (Windows)
         if: startsWith(matrix.target, 'win')
-        run: node scripts/verify-payload.mjs out/win-unpacked/resources
+        run: node scripts/verify-payload.mjs out/win-unpacked/resources --platform win32 --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Verify payload (Linux)
         if: startsWith(matrix.target, 'linux')
-        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources"
+        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources" --platform linux --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       # ELECTRON_DISABLE_SANDBOX: hosted ubuntu-24.04 restricts unprivileged
       # user namespaces and the unpacked build's chrome-sandbox lacks SUID, so
@@ -120,10 +109,8 @@ jobs:
 
       # Promoted to a required gate: an unsigned .app does launch and render on
       # a hosted runner (proven on mac-arm64), so a regression here is real.
-      # A cross-built app cannot run on this host, so only the payload is
-      # verified there — its own arch runs it at release time.
       - name: Packaged smoke (macOS)
-        if: startsWith(matrix.target, 'mac') && !matrix.cross
+        if: startsWith(matrix.target, 'mac')
         run: node scripts/smoke-packaged.mjs
 
       - name: Upload installers
@@ -142,7 +129,7 @@ jobs:
   # The one required status check on main.
   #
   # The matrix jobs cannot be required directly: their check names embed every
-  # matrix value ("build (mac-x64, macos-latest, --mac --x64, x64, true)"), so
+  # matrix value ("build (mac-arm64, macos-latest, --mac --arm64)"), so
   # editing an entry renames the check, and a required check that no longer
   # exists blocks every pull request forever. This name never changes.
   #

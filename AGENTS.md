@@ -367,7 +367,7 @@ cannot be served over the `dsh://` scheme.
 
 ```sh
 npm run build
-npm run prune                 # add --platform/--arch when cross-building
+npm run prune                 # --platform/--arch default to the host
 npx electron-builder --<mac|win|linux>
 node scripts/verify-payload.mjs <resources dir>
 node scripts/smoke-packaged.mjs
@@ -378,10 +378,17 @@ node scripts/smoke-packaged.mjs
 - **`npm run typecheck` needs the unpruned tree.** `packages/connection` and
   `packages/settings` compile against declarations the prune removes. Run
   `npm run stage` to restore; the prune script says so on exit.
-- On a **cross build** the prune targets the build's arch, not the runner's, so
-  the host's own prebuilds are gone and the harness cannot load. CI therefore
-  prunes *after* the test steps for cross builds and *before* them for native
-  ones — do not "simplify" that into one step.
+- **Every target is built on its own architecture, and that is not a
+  convenience.** There are no cross builds left. The Intel macOS target was
+  cross-built on Apple Silicon for four releases and shipped arm64 `koffi`,
+  `ripgrep` and `sharp` inside an x64 app, because `npm install` picks
+  platform-specific optional dependencies from the **host's** `os`/`cpu` — the
+  cross build's own comment argued it was safe since nothing is *compiled* here,
+  which is true and beside the point. Intel macOS is not supported. If a
+  cross build is ever needed, the prune ordering also has to move (it targets the
+  build's arch, so the host's prebuilds go and the harness cannot load in the
+  test steps), and `verify-payload.mjs --platform/--arch` is what makes the
+  package mismatch fail instead of ship.
 
 ---
 
@@ -460,17 +467,21 @@ It does **not** cover these, and each one fails with no error:
   of Node.
 - **`harness.json`'s node major vs upstream's `engines.node`** — never compared.
   It has been `(unspecified)` upstream so far.
-- **The macOS update feed covers one architecture.** Each mac job writes a
-  `latest-mac.yml` listing only its own arch. The mechanism is not
-  last-upload-wins as this once said: on `0.1.0-desktop-v0.8.0` the two landed in
-  *separate* drafts (see the release section), and consolidating can only keep
-  one. Inert while `macUpdatesSigned` is false — the mac path reads nothing from
-  the file but `version:` — so it is invisible until the day signing is enabled,
-  which is precisely why it is written down. **Fix it before enabling mac
-  signing**; see the note above `mac:` in `electron-builder.yml`. That release
-  ships a hand-merged feed listing all four mac artifacts, x64 first, because
-  electron-updater's `findFile` matches a url containing `process.arch` and
-  otherwise falls back to the first entry — and the x64 names carry no `x64`.
+- **Platform-specific packages are chosen by the build host, not by the target.**
+  The one that already shipped: four releases of the Intel macOS build carried
+  arm64 `koffi`, `ripgrep` and `sharp`, and nothing failed anywhere.
+  `verify-payload.mjs --platform/--arch` asserts it now, and the Intel target is
+  gone; the entry stays because re-adding a cross build is a two-line matrix edit
+  and the symptom was silence. See the matrix comment in `build.yml`.
+- **The macOS update feed covered one architecture** while there were two mac
+  jobs: app-builder-lib arch-suffixes the manifest only on Linux, so both wrote
+  `latest-mac.yml` and only one could survive — on `0.1.0-desktop-v0.8.0` they
+  even landed in *separate* drafts, and that release ships a hand-merged feed
+  naming all four mac artifacts, x64 first, because electron-updater's `findFile`
+  matches a url containing `process.arch` and otherwise falls back to the first
+  entry. Moot with one mac job, and it returns the day a second one appears.
+  Inert either way while `macUpdatesSigned` is false, since the mac path reads
+  nothing from the file but `version:`.
 - **`NODE_OPTIONS` is appended for every Node descendant on Windows**
   (`packages/bundle/lib/boot.js`) with no version check. `--import` needs Node
   18.18+ / 20.6+; a project whose own tooling runs an older Node inside the
