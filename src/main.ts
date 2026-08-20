@@ -129,7 +129,12 @@ async function run(): Promise<void> {
     onLog: (line) => console.log(`[sidecar] ${line}`),
     onUnexpectedExit: (code) => {
       console.error(`[sidecar] exited unexpectedly (code ${String(code)}); restarting`)
-      void sidecar.start().catch((error: unknown) => {
+      // restart(), not start(): with the crash handler and the marketplace's
+      // market/restart both able to bring the harness back, this is the only
+      // way the two share one coalesced restart instead of racing two
+      // processes onto one $DSH_HOME. stop() is a no-op here — the process is
+      // already gone — so the recovery itself behaves as it always did.
+      void sidecar.restart().catch((error: unknown) => {
         console.error('[sidecar] restart failed:', error)
         app.exit(1)
       })
@@ -191,6 +196,7 @@ async function run(): Promise<void> {
     }),
     titleBarMergeable: MERGED_TITLE_BAR_PLATFORM,
     checkForUpdates: () => updater?.checkNow(),
+    restartSidecar: () => sidecar.restart(),
   })
   protocol.handle('dsh', async (request) => {
     const pathname = decodeURIComponent(new URL(request.url).pathname)
