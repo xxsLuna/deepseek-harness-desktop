@@ -22,6 +22,7 @@ import {
   parseDesktopSettings,
   type DesktopSettings,
 } from './desktop-settings.js'
+import { type UpdateMode } from './update-gate.js'
 
 /** Fields the launcher can only honour at startup. */
 const RESTART_REQUIRED: readonly (keyof DesktopSettings)[] = ['mergedTitleBar']
@@ -32,8 +33,12 @@ export interface DesktopSettingsView {
   /** App and bundled-harness versions, for the update row. */
   version: string
   harnessVersion: string
-  /** Whether this build can update itself at all (dev builds cannot). */
-  updatable: boolean
+  /**
+   * How this build updates. Not a boolean: 'auto' installs, 'notify-only' can
+   * only point at the releases page, and the section says which — a single
+   * "updatable" flag told unsigned macOS builds they install updates.
+   */
+  updates: UpdateMode
   /** Fields changed since launch that only a restart will apply. */
   pendingRestart: readonly string[]
   /** Whether this platform merges the title bar at all (Linux does not). */
@@ -121,7 +126,7 @@ export class DesktopSettingsStore {
 export interface DesktopSettingsViewInput {
   store: DesktopSettingsStore
   harnessVersion: string
-  updatable: boolean
+  updates: UpdateMode
   titleBarMergeable: boolean
 }
 
@@ -135,7 +140,7 @@ export function desktopSettingsView(input: DesktopSettingsViewInput): DesktopSet
     settings: input.store.get(),
     version: app.getVersion(),
     harnessVersion: input.harnessVersion,
-    updatable: input.updatable,
+    updates: input.updates,
     pendingRestart: input.store.pendingRestart(),
     titleBarMergeable: input.titleBarMergeable,
   }

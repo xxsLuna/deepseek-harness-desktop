@@ -15,14 +15,73 @@ const RELEASES_URL = 'https://github.com/xxsLuna/deepseek-harness-desktop/releas
 const FEED_MAC_YML = 'https://github.com/xxsLuna/deepseek-harness-desktop/releases/latest/download/latest-mac.yml'
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 
-/** Read the build-baked macOS signing flag from the packaged manifest. */
-function macUpdatesSigned(): boolean {
+/** How long a manual check waits for electron-updater to answer. */
+const MANUAL_CHECK_TIMEOUT_MS = 30_000
+
+/**
+ * Read the build-baked macOS signing flag from the packaged manifest.
+ *
+ * Exported because the settings view needs the same answer: it describes what
+ * the update switch does, and on an unsigned macOS build that is "tells you"
+ * rather than "installs". Computing the mode from a hardcoded `true` there said
+ * the wrong thing on the one platform the flag exists for.
+ * @returns true when the build was signed for Squirrel.Mac.
+ */
+export function macUpdatesSigned(): boolean {
   try {
     // package.json inside the asar carries extraMetadata from the build.
     const manifest = require('../package.json') as { desktop?: { macUpdatesSigned?: boolean } }
     return manifest.desktop?.macUpdatesSigned === true
   } catch {
     return false
+  }
+}
+
+type AutoUpdater = (typeof import('electron-updater'))['autoUpdater']
+
+/** What a manual check learned, from whichever event answered first. */
+type ManualOutcome = 'available' | 'up-to-date' | { failed: string }
+
+/**
+ * electron-updater's `autoUpdater` is a process singleton, so its listeners
+ * belong to the process rather than to a check. Registering them inside the
+ * check attached one more `error` listener every four hours: a single failure
+ * then logged once per accumulated listener, and Node's
+ * MaxListenersExceededWarning fired on the eleventh check. Wire it once.
+ */
+let wiring: Promise<AutoUpdater> | undefined
+
+/**
+ * Set only while a manual check is waiting. electron-updater reports through
+ * events rather than through the call's return value, so this is how an outcome
+ * reaches the dialog. A scheduled check leaves it undefined and stays quiet,
+ * which is what the Desktop Settings copy promises.
+ */
+let reportManual: ((outcome: ManualOutcome) => void) | undefined
+
+/**
+ * Load electron-updater and attach its listeners, at most once per process.
+ * @returns the configured singleton.
+ */
+async function autoUpdaterOnce(): Promise<AutoUpdater> {
+  wiring ??= (async () => {
+    const { autoUpdater } = await import('electron-updater')
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.on('error', (error) => {
+      console.warn('[updater]', error.message)
+      reportManual?.({ failed: error.message })
+    })
+    autoUpdater.on('update-available', () => reportManual?.('available'))
+    autoUpdater.on('update-not-available', () => reportManual?.('up-to-date'))
+    return autoUpdater
+  })()
+  try {
+    return await wiring
+  } catch (error) {
+    // A failed import must not poison every later check with a cached rejection.
+    wiring = undefined
+    throw error
   }
 }
 
@@ -90,14 +149,49 @@ export function startUpdater(
 
   const checkAuto = async (): Promise<void> => {
     try {
-      const { autoUpdater } = await import('electron-updater')
-      autoUpdater.autoDownload = true
-      autoUpdater.autoInstallOnAppQuit = true
-      autoUpdater.on('error', (error) => console.warn('[updater]', error.message))
-      await autoUpdater.checkForUpdatesAndNotify()
+      await (await autoUpdaterOnce()).checkForUpdatesAndNotify()
     } catch (error) {
       console.warn('[updater]', error)
+      reportManual?.({ failed: error instanceof Error ? error.message : String(error) })
     }
+  }
+
+  /**
+   * The manual check on the electron-updater path.
+   *
+   * It has to say something. `checkNow` used to fire the check and return, so on
+   * Windows and Linux the menu item produced no dialog at all — no "up to date",
+   * no error — which is the opposite of what the comment beside it claimed and
+   * exactly the platforms that do self-update. electron-updater answers through
+   * events, so wait for the first one, with a timeout so a feed that never
+   * responds cannot leave the menu item looking dead.
+   * @returns nothing; it reports through a dialog.
+   */
+  const checkAutoManual = async (): Promise<void> => {
+    const outcome = await new Promise<ManualOutcome>((resolve) => {
+      const expiry = setTimeout(() => { resolve({ failed: 'The update check did not answer.' }) }, MANUAL_CHECK_TIMEOUT_MS)
+      reportManual = (answer) => {
+        clearTimeout(expiry)
+        resolve(answer)
+      }
+      void checkAuto()
+    })
+    reportManual = undefined
+    if (outcome === 'up-to-date') {
+      void ask({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
+      return
+    }
+    if (outcome === 'available') {
+      // autoDownload is on and autoInstallOnAppQuit applies it, so the work is
+      // already under way. Say that rather than implying a click is needed.
+      void ask({
+        type: 'info',
+        message: 'A new version is downloading',
+        detail: 'It installs when you quit DeepSeek Harness.',
+      })
+      return
+    }
+    void ask({ type: 'warning', message: 'Could not check for updates', detail: outcome.failed })
   }
 
   const check = mode === 'auto' ? checkAuto : checkNotifyOnly
@@ -111,7 +205,7 @@ export function startUpdater(
     // A manual check reports "up to date" too; the scheduled one stays quiet.
     checkNow: () => {
       if (mode === 'auto') {
-        void checkAuto()
+        void checkAutoManual()
         return
       }
       void checkNotifyOnly(true).then(() => {
