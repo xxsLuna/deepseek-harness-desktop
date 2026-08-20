@@ -132,41 +132,47 @@ thousands of orphan files. **Stop every app instance before staging.** A wrecked
 tree looks exactly like "upstream removed everything", which is a wrong
 conclusion someone has already nearly drawn from it.
 
-### After a bump, check the rows patched by id
+### After a bump, the rows patched by id check themselves
 
-This is the highest-value manual check, because it is the one thing that fails
-with no error at all.
+This used to be the highest-value **manual** check, because it was the one thing
+that failed with no error at all. It is now automatic, in two places:
 
-`packages/bundle/cordis.patch.yml` disables six upstream rows **by id**, and
-`packages/bundle/lib/boot.js` re-asserts the same six unconditionally in its
-`for (const id of [...])` loop — with no `rows.has()` guard, unlike the
-`rows.has('agent-presets')` and `rows.has('session-telemetry-otel')` overlays
-right beside it, which do check. Cited by identifier on purpose: this passage
-carried three line numbers and the hide-console work shifted every one of them by
-about 25 lines, in the section calling itself the highest-value check.
-Upstream's patch applier **warns
-and skips** an id it cannot find (`dsh-app-boot`: `warn("patch: entry %C not
-found", id)`) — it does not throw, and the warning does not surface in the app
-log. Adding the guard to that loop, and failing when a targeted id is absent, is
-the cheapest way to close this whole class.
+- `packages/bundle/lib/boot.js` **refuses to boot** when upstream no longer
+  declares a row it patches — the six it disables, plus `agent-presets` and (when
+  `DSH_TELEMETRY_DISABLED` is set) `session-telemetry-otel`.
+- `tests/contract/upstream-rows.spec.ts` names all eight, so CI says *which* row
+  moved rather than "the sidecar did not start".
+
+Two things about that guard are worth knowing before touching it.
+
+**It cannot be written as `rows.has(id)`.** That is the obvious form, and it would
+always pass: `rows` is built from every patch layer including our own
+`cordis.patch.yml`, which names those same ids, so they are in the composition
+whether or not upstream still defines them. The check indexes the **upstream**
+layers separately and asks only about those. The pre-existing `rows.has()` guards
+on `agent-presets` and `session-telemetry-otel` worked only by luck of those rows
+being declared upstream rather than here.
+
+**It throws rather than warns**, because the default state of these rows is *on*:
+per the comment in `boot.js`, `webserver`/`connection` would bind a real TCP port
+and mount a WebSocket carrier the app scheme cannot serve, and
+`directory-picker` would restore an OS chooser this process cannot bring to the
+front. `DSH_TELEMETRY_DISABLED` now fails **closed** for the same reason — a
+privacy switch that silently stops working is worse than an app that will not
+start.
+
+Upstream's applier is what makes all of this necessary: it **warns and skips** an
+id it cannot find (`dsh-app-boot`: `warn("patch: entry %C not found", id)`). It
+does not throw, and the warning does not surface in the app log.
+
+To check by hand anyway:
 
 ```sh
-for id in web-startup webserver web-runtime connection client-hmr directory-picker session-telemetry-otel; do
+for id in web-startup webserver web-runtime connection client-hmr directory-picker agent-presets session-telemetry-otel; do
   grep -rqs "id: $id\$" build/harness/node_modules/@deepseek-ai/*/cordis.patch.yml \
     && echo "$id present" || echo "$id GONE"
 done
 ```
-
-What a silently-dropped disable costs, per the comment in `boot.js`: re-enabling
-`webserver`/`connection` binds a real TCP port and mounts a WebSocket carrier the
-app scheme cannot serve; re-enabling `directory-picker` restores an OS chooser
-this process cannot bring to the front.
-
-**Only four of the six are actually silent.** `sidecar.spec.ts` asserts the boot
-manifest carries neither `@deepseek-ai/dsh-client-connection` nor
-`dsh-client-hmr`, which is exactly what the `connection` and `client-hmr` disables
-remove — so a rename of either turns into a red contract test. The unwatched four
-are `web-startup`, `webserver`, `web-runtime` and `directory-picker`.
 
 `session-telemetry-otel` fails differently and worse: its overlay *is* guarded by
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
@@ -267,34 +273,39 @@ as evidence the hazard is imaginary. Verify the feed, write the notes, publish.
 
 ### Count the drafts before you publish one
 
-**The five build jobs race to create the release, and can end up creating two.**
-All five run `electron-builder --publish always` in parallel (`build.yml`, the
-`Package` step); each one creates the draft if it does not already see one, and
-two jobs that check at the same moment both create it. On
-`0.1.0-desktop-v0.8.0` that produced **two drafts on the same tag** with the
-assets split 9/7 and a `latest-mac.yml` in each. `gh release view <tag>` resolves
-to just one of them, so publishing "the draft" ships an incomplete release and
-orphans the rest — and the feed it publishes describes files that are not there.
-
-Earlier releases got one draft by luck, not by design: the jobs happened to start
-far enough apart. Assume it will recur, and check by id rather than by tag:
+**Still count them, even though the race is fixed.** A `draft` job now creates the
+release once, before the matrix, and each build job uploads into it with
+`gh release upload --clobber` — nothing else creates a release. That is a change
+only a release exercises, so verify it rather than assume it held:
 
 ```sh
 gh api repos/xxsLuna/deepseek-harness-desktop/releases \
   --jq '.[] | select(.tag_name=="v<version>") | "\(.id) draft=\(.draft) assets=\(.assets|length)"'
 ```
 
-There is no move-asset API, so consolidating means download-and-re-upload. Keep
-the draft holding the larger byte total and move the other's assets into it — and
+Expect **one** id and **13 assets**: dmg + zip + 2 blockmaps + `latest-mac.yml`
+(mac-arm64), exe + `latest.yml` (win), AppImage + deb + `latest-linux.yml`,
+arm64 AppImage + deb + `latest-linux-arm64.yml`.
+
+What it replaced, so nobody reinstates it: all five jobs ran
+`electron-builder --publish always`, and each created the release if it did not
+already see one. On `0.1.0-desktop-v0.8.0` two checked at the same moment and both
+created it — **two drafts on one tag**, assets split 9/7, a `latest-mac.yml` in
+each, and `gh release view <tag>` resolving to only one. Earlier releases got a
+single draft by luck of when their jobs started.
+
+**Assets now upload after the payload and smoke gates**, which is the other half:
+`--publish always` uploaded during `Package`, i.e. before either gate, so a bad
+payload reached the draft and the gates could only report on what had already
+shipped.
+
+If two drafts ever appear again, consolidating means download-and-re-upload —
+there is no move-asset API. Keep the one holding the larger byte total and
 **verify each transfer by hash, not by size**: the feeds carry the build's own
 `sha512` for every artifact, so a truncated download cannot slip through as a
 published installer. Then `DELETE /releases/{id}` the duplicate (by **id** — a
 tag-based delete can take the tag with it, and the tag is what `release.yml`
 already gated).
-
-A proper fix is to stop the matrix jobs from creating the release at all — one
-job creates the draft, the five upload into it. Untested here; it can only be
-validated by cutting a release.
 
 Before publishing, check the feed rather than assuming:
 
@@ -465,8 +476,10 @@ It does **not** cover these, and each one fails with no error:
   by every descendant that re-executes `process.execPath`. The day upstream
   passes an explicit env to such a spawn, the child boots a GUI Electron instead
   of Node.
-- **`harness.json`'s node major vs upstream's `engines.node`** — never compared.
-  It has been `(unspecified)` upstream so far.
+- ~~**`harness.json`'s node major vs upstream's `engines.node`**~~ — compared now,
+  in `scripts/node-pin.mjs` via `stage-harness`. It has been `(unspecified)`
+  upstream in every version pinned so far, which is why the gap was invisible;
+  `tests/unit/node-pin.spec.ts` is the only evidence the check works.
 - **Platform-specific packages are chosen by the build host, not by the target.**
   The one that already shipped: four releases of the Intel macOS build carried
   arm64 `koffi`, `ripgrep` and `sharp`, and nothing failed anywhere.
@@ -488,8 +501,9 @@ It does **not** cover these, and each one fails with no error:
   harness shell gets a hard startup failure on every `node` invocation, not a
   degraded console fix. Nothing tests this, because the harness's own Node is far
   newer.
-- **`test:contract` skips silently without a staged harness.** A skip is
-  indistinguishable from a pass in exactly the situation the suite exists for.
+- ~~**`test:contract` skips silently without a staged harness.**~~ Fixed:
+  `tests/contract/stage-present.spec.ts` does not skip, so a missing stage fails
+  and says what to run instead of printing green over nothing.
 
 When you learn a new one of these, pin it in `tests/contract` and add it here.
 That is the whole point of both files.

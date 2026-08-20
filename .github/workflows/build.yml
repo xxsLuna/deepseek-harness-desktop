@@ -16,7 +16,36 @@ permissions:
   contents: write
 
 jobs:
+  # One job creates the draft, before any matrix job could.
+  #
+  # electron-builder used to publish from inside every matrix job, and each one
+  # created the release if it did not already see one. On 0.1.0-desktop-v0.8.0 two
+  # jobs checked at the same moment and both created it: two drafts on one tag,
+  # the assets split 9/7, a latest-mac.yml in each, and `gh release view <tag>`
+  # resolving to only one of them — so publishing "the draft" would have shipped
+  # an incomplete release and a feed naming files that were not there. Earlier
+  # releases got a single draft by luck of when their jobs started.
+  draft:
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the draft release if it does not exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "draft already exists for $GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "${GITHUB_REF_NAME#v}" --notes ""
+            echo "created draft for $GITHUB_REF_NAME"
+          fi
+
   build:
+    # `needs` on a job that is skipped when publish is false would skip this one
+    # too, so the result is tested explicitly — the same reason all-targets-built
+    # does it below.
+    needs: [draft]
+    if: ${{ always() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,10 +100,12 @@ jobs:
       - name: Contract tests
         run: npm run test:contract
 
+      # Never publishes. Assets go up in a later step, after the payload and
+      # smoke gates — electron-builder used to upload here, which is before both
+      # of them, so a bad payload reached the draft and the gates could only
+      # report on what had already shipped.
       - name: Package
-        env:
-          GH_TOKEN: ${{ inputs.publish && secrets.GITHUB_TOKEN || '' }}
-        run: npx electron-builder ${{ matrix.builder }} --publish ${{ inputs.publish && 'always' || 'never' }}
+        run: npx electron-builder ${{ matrix.builder }} --publish never
 
       # --platform/--arch make it assert that every platform-specific package was
       # chosen for the target rather than for the build host. That is the check
@@ -120,6 +151,33 @@ jobs:
         if: startsWith(matrix.target, 'mac')
         run: node scripts/smoke-packaged.mjs
 
+      # Every gate above has passed by the time anything is uploaded.
+      #
+      # bash on purpose: the default shell on windows-latest is pwsh, which does
+      # not expand globs for an external command, so `gh release upload out/*.exe`
+      # would pass the pattern through literally. nullglob then drops the patterns
+      # that match nothing on this platform, and an empty list is an error rather
+      # than a silent no-op — a job that builds nothing must not report success.
+      #
+      # *.blockmap is listed explicitly. electron-builder's own publisher used to
+      # upload those without being asked, and they are what differential updates
+      # read; a glob list copied from the artifact step would have dropped them.
+      - name: Publish assets to the draft
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=(out/*.exe out/*.dmg out/*.zip out/*.AppImage out/*.deb out/*.blockmap out/latest*.yml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no artifacts in out/ to publish for ${{ matrix.target }}"
+            exit 1
+          fi
+          echo "uploading ${#files[@]} file(s):"
+          for file in "${files[@]}"; do echo "  $file"; done
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
@@ -130,6 +188,7 @@ jobs:
             out/*.exe
             out/*.AppImage
             out/*.deb
+            out/*.blockmap
             out/latest*.yml
           if-no-files-found: warn
 
