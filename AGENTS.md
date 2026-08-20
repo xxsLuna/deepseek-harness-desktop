@@ -91,10 +91,12 @@ dist-tags` has shown `next` ahead of `latest` (rc.8 published as `next` while
 is the `latest` tag. Testing a `next` release and shipping it to users are
 separate decisions.
 
-**Pinning ahead of `latest` makes the daily watch propose a downgrade.** Its gate
-is `pinned != latest` — inequality, not newer-than — so while the pin is a `next`
-release the watch opens a PR walking it *back* to `latest` every day. Check the
-gate before pinning ahead of `latest`, or expect to close that PR repeatedly.
+**Pinning ahead of `latest` used to make the daily watch propose a downgrade.**
+The gate was `pinned != latest` — inequality, not newer-than — so while the pin
+was a `next` release the watch opened a PR walking it *back* to `latest` every
+day. It now compares properly and only opens a PR when `latest` is genuinely
+ahead; the comparator in `watch-upstream.yml` is the reference. Recorded because
+the comparator looks like over-engineering until you know it replaced a `!=`.
 
 ### The pin covers one package only
 
@@ -136,9 +138,13 @@ This is the highest-value manual check, because it is the one thing that fails
 with no error at all.
 
 `packages/bundle/cordis.patch.yml` disables six upstream rows **by id**, and
-`packages/bundle/lib/boot.js:68` re-asserts the same six unconditionally — with no
-`rows.has()` guard, unlike the `agent-presets` (`:75`) and `session-telemetry-otel`
-(`:87`) overlays right beside it, which do check. Upstream's patch applier **warns
+`packages/bundle/lib/boot.js` re-asserts the same six unconditionally in its
+`for (const id of [...])` loop — with no `rows.has()` guard, unlike the
+`rows.has('agent-presets')` and `rows.has('session-telemetry-otel')` overlays
+right beside it, which do check. Cited by identifier on purpose: this passage
+carried three line numbers and the hide-console work shifted every one of them by
+about 25 lines, in the section calling itself the highest-value check.
+Upstream's patch applier **warns
 and skips** an id it cannot find (`dsh-app-boot`: `warn("patch: entry %C not
 found", id)`) — it does not throw, and the warning does not surface in the app
 log. Adding the guard to that loop, and failing when a targeted id is absent, is
@@ -190,6 +196,16 @@ fused into the text field. It overrides everything after it only while it stays
 single-digit: `desktop-v10` sorts *below* `desktop-v9`. It is an escape hatch
 meant to move roughly never, but do not treat it as a third numeric axis.
 
+**Moving the scheme number is a channel change, not just a sort-order caveat.**
+That first pre-release identifier *is* electron-updater's channel
+(`GitHubProvider` selects a tag only when its channel equals the running build's,
+and the alpha/beta shortcut does not apply to a custom one like `desktop-v0`), so
+a `0.1.0-desktop-v1.x` release is **invisible** to every `desktop-v0` install
+however much higher semver ranks it. That is the same wall the `rc.*` → `desktop-v0`
+move hit, and it is why `v0.8.0` needed a manual download. Changing the leading
+number strands the entire installed base for one release. Treat it as a migration,
+announce it, and do not spend it on tidiness.
+
 **Two different semver rules bite here, and confusing them leads to the wrong
 conclusion.** First: a field of nothing but digits ranks *below* any field
 containing a letter or hyphen. That is why the retired scheme broke — with a
@@ -240,8 +256,14 @@ next `dev -> main` PR then re-applies the same changes. Reset `dev` to `main`.
 `releases.atom` the moment it is pushed, while the assets stay draft-private.
 electron-updater's channel walk picks the new tag, fails to fetch its
 `latest.yml`, and dies with `ERR_UPDATER_CHANNEL_FILE_NOT_FOUND` — swallowed by
-the error handler. **Every existing client's update check is broken for as long
-as the draft sits.** Verify the feed, write the notes, publish.
+the error handler, so **an installed client's update check stays broken for as
+long as the draft sits.**
+
+That bites when installed clients are on the *same* channel as the draft, which
+is every release from `v0.8.1` on. It did **not** apply to `v0.8.0`: the installs
+in the field were `rc.*`, a different channel, so the walk resolved `rc.7-1` and
+they quietly reported themselves up to date. Do not read that one quiet release
+as evidence the hazard is imaginary. Verify the feed, write the notes, publish.
 
 ### Count the drafts before you publish one
 

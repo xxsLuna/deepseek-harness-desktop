@@ -28,7 +28,7 @@ import { startNotifications } from './notifications.js'
 import { startPickerHost } from './picker-host.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
 import { DEEP_LINK_SCHEME, deepLinkFromArgv, parseDeepLink } from './deep-link.js'
-import { startUpdater } from './updater.js'
+import { macUpdatesSigned, startUpdater } from './updater.js'
 
 /** Product name shown in the menu bar, Dock, About panel, and notifications. */
 const APP_NAME = 'DeepSeek Harness'
@@ -181,11 +181,14 @@ async function run(): Promise<void> {
     getWindow: () => BrowserWindow.getAllWindows()[0],
     settings,
     harnessVersion: HARNESS_VERSION,
-    updatable: updateMode({
+    // The real flag, not a hardcoded true. Passing true here made the section
+    // describe an unsigned macOS build as installing updates, which it cannot;
+    // `startUpdater` has always resolved the same value for its own behaviour.
+    updates: updateMode({
       platform: process.platform,
       packaged: app.isPackaged,
-      macUpdatesSigned: true,
-    }) !== 'disabled',
+      macUpdatesSigned: macUpdatesSigned(),
+    }),
     titleBarMergeable: MERGED_TITLE_BAR_PLATFORM,
     checkForUpdates: () => updater?.checkNow(),
   })

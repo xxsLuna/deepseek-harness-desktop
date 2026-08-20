@@ -33,11 +33,15 @@ const shipping = (JSON.parse(
 const PRE_SCHEME = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3', '0.1.0-rc.7-1']
 
 /**
- * Releases published under the current scheme, newest last. Append the outgoing
- * version when cutting a release; the assertions read the new one from
- * package.json, so whatever a bump writes there is checked automatically.
+ * Releases published under the current scheme, newest last.
+ *
+ * Append a version when its release is published — not at the next bump. The
+ * assertions read the shipping version from package.json and skip its own entry,
+ * so this stays a plain record of what is out there rather than a list someone
+ * has to keep exactly one release behind. Adding the current version used to
+ * fail the reachability check, since nothing is newer than itself.
  */
-const PUBLISHED: readonly string[] = []
+const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0']
 
 /** `0.1.0-desktop-v<ours>.<upstream rc>.<our build>` */
 const version = (ours: number, upstream: number, build: number): string =>
@@ -51,10 +55,19 @@ describe('the shipping version', () => {
     expect(shipping).toMatch(/^0\.1\.0-desktop-v\d+\.\d+\.\d+$/)
   })
 
-  it('is reachable from every release published under this scheme', () => {
-    for (const published of PUBLISHED) {
+  it('is reachable from every earlier release published under this scheme', () => {
+    const earlier = PUBLISHED.filter((published) => published !== shipping)
+    for (const published of earlier) {
       expect(isNewerVersion(shipping, published), `${shipping} must be newer than ${published}`).toBe(true)
     }
+  })
+
+  it('is listed in PUBLISHED once its release is out', () => {
+    // The list is the guard for the NEXT bump, and it is only useful if cutting
+    // a release actually appends to it. Asserting it here means a bump that
+    // forgets fails a test rather than silently shipping a version the next one
+    // is never compared against.
+    expect(PUBLISHED, `add '${shipping}' to PUBLISHED when its release is published`).toContain(shipping)
   })
 
   it('is not reachable from the pre-scheme releases, by design', () => {
