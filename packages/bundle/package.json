@@ -8,6 +8,7 @@
   "main": "lib/index.js",
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/schemastery": "*",
+    "koffi": "*"
   }
 }

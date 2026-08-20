@@ -11,6 +11,7 @@
  */
 import { createRequire } from 'node:module'
 import './hide-console.mjs'
+import { withPreload } from './node-options.mjs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -34,18 +35,15 @@ const NAME = 'dsh-desktop'
  * runner process — see that module for the whole trail. NODE_OPTIONS is what
  * reaches it.
  *
- * The URL comes from pathToFileURL rather than string concatenation: NODE_OPTIONS
- * is space-delimited and the installed app lives under "DeepSeek Harness
- * Desktop", so a raw path would split mid-argument. Percent-encoding sidesteps
- * quoting entirely. The append is guarded because descendants inherit the
- * variable and would otherwise grow it once per generation.
+ * The string rule lives in `./node-options.mjs` so a unit test can reach it —
+ * importing this file boots the harness. That rule is where the reasons are
+ * written down: why the value is a file URL rather than a path, and why the
+ * append is guarded.
  */
 function carryHiddenConsoleToDescendants() {
   if (process.platform !== 'win32') return
   const preload = pathToFileURL(fileURLToPath(new URL('./hide-console.mjs', import.meta.url))).href
-  const existing = process.env.NODE_OPTIONS ?? ''
-  if (existing.includes(preload)) return
-  process.env.NODE_OPTIONS = `${existing} --import ${preload}`.trim()
+  process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS, preload)
 }
 
 carryHiddenConsoleToDescendants()
