@@ -37,9 +37,27 @@ and still serves them to anonymous readers:
 - `refs/pull/3/head` — a live server-side ref. `pulls/3/commits` returns
   `67e46a3`, `8153843`, `396cfe3`, each with GitHub login `Minsang-MICUBE` and a
   `Co-Authored-By: Claude Opus 5` trailer. The PR's Commits tab shows this.
-- `19c3e80` — the orphaned squash-merge commit of PR #3, unreachable from any
-  branch yet still `200` at `/commit/19c3e80…`, with five trailer lines naming
-  both Claude and `Minsang Cho`.
+- **Three orphans**, unreachable from every branch, tag *and* pull ref, yet each
+  still `200` at `/commit/<sha>`: `19c3e80` (PR #3's squash-merge commit, five
+  trailer lines naming both Claude and `Minsang Cho`), `254a6b7c` and `c46c75bb`
+  (the pre-rewrite originals of two rewritten commits, `Minsang-MICUBE` with a
+  Claude trailer each). A fourth, `65063fbe`, exists only in local clones —
+  GitHub answers `404` for it.
+
+  Enumerate them rather than trusting a remembered list; the first pass at this
+  found only `19c3e80` and undercounted by two:
+
+  ```sh
+  git cat-file --batch-all-objects --batch-check | awk '$2=="commit"{print $1}' \
+    | while read -r s; do git cat-file commit "$s" \
+        | grep -qiE 'co-authored-by|generated with \[claude|minsang' && echo "$s"; done
+  ```
+
+  A clean local clone is not evidence either way: the objects were pruned here
+  with `git reflog expire --expire-unreachable=now --all && git gc --prune=now`
+  (safe — all four unreachable commits were the contaminated ones), which stops a
+  stray push from republishing them but changes nothing on GitHub. Check the
+  remote with `curl`.
 
 Nothing local removes these: no branch points at them, so `git push --force` and
 another rewrite change nothing. Removal needs GitHub Support to purge the
