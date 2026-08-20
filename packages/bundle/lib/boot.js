@@ -25,6 +25,52 @@ import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 
 const NAME = 'dsh-desktop'
 
+/**
+ * Keep the console windows Windows would otherwise pop for every shell.
+ *
+ * A console child with no console to inherit gets a fresh one allocated, and it
+ * is VISIBLE — so on Windows every bash/pwsh/tool invocation flashed a command
+ * prompt that closed when the command finished. Two facts combine: the launcher
+ * spawns this process with `windowsHide` (which is what stops the SIDECAR itself
+ * from showing a window, at the cost of having no console), and upstream's
+ * `dsh-subprocess-local` spawns without `windowsHide` of its own.
+ *
+ * Upstream is not wrong for its own use: run `dsh` from a terminal and the
+ * parent has a console for children to inherit, so nothing flashes. The gap only
+ * shows when a GUI process hosts the harness, which is this app.
+ *
+ * Why the wrap, and not a seam. `ctx.subprocess` is a service and replacing it
+ * is the documented pattern, but the spawn happens inside a module-private
+ * function and `OutputCollector` and friends are not exported, so "replace" means
+ * reimplementing ~1300 lines. Its `internals` hook carries only spillDir,
+ * platform, taskkill and a Linux process-group probe — no spawn options. Giving
+ * this process a hidden console instead (AllocConsole + ShowWindow through the
+ * koffi already in the tree) allocates and hides one fine, and stdout survives,
+ * but the children did not inherit it. So the narrowest thing that reaches every
+ * console child is the spawn call itself, defaulted here rather than patched
+ * upstream.
+ *
+ * Scope is deliberately small: win32 only, and only when the caller said nothing
+ * — an explicit `windowsHide: false` still wins. Terminals are untouched, because
+ * `spawnTerminal` goes through node-pty rather than child_process. And it is
+ * `windowsHide`, not a flag of our own: upstream already passes it in
+ * `dsh-native-command` and `dsh-host-directory-picker-native`, so this fills a
+ * gap in its own convention rather than introducing one.
+ */
+function hideConsoleWindowsForSpawnedShells() {
+  if (process.platform !== 'win32') return
+  const childProcess = createRequire(import.meta.url)('node:child_process')
+  const original = childProcess.spawn
+  childProcess.spawn = function spawn(program, args, options) {
+    if (options === undefined || options === null) return original.call(this, program, args, { windowsHide: true })
+    if (typeof options !== 'object' || Array.isArray(options)) return original.call(this, program, args, options)
+    if (options.windowsHide !== undefined) return original.call(this, program, args, options)
+    return original.call(this, program, args, { ...options, windowsHide: true })
+  }
+}
+
+hideConsoleWindowsForSpawnedShells()
+
 if (!process.env.DSH_DESKTOP_SOCKET || !process.env.DSH_DESKTOP_TOKEN) {
   process.stderr.write(`${NAME}: DSH_DESKTOP_SOCKET and DSH_DESKTOP_TOKEN must be set by the launcher\n`)
   process.exit(2)

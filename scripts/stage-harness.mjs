@@ -32,6 +32,19 @@ if (!localOnly) {
   // the harness). That is not something this repo can fix, and a one-shot
   // install turns it into a red build, so retry with a cleared cache before
   // giving up.
+  //
+  // The heap ceiling is not defensive tuning. Upstream declares its ~500-package
+  // closure with caret ranges and this stage installs without a lockfile, so npm
+  // resolves the whole search space every time — and on the hosted macOS runners
+  // (about half the memory of the Linux ones) it died three times over with
+  // "JavaScript heap out of memory" while Linux passed. V8 sizes its default old
+  // space from available memory, so the same install fits on one runner and not
+  // the other. A lockfile would remove the search rather than widen the room for
+  // it; until then, this is what keeps the mac targets green.
+  const installEnv = {
+    ...process.env,
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=4096`.trim(),
+  }
   const attempts = 3
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -40,9 +53,22 @@ if (!localOnly) {
         cwd: stageDir,
         stdio: 'inherit',
         shell: process.platform === 'win32',
+        env: installEnv,
       })
       break
     } catch (error) {
+      // Retrying an out-of-memory death is not a retry, it is the same failure
+      // three times: it cost 14 minutes per macOS job before anyone saw the
+      // reason. Only the transient registry case is worth another attempt.
+      const output = `${String(error.stdout ?? '')}${String(error.stderr ?? '')}${String(error.message ?? '')}`
+      if (/heap out of memory|Reached heap limit/i.test(output)) {
+        throw new Error(
+          'stage-harness: npm ran out of heap resolving the harness tree. Raise --max-old-space-size '
+          + 'above 4096 in this script, or give the stage a lockfile so npm stops re-resolving the '
+          + 'caret ranges. Retrying would just fail the same way.',
+          { cause: error },
+        )
+      }
       if (attempt === attempts) throw error
       console.warn(`stage-harness: install attempt ${attempt} of ${attempts} failed; retrying`)
       execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['cache', 'clean', '--force', '--loglevel=error'], {
