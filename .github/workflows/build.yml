@@ -63,7 +63,7 @@ jobs:
       # same pruned tree the installer ships, so a rule that deletes something
       # load-bearing fails here rather than on a user's machine.
       - name: Prune payload
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       - name: Unit tests
         run: npm test
@@ -79,19 +79,26 @@ jobs:
       # --platform/--arch make it assert that every platform-specific package was
       # chosen for the target rather than for the build host. That is the check
       # the retired Intel cross build needed and did not have.
+      #
+      # Both are derived from `matrix.target`, never from `runner.arch`, and that
+      # is the whole guard. Every target builds natively today, so the two agree
+      # and it looks like a free choice — but a re-added cross build is where this
+      # has to fire, and `runner.arch` there reports the arch of the packages that
+      # were wrongly installed. It would match them and pass. The target name is
+      # the only value that says what is being built.
       - name: Verify payload (macOS)
         if: startsWith(matrix.target, 'mac')
         # Glob the bundle rather than naming it: a productName change must not
         # silently turn this gate into a no-op.
-        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources" --platform darwin --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources" --platform darwin --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       - name: Verify payload (Windows)
         if: startsWith(matrix.target, 'win')
-        run: node scripts/verify-payload.mjs out/win-unpacked/resources --platform win32 --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: node scripts/verify-payload.mjs out/win-unpacked/resources --platform win32 --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       - name: Verify payload (Linux)
         if: startsWith(matrix.target, 'linux')
-        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources" --platform linux --arch ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources" --platform linux --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       # ELECTRON_DISABLE_SANDBOX: hosted ubuntu-24.04 restricts unprivileged
       # user namespaces and the unpacked build's chrome-sandbox lacks SUID, so
