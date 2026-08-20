@@ -6,6 +6,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, write
 import { execFileSync } from 'node:child_process'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { nodePinVerdict } from './node-pin.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const pin = JSON.parse(readFileSync(join(root, 'harness.json'), 'utf8'))
@@ -111,12 +112,27 @@ if (existsSync(packagesDir)) {
 // this repo pins, and fail loud on a version mismatch.
 if (!localOnly) {
   const dshManifest = JSON.parse(readFileSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
-  const engines = dshManifest.engines?.node ?? '(unspecified)'
+  const engines = dshManifest.engines?.node
   // The pin is no longer a Node binary to fetch: the harness runs on Electron's
   // own Node, so harness.json's `node` is a constraint on THAT, asserted in
   // tests/contract/native-tools.spec.ts.
-  console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines}; requires Node ${pin.node}.x (supplied by Electron)`)
+  console.log(`staged dsh ${dshManifest.version}; engines.node: ${engines ?? '(unspecified)'}; requires Node ${pin.node}.x (supplied by Electron)`)
   if (dshManifest.version !== pin.harness) {
     throw new Error(`staged version ${dshManifest.version} does not match pin ${pin.harness}`)
+  }
+
+  // Close the chain: Electron's Node is checked against the pin in
+  // tests/contract/native-tools.spec.ts, and the pin is checked against upstream
+  // here. See ./node-pin.mjs for why the gap was invisible.
+  const verdict = nodePinVerdict(engines, pin.node)
+  if (verdict.unparseable !== undefined) {
+    console.warn(`stage-harness: could not parse engines.node "${verdict.unparseable}"; skipping the Node range check`)
+  }
+  if (verdict.conflict !== undefined) {
+    throw new Error(
+      `stage-harness: ${verdict.conflict}. That pin is a constraint on the Electron binary the app runs `
+      + 'the harness on, so raising it means bumping Electron — check '
+      + 'tests/contract/native-tools.spec.ts and the Electron notes in CLAUDE.md before changing either.',
+    )
   }
 }
