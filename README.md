@@ -35,11 +35,49 @@ Sessions, credentials, and settings live in `~/.dsh`, shared with the `dsh` CLI 
 
 ## Versioning
 
-The app version tracks the upstream harness version exactly. A desktop release `v0.1.0-rc.6` bundles `@deepseek-ai/dsh@0.1.0-rc.6`; a desktop-only fix appends a build counter (`v0.1.0-rc.6-2`). A daily workflow watches npm and opens a bump PR when upstream publishes; the PR's checks re-run the sidecar contract suite, so a green bump PR is releasable as-is.
+The version in front is upstream's, unchanged: `0.1.0` is
+`@deepseek-ai/dsh@0.1.0-*`. Everything about the desktop build lives in the
+pre-release part:
 
-**Once a build counter has shipped, keep it on every later version.** The counter is appended with a hyphen, so `0.1.0-rc.6-3` splits its pre-release into `['rc', '6-3']`, and semver ranks the non-numeric `6-3` *above* the numeric `7` in `0.1.0-rc.7`. A plain `0.1.0-rc.7` release is therefore **older** than `0.1.0-rc.6-3` and would never be offered to anyone running it — the app's gate and electron-updater's both refuse it. So upstream `0.1.0-rc.7` ships as `v0.1.0-rc.7-1`, not `v0.1.0-rc.7`. The automated bump PR sets the bare upstream version and has to be corrected before release.
+```
+0.1.0-desktop-v0.8.0
+  ^      ^     ^ ^ ^
+  |      |     | | +-- this shell's build of that harness (0, 1, 2 ...)
+  |      |     | +---- upstream's rc number (8, 9, 10, 20 ...)
+  |      |     +------ this shell's own scheme number, if it ever has to change
+  |      +------------ the desktop shell
+  +------------------- upstream's version, never touched here
+```
 
-Non-numeric identifiers compare as strings, so the counter holds to `rc.9-1` and breaks at `rc.10-1` (which sorts below `rc.9-1`). At that point leave the pre-release line — `0.2.0` outranks every version above and has no ordering traps left. `tests/unit/update-gate.spec.ts` asserts all of this, so picking an unreachable version fails a check rather than stranding users.
+`harness.json` stays the authority on which upstream is pinned; this is just the
+same fact carried where an installer filename and an update feed can see it.
+
+**Each number is its own dot-separated field on purpose.** semver compares a
+pre-release field as a *number* only when it contains nothing else, and as TEXT
+otherwise — and text compares character by character, so `10` sorts below `9`.
+The previous scheme appended a build counter with a hyphen (`0.1.0-rc.6-3`),
+which put the upstream number inside a text field and meant a plain
+`0.1.0-rc.7` was *older* than `0.1.0-rc.6-3` and would have been offered to
+nobody. Splitting the numbers out removes that entirely:
+`tests/unit/version-scheme.spec.ts` checks every ordered pair across a wide
+sweep and expects no inversion.
+
+Releases before `0.1.0-desktop-v0.8.0` were named `0.1.0-rc.<n>[-<build>]`, and
+the new scheme is **deliberately unreachable from them** — `desktop-v0` sorts
+below `rc` because `d` precedes `r`. Anything installed from those needs one
+manual download; after that it updates normally. That asymmetry is asserted, not
+just written down, so nobody renames the scheme back into the `rc` line by
+accident.
+
+A daily workflow watches npm and opens a bump PR when upstream publishes; the
+PR's checks re-run the sidecar contract suite, so a green bump PR is releasable
+as-is. It writes the bare upstream version into `package.json`, which is not a
+version this scheme accepts — correct it to the form above before releasing, and
+the unit suite will say so if you forget.
+
+Only the root `package.json` carries the release version — electron-builder reads
+it, and everything at runtime goes through `app.getVersion()` or `harness.json`.
+The `packages/*` manifests are not maintained against it and drift.
 
 ## How it works
 
@@ -95,8 +133,6 @@ check names embed the matrix values, so editing an entry would rename a
 required check and block every pull request.
 
 ## Development
-
-Only the root `package.json` carries the release version — electron-builder reads it, and everything at runtime goes through `app.getVersion()` or `harness.json`. The `packages/*` manifests are not maintained against it and drift.
 
 Everything is project-local (`node_modules`), nothing is installed system-wide:
 
