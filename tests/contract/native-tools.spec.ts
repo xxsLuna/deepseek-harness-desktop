@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const root = join(import.meta.dirname, '..', '..')
@@ -114,5 +115,77 @@ describe.skipIf(!existsSync(harnessRoot) || !existsSync(electronBinary))('native
       console.log(JSON.stringify({ available: typeof sqlite.DatabaseSync === 'function' }))
     `) as { available: boolean }
     expect(result.available).toBe(true)
+  })
+
+  it('resolves koffi from @dsh-desktop/bundle, which the console fix requires', () => {
+    // `hide-console.mjs` does createRequire(import.meta.url)('koffi'), and
+    // `@dsh-desktop/bundle` cannot install its own dependencies — the stage copy
+    // deliberately excludes node_modules, so this resolves upward to whatever
+    // upstream hoisted. Five upstream packages declare koffi today, so the hoist
+    // is stable in practice; the failure if it ever moves is the reason for this
+    // assertion. hide-console.mjs swallows its own errors on purpose (a console
+    // that cannot be hidden must not stop the harness booting), so a missing
+    // koffi would come back as the flashing window and nothing else.
+    const result = probe(`
+      const { createRequire } = await import('node:module')
+      const { pathToFileURL } = await import('node:url')
+      const { join } = await import('node:path')
+      const lib = join(process.cwd(), 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'hide-console.mjs')
+      const koffi = createRequire(pathToFileURL(lib).href)('koffi')
+      console.log(JSON.stringify({ loaded: typeof koffi.load === 'function' }))
+    `) as { loaded: boolean }
+    expect(result.loaded).toBe(true)
+  })
+
+  it.skipIf(process.platform !== 'win32')('binds the four Win32 calls the console fix makes', () => {
+    // The signatures are strings handed to koffi at runtime, so a koffi API
+    // change or a typo in one of them throws where hide-console.mjs catches it —
+    // silently, and only on the machines that had the symptom. Bind each one
+    // under the shipped runtime rather than trusting the string.
+    const result = probe(`
+      const { createRequire } = await import('node:module')
+      const { pathToFileURL } = await import('node:url')
+      const { join } = await import('node:path')
+      const lib = join(process.cwd(), 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'hide-console.mjs')
+      const koffi = createRequire(pathToFileURL(lib).href)('koffi')
+      const kernel32 = koffi.load('kernel32.dll')
+      const user32 = koffi.load('user32.dll')
+      const bound = {
+        GetConsoleWindow: typeof kernel32.func('void * __stdcall GetConsoleWindow()') === 'function',
+        AttachConsole: typeof kernel32.func('int __stdcall AttachConsole(uint32 dwProcessId)') === 'function',
+        AllocConsole: typeof kernel32.func('int __stdcall AllocConsole()') === 'function',
+        ShowWindow: typeof user32.func('int __stdcall ShowWindow(void *hWnd, int nCmdShow)') === 'function',
+      }
+      console.log(JSON.stringify(bound))
+    `) as Record<string, boolean>
+    expect(result).toEqual({
+      GetConsoleWindow: true,
+      AttachConsole: true,
+      AllocConsole: true,
+      ShowWindow: true,
+    })
+  })
+
+  it.skipIf(process.platform !== 'win32')('honours NODE_OPTIONS --import, which is how the fix reaches the ACL runner', () => {
+    // The load-bearing half. On Windows the shell is started by the sandbox in a
+    // SEPARATE runner process, so the sidecar hiding its own console fixes
+    // nothing; NODE_OPTIONS is the channel. Electron is documented to ignore
+    // NODE_OPTIONS for packaged apps, so that it works under
+    // ELECTRON_RUN_AS_NODE is a measured fact rather than an assumption — and
+    // exactly the kind that a bump breaks with no error.
+    //
+    // hide-console.mjs marks globalThis with a symbol when it has run, which is
+    // what makes the preload observable from outside.
+    const preload = pathToFileURL(join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'hide-console.mjs')).href
+    const out = execFileSync(electronBinary, [
+      '--input-type=module',
+      '-e', 'console.log(JSON.stringify({ ran: globalThis[Symbol.for("@dsh-desktop/hide-console.done")] === true }))',
+    ], {
+      cwd: harnessRoot,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: `--import ${preload}` },
+    })
+    expect(JSON.parse(out.trim().split('\n').at(-1) ?? 'null')).toEqual({ ran: true })
   })
 }, 60_000)

@@ -16,7 +16,36 @@ permissions:
   contents: write
 
 jobs:
+  # One job creates the draft, before any matrix job could.
+  #
+  # electron-builder used to publish from inside every matrix job, and each one
+  # created the release if it did not already see one. On 0.1.0-desktop-v0.8.0 two
+  # jobs checked at the same moment and both created it: two drafts on one tag,
+  # the assets split 9/7, a latest-mac.yml in each, and `gh release view <tag>`
+  # resolving to only one of them — so publishing "the draft" would have shipped
+  # an incomplete release and a feed naming files that were not there. Earlier
+  # releases got a single draft by luck of when their jobs started.
+  draft:
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the draft release if it does not exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "draft already exists for $GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "${GITHUB_REF_NAME#v}" --notes ""
+            echo "created draft for $GITHUB_REF_NAME"
+          fi
+
   build:
+    # `needs` on a job that is skipped when publish is false would skip this one
+    # too, so the result is tested explicitly — the same reason all-targets-built
+    # does it below.
+    needs: [draft]
+    if: ${{ always() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,16 +53,15 @@ jobs:
           - target: mac-arm64
             runner: macos-latest
             builder: --mac --arm64
-          # Cross-built on Apple Silicon: the macos-13 Intel runners are being
-          # retired and their queue no longer clears. The payload is stock
-          # prebuilds and no compiled-here code at all, so nothing is built
-          # against the host. targetArch tells the prune which arch to keep,
-          # since it cannot read that from the runner.
-          - target: mac-x64
-            runner: macos-latest
-            builder: --mac --x64
-            targetArch: x64
-            cross: true
+          # No Intel macOS target. It was cross-built on Apple Silicon once the
+          # macos-13 runners stopped clearing their queue, on the reasoning that
+          # the payload is stock prebuilds with no compiled-here code — true, and
+          # beside the point: npm chooses which prebuilt platform packages to
+          # DOWNLOAD from the host os/cpu, so the x64 app shipped arm64 koffi,
+          # ripgrep and sharp. Four releases went out that way and CI could not
+          # see it, because a cross-built app cannot be booted on the runner that
+          # made it. Intel is not supported; verify-payload asserts the arch so
+          # re-adding a cross build fails instead of shipping.
           - target: win-x64
             runner: windows-latest
             builder: --win --x64
@@ -64,8 +92,7 @@ jobs:
       # same pruned tree the installer ships, so a rule that deletes something
       # load-bearing fails here rather than on a user's machine.
       - name: Prune payload
-        if: ${{ !matrix.cross }}
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.targetArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       - name: Unit tests
         run: npm test
@@ -73,36 +100,36 @@ jobs:
       - name: Contract tests
         run: npm run test:contract
 
-      # A cross build prunes AFTER the suite instead. Pruning targets the build's
-      # arch, which on a cross build is not the runner's, so the host's own
-      # prebuilds are gone by design — node-pty then fails to load and takes the
-      # sidecar boot and the PTY probe with it. Nothing is lost by testing the
-      # full tree here: this runner could only ever have exercised its own arch,
-      # which is exactly what the mac-arm64 job already does. The target's arch
-      # is verified by verify-payload below, and by mac-arm64 running this same
-      # rule natively.
-      - name: Prune payload (cross build)
-        if: ${{ matrix.cross }}
-        run: npm run prune -- --platform ${{ startsWith(matrix.target, 'win') && 'win32' || startsWith(matrix.target, 'mac') && 'darwin' || 'linux' }} --arch ${{ matrix.targetArch || runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-
+      # Never publishes. Assets go up in a later step, after the payload and
+      # smoke gates — electron-builder used to upload here, which is before both
+      # of them, so a bad payload reached the draft and the gates could only
+      # report on what had already shipped.
       - name: Package
-        env:
-          GH_TOKEN: ${{ inputs.publish && secrets.GITHUB_TOKEN || '' }}
-        run: npx electron-builder ${{ matrix.builder }} --publish ${{ inputs.publish && 'always' || 'never' }}
+        run: npx electron-builder ${{ matrix.builder }} --publish never
 
+      # --platform/--arch make it assert that every platform-specific package was
+      # chosen for the target rather than for the build host. That is the check
+      # the retired Intel cross build needed and did not have.
+      #
+      # Both are derived from `matrix.target`, never from `runner.arch`, and that
+      # is the whole guard. Every target builds natively today, so the two agree
+      # and it looks like a free choice — but a re-added cross build is where this
+      # has to fire, and `runner.arch` there reports the arch of the packages that
+      # were wrongly installed. It would match them and pass. The target name is
+      # the only value that says what is being built.
       - name: Verify payload (macOS)
         if: startsWith(matrix.target, 'mac')
         # Glob the bundle rather than naming it: a productName change must not
         # silently turn this gate into a no-op.
-        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources"
+        run: node scripts/verify-payload.mjs "$(ls -d out/mac*/*.app | head -1)/Contents/Resources" --platform darwin --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       - name: Verify payload (Windows)
         if: startsWith(matrix.target, 'win')
-        run: node scripts/verify-payload.mjs out/win-unpacked/resources
+        run: node scripts/verify-payload.mjs out/win-unpacked/resources --platform win32 --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       - name: Verify payload (Linux)
         if: startsWith(matrix.target, 'linux')
-        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources"
+        run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources" --platform linux --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
       # ELECTRON_DISABLE_SANDBOX: hosted ubuntu-24.04 restricts unprivileged
       # user namespaces and the unpacked build's chrome-sandbox lacks SUID, so
@@ -120,11 +147,36 @@ jobs:
 
       # Promoted to a required gate: an unsigned .app does launch and render on
       # a hosted runner (proven on mac-arm64), so a regression here is real.
-      # A cross-built app cannot run on this host, so only the payload is
-      # verified there — its own arch runs it at release time.
       - name: Packaged smoke (macOS)
-        if: startsWith(matrix.target, 'mac') && !matrix.cross
+        if: startsWith(matrix.target, 'mac')
         run: node scripts/smoke-packaged.mjs
+
+      # Every gate above has passed by the time anything is uploaded.
+      #
+      # bash on purpose: the default shell on windows-latest is pwsh, which does
+      # not expand globs for an external command, so `gh release upload out/*.exe`
+      # would pass the pattern through literally. nullglob then drops the patterns
+      # that match nothing on this platform, and an empty list is an error rather
+      # than a silent no-op — a job that builds nothing must not report success.
+      #
+      # *.blockmap is listed explicitly. electron-builder's own publisher used to
+      # upload those without being asked, and they are what differential updates
+      # read; a glob list copied from the artifact step would have dropped them.
+      - name: Publish assets to the draft
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=(out/*.exe out/*.dmg out/*.zip out/*.AppImage out/*.deb out/*.blockmap out/latest*.yml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no artifacts in out/ to publish for ${{ matrix.target }}"
+            exit 1
+          fi
+          echo "uploading ${#files[@]} file(s):"
+          for file in "${files[@]}"; do echo "  $file"; done
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
@@ -136,13 +188,14 @@ jobs:
             out/*.exe
             out/*.AppImage
             out/*.deb
+            out/*.blockmap
             out/latest*.yml
           if-no-files-found: warn
 
   # The one required status check on main.
   #
   # The matrix jobs cannot be required directly: their check names embed every
-  # matrix value ("build (mac-x64, macos-latest, --mac --x64, x64, true)"), so
+  # matrix value ("build (mac-arm64, macos-latest, --mac --arm64)"), so
   # editing an entry renames the check, and a required check that no longer
   # exists blocks every pull request forever. This name never changes.
   #

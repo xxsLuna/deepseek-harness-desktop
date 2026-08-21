@@ -8,6 +8,13 @@
   "main": "lib/index.js",
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/schemastery": "*",
+    "koffi": "*",
+    "@dsh-desktop/carrier": "*",
+    "@dsh-desktop/chrome": "*",
+    "@dsh-desktop/connection": "*",
+    "@dsh-desktop/market": "*",
+    "@dsh-desktop/picker": "*",
+    "@dsh-desktop/settings": "*"
   }
 }

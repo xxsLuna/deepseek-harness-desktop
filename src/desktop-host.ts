@@ -2,17 +2,27 @@
  * The launcher's back channel: a route under the app origin that main answers
  * itself and never forwards to the sidecar.
  *
- * Two things reach it. The band is drawn by the page but its controls are
+ * Three things reach it. The band is drawn by the page but its controls are
  * launcher business — a native menu popup, the window's navigation history,
- * the colour of caption buttons the page does not own. And the Desktop
- * Settings section is a view onto preferences only this process can act on.
- * No preload ships, so there is no ipcRenderer to call; the page posts here,
- * and the protocol handler in main answers before the socket proxy sees it.
+ * the colour of caption buttons the page does not own. The Desktop Settings
+ * section is a view onto preferences only this process can act on. And the
+ * plugin marketplace needs the harness process restarted, which only the
+ * process that spawned it can do. No preload ships, so there is no ipcRenderer
+ * to call; the page posts here, and the protocol handler in main answers
+ * before the socket proxy sees it.
  *
- * Nothing here escalates: every action is one the user can already take from
- * the menu bar (Alt), the tray, or the keyboard, and a native popup can only
- * be activated by real user input. The same-origin fence in socket-proxy still
- * runs first.
+ * Nothing here escalates, but the claim is no longer "every action has a menu
+ * equivalent" and should not be read that way. It held for the band and the
+ * settings actions — each is reachable from the menu bar (Alt), the tray, or
+ * the keyboard, and a native popup can only be activated by real user input.
+ * `market/restart` is the exception, so it is bounded instead of equated: it
+ * tears the harness down and brings it back on the SAME socket path, bearer
+ * token and $DSH_HOME (see Sidecar.restart), which is what the crash
+ * supervisor in main already does unprompted, then reloads the window, which
+ * the View menu's Reload already does. The worst a page gets from it is
+ * disruption of the user's own session — requests in flight fail and a running
+ * turn is lost — never authority it did not have. The same-origin fence in
+ * socket-proxy still runs first.
  */
 import type { BrowserWindow } from 'electron'
 import { popupAppMenu } from './menu.js'
@@ -56,6 +66,12 @@ export interface DesktopHostDeps extends Omit<DesktopSettingsViewInput, 'store'>
   settings: DesktopSettingsStore
   /** Run an update check now and report to the user. */
   checkForUpdates: () => void
+  /**
+   * Restart the harness sidecar, resolving only once the new process answers
+   * its socket. Coalesced by the supervisor, so overlapping callers share one
+   * restart rather than racing two processes onto one $DSH_HOME.
+   */
+  restartSidecar: () => Promise<void>
 }
 
 /**
@@ -117,6 +133,28 @@ export function createDesktopHost(deps: DesktopHostDeps) {
       }
       case 'chrome/scheme': {
         applyOverlayScheme(win, isLightScheme(body))
+        return new Response(null, { status: 204 })
+      }
+      case 'market/restart': {
+        // Answered after the window check because the reload below is the
+        // second half of the action: a restart nobody can see the result of is
+        // just a dropped session.
+        try {
+          await deps.restartSidecar()
+        } catch (error) {
+          // The old process is already gone by the time this can fail, so
+          // there is nothing to fall back to. Report it rather than reloading
+          // the page onto a dead socket, where every request would 503 with no
+          // hint of why.
+          return new Response(`restart failed: ${String(error)}`, { status: 503 })
+        }
+        // Re-read the window: a restart takes seconds, and it can be closed or
+        // the app quit inside that gap, which makes `win` above a stale handle.
+        const live = getWindow()
+        if (live === undefined || live.isDestroyed()) return new Response('no window', { status: 409 })
+        // The served index.html bakes window.__DSH_BOOT__ in, so a newly
+        // composed plugin row only exists for a page that is fetched again.
+        live.webContents.reload()
         return new Response(null, { status: 204 })
       }
       default:

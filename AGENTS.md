@@ -30,6 +30,44 @@ commit, so a trailer left on any `dev` commit reaches `main` anyway. Prefer
 
 Referencing the filename `CLAUDE.md` is fine — it names a file, not an author.
 
+**A rewrite cleans `main`; it does not clean GitHub.** This is settled now, but
+how it was settled is the part worth keeping.
+
+Rewriting `main` left six contaminated commits still served to anonymous readers:
+three held by `refs/pull/3/head` (login `Minsang-MICUBE`, one
+`Co-Authored-By: Claude Opus 5` trailer each) and three orphans reachable by SHA
+alone — `19c3e80`, PR #3's squash-merge commit with five trailer lines, plus
+`254a6b7c` and `c46c75bb`, the pre-rewrite originals of two rewritten commits.
+
+**Nothing local could remove them.** `refs/pull/*` is read-only
+(`DELETE …/git/refs/pull/3/head` → `422`, `git push --delete` → "deny updating a
+hidden ref"), there is no `deletePullRequest` mutation, `archivePullRequest`
+returns `FORBIDDEN`, and no branch points at the orphans so another force-push
+reaches nothing. **GitHub Support deleted PR #3 and ran a gc on request** — that
+is the route, and it took one ticket. Verified anonymously afterwards: all six
+`404`/`422`, `/pull/3` redirects to a `404`, `refs/pull/3/head` absent from
+`ls-remote`, and the Contributors list down to `xxsLuna` alone.
+
+Two things to carry forward if it ever recurs:
+
+**Enumerate; do not trust a remembered list.** The first pass found only
+`19c3e80` and undercounted by two, and the miss was invisible because `main` was
+clean and the PR page showed only the three commits its ref held. The support
+request had already gone out naming four of the six.
+
+```sh
+git cat-file --batch-all-objects --batch-check | awk '$2=="commit"{print $1}' \
+  | while read -r s; do git cat-file commit "$s" \
+      | grep -qiE 'co-authored-by|generated with \[claude|minsang' && echo "$s"; done
+```
+
+**A clean local clone is not evidence.** These were pruned locally with
+`git reflog expire --expire-unreachable=now --all && git gc --prune=now` (safe —
+every unreachable commit was a contaminated one), which stops a stray push from
+republishing them and says nothing about the remote. **Do not report this rule as
+satisfied on the strength of a clean `git log`** — check the PR refs and the
+orphans with `curl`, unauthenticated.
+
 ---
 
 ## Taking a new upstream version
@@ -56,10 +94,12 @@ dist-tags` has shown `next` ahead of `latest` (rc.8 published as `next` while
 is the `latest` tag. Testing a `next` release and shipping it to users are
 separate decisions.
 
-**Pinning ahead of `latest` makes the daily watch propose a downgrade.** Its gate
-is `pinned != latest` — inequality, not newer-than — so while the pin is a `next`
-release the watch opens a PR walking it *back* to `latest` every day. Check the
-gate before pinning ahead of `latest`, or expect to close that PR repeatedly.
+**Pinning ahead of `latest` used to make the daily watch propose a downgrade.**
+The gate was `pinned != latest` — inequality, not newer-than — so while the pin
+was a `next` release the watch opened a PR walking it *back* to `latest` every
+day. It now compares properly and only opens a PR when `latest` is genuinely
+ahead; the comparator in `watch-upstream.yml` is the reference. Recorded because
+the comparator looks like over-engineering until you know it replaced a `!=`.
 
 ### The pin covers one package only
 
@@ -95,37 +135,47 @@ thousands of orphan files. **Stop every app instance before staging.** A wrecked
 tree looks exactly like "upstream removed everything", which is a wrong
 conclusion someone has already nearly drawn from it.
 
-### After a bump, check the rows patched by id
+### After a bump, the rows patched by id check themselves
 
-This is the highest-value manual check, because it is the one thing that fails
-with no error at all.
+This used to be the highest-value **manual** check, because it was the one thing
+that failed with no error at all. It is now automatic, in two places:
 
-`packages/bundle/cordis.patch.yml` disables six upstream rows **by id**, and
-`packages/bundle/lib/boot.js:68` re-asserts the same six unconditionally — with no
-`rows.has()` guard, unlike the `agent-presets` (`:75`) and `session-telemetry-otel`
-(`:87`) overlays right beside it, which do check. Upstream's patch applier **warns
-and skips** an id it cannot find (`dsh-app-boot`: `warn("patch: entry %C not
-found", id)`) — it does not throw, and the warning does not surface in the app
-log. Adding the guard to that loop, and failing when a targeted id is absent, is
-the cheapest way to close this whole class.
+- `packages/bundle/lib/boot.js` **refuses to boot** when upstream no longer
+  declares a row it patches — the six it disables, plus `agent-presets` and (when
+  `DSH_TELEMETRY_DISABLED` is set) `session-telemetry-otel`.
+- `tests/contract/upstream-rows.spec.ts` names all eight, so CI says *which* row
+  moved rather than "the sidecar did not start".
+
+Two things about that guard are worth knowing before touching it.
+
+**It cannot be written as `rows.has(id)`.** That is the obvious form, and it would
+always pass: `rows` is built from every patch layer including our own
+`cordis.patch.yml`, which names those same ids, so they are in the composition
+whether or not upstream still defines them. The check indexes the **upstream**
+layers separately and asks only about those. The pre-existing `rows.has()` guards
+on `agent-presets` and `session-telemetry-otel` worked only by luck of those rows
+being declared upstream rather than here.
+
+**It throws rather than warns**, because the default state of these rows is *on*:
+per the comment in `boot.js`, `webserver`/`connection` would bind a real TCP port
+and mount a WebSocket carrier the app scheme cannot serve, and
+`directory-picker` would restore an OS chooser this process cannot bring to the
+front. `DSH_TELEMETRY_DISABLED` now fails **closed** for the same reason — a
+privacy switch that silently stops working is worse than an app that will not
+start.
+
+Upstream's applier is what makes all of this necessary: it **warns and skips** an
+id it cannot find (`dsh-app-boot`: `warn("patch: entry %C not found", id)`). It
+does not throw, and the warning does not surface in the app log.
+
+To check by hand anyway:
 
 ```sh
-for id in web-startup webserver web-runtime connection client-hmr directory-picker session-telemetry-otel; do
+for id in web-startup webserver web-runtime connection client-hmr directory-picker agent-presets session-telemetry-otel; do
   grep -rqs "id: $id\$" build/harness/node_modules/@deepseek-ai/*/cordis.patch.yml \
     && echo "$id present" || echo "$id GONE"
 done
 ```
-
-What a silently-dropped disable costs, per the comment in `boot.js`: re-enabling
-`webserver`/`connection` binds a real TCP port and mounts a WebSocket carrier the
-app scheme cannot serve; re-enabling `directory-picker` restores an OS chooser
-this process cannot bring to the front.
-
-**Only four of the six are actually silent.** `sidecar.spec.ts` asserts the boot
-manifest carries neither `@deepseek-ai/dsh-client-connection` nor
-`dsh-client-hmr`, which is exactly what the `connection` and `client-hmr` disables
-remove — so a rename of either turns into a red contract test. The unwatched four
-are `web-startup`, `webserver`, `web-runtime` and `directory-picker`.
 
 `session-telemetry-otel` fails differently and worse: its overlay *is* guarded by
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
@@ -154,6 +204,16 @@ reads `0.1.0-desktop-v0.8.0` as `["desktop-v0", 8, 0]`, so the leading number is
 fused into the text field. It overrides everything after it only while it stays
 single-digit: `desktop-v10` sorts *below* `desktop-v9`. It is an escape hatch
 meant to move roughly never, but do not treat it as a third numeric axis.
+
+**Moving the scheme number is a channel change, not just a sort-order caveat.**
+That first pre-release identifier *is* electron-updater's channel
+(`GitHubProvider` selects a tag only when its channel equals the running build's,
+and the alpha/beta shortcut does not apply to a custom one like `desktop-v0`), so
+a `0.1.0-desktop-v1.x` release is **invisible** to every `desktop-v0` install
+however much higher semver ranks it. That is the same wall the `rc.*` → `desktop-v0`
+move hit, and it is why `v0.8.0` needed a manual download. Changing the leading
+number strands the entire installed base for one release. Treat it as a migration,
+announce it, and do not spend it on tidiness.
 
 **Two different semver rules bite here, and confusing them leads to the wrong
 conclusion.** First: a field of nothing but digits ranks *below* any field
@@ -205,14 +265,69 @@ next `dev -> main` PR then re-applies the same changes. Reset `dev` to `main`.
 `releases.atom` the moment it is pushed, while the assets stay draft-private.
 electron-updater's channel walk picks the new tag, fails to fetch its
 `latest.yml`, and dies with `ERR_UPDATER_CHANNEL_FILE_NOT_FOUND` — swallowed by
-the error handler. **Every existing client's update check is broken for as long
-as the draft sits.** Verify the feed, write the notes, publish.
+the error handler, so **an installed client's update check stays broken for as
+long as the draft sits.**
+
+That bites when installed clients are on the *same* channel as the draft, which
+is every release from `v0.8.1` on. It did **not** apply to `v0.8.0`: the installs
+in the field were `rc.*`, a different channel, so the walk resolved `rc.7-1` and
+they quietly reported themselves up to date. Do not read that one quiet release
+as evidence the hazard is imaginary. Verify the feed, write the notes, publish.
+
+### Count the drafts before you publish one
+
+**Still count them, even though the race is fixed.** A `draft` job now creates the
+release once, before the matrix, and each build job uploads into it with
+`gh release upload --clobber` — nothing else creates a release. That is a change
+only a release exercises, so verify it rather than assume it held:
+
+```sh
+gh api repos/xxsLuna/deepseek-harness-desktop/releases \
+  --jq '.[] | select(.tag_name=="v<version>") | "\(.id) draft=\(.draft) assets=\(.assets|length)"'
+```
+
+Expect **one** id and **13 assets**: dmg + zip + 2 blockmaps + `latest-mac.yml`
+(mac-arm64), exe + `latest.yml` (win), AppImage + deb + `latest-linux.yml`,
+arm64 AppImage + deb + `latest-linux-arm64.yml`.
+
+What it replaced, so nobody reinstates it: all five jobs ran
+`electron-builder --publish always`, and each created the release if it did not
+already see one. On `0.1.0-desktop-v0.8.0` two checked at the same moment and both
+created it — **two drafts on one tag**, assets split 9/7, a `latest-mac.yml` in
+each, and `gh release view <tag>` resolving to only one. Earlier releases got a
+single draft by luck of when their jobs started.
+
+**Assets now upload after the payload and smoke gates**, which is the other half:
+`--publish always` uploaded during `Package`, i.e. before either gate, so a bad
+payload reached the draft and the gates could only report on what had already
+shipped.
+
+If two drafts ever appear again, consolidating means download-and-re-upload —
+there is no move-asset API. Keep the one holding the larger byte total and
+**verify each transfer by hash, not by size**: the feeds carry the build's own
+`sha512` for every artifact, so a truncated download cannot slip through as a
+published installer. Then `DELETE /releases/{id}` the duplicate (by **id** — a
+tag-based delete can take the tag with it, and the tag is what `release.yml`
+already gated).
 
 Before publishing, check the feed rather than assuming:
 
 ```sh
 curl -sSL https://github.com/xxsLuna/deepseek-harness-desktop/releases/download/v<version>/latest.yml
 # version: must match package.json exactly
+```
+
+**Publish as Latest — never tick "Set as a pre-release".** The macOS path fetches
+`releases/latest/download/latest-mac.yml` (`src/updater.ts`), so it reads whatever
+GitHub currently calls Latest rather than this release's own feed. Leave an older
+release as Latest and every mac client on the new version is offered the **older**
+one, because `isNewerVersion('0.1.0-rc.7-1', '0.1.0-desktop-v0.8.0')` is `true` —
+`rc` outranks `desktop-v0`. electron-publish creates the draft
+`prerelease: false`, so the default is already right; this is about not changing
+it. Confirm after publishing:
+
+```sh
+curl -s -o /dev/null -w '%{redirect_url}\n' https://github.com/xxsLuna/deepseek-harness-desktop/releases/latest
 ```
 
 Release notes are hand-written user-facing prose on the GitHub release (there is
@@ -266,7 +381,7 @@ cannot be served over the `dsh://` scheme.
 
 ```sh
 npm run build
-npm run prune                 # add --platform/--arch when cross-building
+npm run prune                 # --platform/--arch default to the host
 npx electron-builder --<mac|win|linux>
 node scripts/verify-payload.mjs <resources dir>
 node scripts/smoke-packaged.mjs
@@ -277,10 +392,17 @@ node scripts/smoke-packaged.mjs
 - **`npm run typecheck` needs the unpruned tree.** `packages/connection` and
   `packages/settings` compile against declarations the prune removes. Run
   `npm run stage` to restore; the prune script says so on exit.
-- On a **cross build** the prune targets the build's arch, not the runner's, so
-  the host's own prebuilds are gone and the harness cannot load. CI therefore
-  prunes *after* the test steps for cross builds and *before* them for native
-  ones — do not "simplify" that into one step.
+- **Every target is built on its own architecture, and that is not a
+  convenience.** There are no cross builds left. The Intel macOS target was
+  cross-built on Apple Silicon for four releases and shipped arm64 `koffi`,
+  `ripgrep` and `sharp` inside an x64 app, because `npm install` picks
+  platform-specific optional dependencies from the **host's** `os`/`cpu` — the
+  cross build's own comment argued it was safe since nothing is *compiled* here,
+  which is true and beside the point. Intel macOS is not supported. If a
+  cross build is ever needed, the prune ordering also has to move (it targets the
+  build's arch, so the host's prebuilds go and the harness cannot load in the
+  test steps), and `verify-payload.mjs --platform/--arch` is what makes the
+  package mismatch fail instead of ship.
 
 ---
 
@@ -357,14 +479,34 @@ It does **not** cover these, and each one fails with no error:
   by every descendant that re-executes `process.execPath`. The day upstream
   passes an explicit env to such a spawn, the child boots a GUI Electron instead
   of Node.
-- **`harness.json`'s node major vs upstream's `engines.node`** — never compared.
-  It has been `(unspecified)` upstream so far.
-- **The macOS update feed covers one architecture.** Both mac jobs write one
-  `latest-mac.yml` and the last upload wins. Inert while `macUpdatesSigned` is
-  false; **fix it before enabling mac signing** — see the note above `mac:` in
-  `electron-builder.yml`.
-- **`test:contract` skips silently without a staged harness.** A skip is
-  indistinguishable from a pass in exactly the situation the suite exists for.
+- ~~**`harness.json`'s node major vs upstream's `engines.node`**~~ — compared now,
+  in `scripts/node-pin.mjs` via `stage-harness`. It has been `(unspecified)`
+  upstream in every version pinned so far, which is why the gap was invisible;
+  `tests/unit/node-pin.spec.ts` is the only evidence the check works.
+- **Platform-specific packages are chosen by the build host, not by the target.**
+  The one that already shipped: four releases of the Intel macOS build carried
+  arm64 `koffi`, `ripgrep` and `sharp`, and nothing failed anywhere.
+  `verify-payload.mjs --platform/--arch` asserts it now, and the Intel target is
+  gone; the entry stays because re-adding a cross build is a two-line matrix edit
+  and the symptom was silence. See the matrix comment in `build.yml`.
+- **The macOS update feed covered one architecture** while there were two mac
+  jobs: app-builder-lib arch-suffixes the manifest only on Linux, so both wrote
+  `latest-mac.yml` and only one could survive — on `0.1.0-desktop-v0.8.0` they
+  even landed in *separate* drafts, and that release ships a hand-merged feed
+  naming all four mac artifacts, x64 first, because electron-updater's `findFile`
+  matches a url containing `process.arch` and otherwise falls back to the first
+  entry. Moot with one mac job, and it returns the day a second one appears.
+  Inert either way while `macUpdatesSigned` is false, since the mac path reads
+  nothing from the file but `version:`.
+- **`NODE_OPTIONS` is appended for every Node descendant on Windows**
+  (`packages/bundle/lib/boot.js`) with no version check. `--import` needs Node
+  18.18+ / 20.6+; a project whose own tooling runs an older Node inside the
+  harness shell gets a hard startup failure on every `node` invocation, not a
+  degraded console fix. Nothing tests this, because the harness's own Node is far
+  newer.
+- ~~**`test:contract` skips silently without a staged harness.**~~ Fixed:
+  `tests/contract/stage-present.spec.ts` does not skip, so a missing stage fails
+  and says what to run instead of printing green over nothing.
 
 When you learn a new one of these, pin it in `tests/contract` and add it here.
 That is the whole point of both files.

@@ -33,7 +33,7 @@ interface View {
   settings: DesktopSettings
   version: string
   harnessVersion: string
-  updatable: boolean
+  updates: 'auto' | 'notify-only' | 'disabled'
   pendingRestart: readonly string[]
   titleBarMergeable: boolean
 }
@@ -239,7 +239,7 @@ function DesktopSettingsSection(): ReactNode {
   }
   if (view === undefined) return null
 
-  const { settings, pendingRestart, titleBarMergeable, updatable } = view
+  const { settings, pendingRestart, titleBarMergeable, updates } = view
 
   return (
     <div style={styles.page}>
@@ -292,11 +292,17 @@ function DesktopSettingsSection(): ReactNode {
         <div style={styles.groupTitle}>Updates</div>
         <Row
           label="Check for updates automatically"
-          hint={updatable
-            ? 'Looks at the project’s GitHub releases every few hours and installs a newer version.'
-            : 'Development builds are not updated.'}
+          hint={updates === 'disabled'
+            ? 'Development builds are not updated.'
+            : updates === 'auto'
+              ? 'Looks at the project’s GitHub releases every few hours and installs a newer version.'
+              // Unsigned macOS builds cannot self-update — Squirrel.Mac verifies
+              // the signature — so this path only ever opens the releases page.
+              // Promising an install here was wrong on the one platform the
+              // distinction exists for.
+              : 'Looks at the project’s GitHub releases every few hours and tells you when a newer version is available.'}
         >
-          <Switch checked={settings.autoUpdate} disabled={!updatable} onToggle={(autoUpdate) => { patch({ autoUpdate }) }} />
+          <Switch checked={settings.autoUpdate} disabled={updates === 'disabled'} onToggle={(autoUpdate) => { patch({ autoUpdate }) }} />
         </Row>
         <Row label="Version" hint={`Harness ${view.harnessVersion}`}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>

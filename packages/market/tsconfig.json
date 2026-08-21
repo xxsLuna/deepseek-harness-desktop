@@ -1,0 +1,33 @@
+{
+  "// why": [
+    "Covers BOTH halves of this package, which is why it loads dom and node types",
+    "together: src/client.tsx is browser code and lib/*.js is sidecar code. The",
+    "looseness that buys (the node half could reference `document` unchallenged) is",
+    "worth one project over two.",
+    "",
+    "`checkJs` is the point of the file. The `// @ts-check` pragmas on lib/*.js were",
+    "otherwise honoured by editors only and never by CI, so a JSDoc type could rot",
+    "silently -- exactly the failure class CLAUDE.md says to pin. packages/chrome and",
+    "packages/picker are still in that state; sweeping them is a separate change.",
+    "",
+    "lib/client.js is excluded because it is a build artifact, not source: esbuild",
+    "emits bundled CJS wrapped in the module-host factory, with browser globals and",
+    "no types to check."
+  ],
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "lib"],
+  "exclude": ["lib/client.js"]
+}
