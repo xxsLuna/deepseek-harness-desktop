@@ -67,8 +67,8 @@ export class TarError extends Error {
 /**
  * One regular file recovered from the archive.
  * @typedef {object} TarEntry
- * @property {string} path - relative POSIX path, already stripped of the
- *   leading `package/`. Guaranteed safe to join onto a target directory.
+ * @property {string} path - relative POSIX path with the root directory the
+ *   caller asked for already removed. Guaranteed safe to join onto a target.
  * @property {number} mode - permission bits only (`& 0o777`).
  * @property {Buffer} bytes - the file contents. A view onto the decompressed
  *   buffer rather than a copy, so holding one entry holds the whole archive
@@ -79,6 +79,19 @@ export class TarError extends Error {
  * @typedef {object} ReadTarballOptions
  * @property {number} [maxTotalBytes] - ceiling on decompressed bytes.
  * @property {number} [maxEntries] - ceiling on header records walked.
+ * @property {'package' | 'auto' | 'none'} [stripPrefix] - which root directory
+ *   to remove from every path. Defaults to `'package'`, which is what `npm
+ *   pack` always writes and what this reader was built for.
+ *
+ *   `'auto'` removes a single shared top-level directory when there is exactly
+ *   one, and removes nothing otherwise. That is the rule for a plugin archive
+ *   downloaded from a URL: it may carry its manifest at the root, or inside one
+ *   wrapping folder, and only the archive knows which. A plugin needs a marker
+ *   file at its own root to be installable at all, so an archive whose single
+ *   top-level directory is stripped "wrongly" could not have been valid either
+ *   way — the heuristic cannot turn a good archive into a bad one.
+ *
+ *   `'none'` keeps paths as written. Every safety check still applies.
  */
 
 /**
@@ -96,12 +109,11 @@ export class TarError extends Error {
 export function readTarball(gzipped, options = {}) {
   const maxTotalBytes = options.maxTotalBytes ?? MAX_TOTAL_BYTES
   const maxEntries = options.maxEntries ?? MAX_ENTRIES
+  const stripPrefix = options.stripPrefix ?? 'package'
   const buffer = inflate(gzipped, maxTotalBytes)
 
   /** @type {TarEntry[]} */
   const entries = []
-  /** @type {Set<string>} */
-  const seen = new Set()
   /** Pax records that apply to the next entry only, or a GNU long name. */
   /** @type {Record<string, string>} */
   let nextOverrides = {}
@@ -227,21 +239,70 @@ export function readTarball(gzipped, options = {}) {
       )
     }
 
-    const path = safeRelativePath(rawPath)
-    if (seen.has(path)) {
-      // Two entries with one path means the result depends on who extracts it
-      // and in what order — the classic way to show a reviewer one file and
-      // land another. npm never produces it.
-      throw new TarError('ERR_TAR_DUPLICATE_PATH', `tarball contains ${JSON.stringify(path)} twice`)
-    }
-    seen.add(path)
-    entries.push({ path, mode: readMode(header), bytes: data })
+    entries.push({ path: safePath(rawPath), mode: readMode(header), bytes: data })
   }
 
   if (!sawEnd) {
     throw new TarError('ERR_TAR_TRUNCATED', 'tarball has no end-of-archive marker; the download is incomplete')
   }
-  return entries
+
+  // Stripping happens after the walk, not during it: `'auto'` cannot know which
+  // root to remove until it has seen every path. Duplicate detection therefore
+  // has to follow, because stripping is what can CREATE a collision.
+  const prefix = rootPrefix(entries, stripPrefix)
+  const stripped = entries.map((entry) => ({ ...entry, path: strip(entry.path, prefix) }))
+  const seen = new Set()
+  for (const entry of stripped) {
+    if (seen.has(entry.path)) {
+      // Two entries with one path means the result depends on who extracts it
+      // and in what order — the classic way to show a reviewer one file and
+      // land another. npm never produces it.
+      throw new TarError('ERR_TAR_DUPLICATE_PATH', `tarball contains ${JSON.stringify(entry.path)} twice`)
+    }
+    seen.add(entry.path)
+  }
+  return stripped
+}
+
+/**
+ * Decide which leading component every path should lose.
+ * @param {readonly {path: string}[]} entries - entries carrying safe full paths.
+ * @param {'package' | 'auto' | 'none'} mode - the caller's stripPrefix.
+ * @returns {string | undefined} the component to remove, or undefined for none.
+ * @throws {TarError} when `'package'` was asked for and the archive is not one.
+ */
+function rootPrefix(entries, mode) {
+  if (mode === 'none' || entries.length === 0) return undefined
+  const heads = new Set(entries.map((entry) => entry.path.split('/')[0]))
+  if (mode === 'package') {
+    // A tarball with content outside `package/` is not an npm package, whatever
+    // else it might be.
+    for (const entry of entries) {
+      if (entry.path.split('/')[0] !== ROOT || entry.path.split('/').length === 1) {
+        throw new TarError(
+          'ERR_TAR_OUTSIDE_PACKAGE',
+          `tar entry ${JSON.stringify(entry.path)} is not under ${ROOT}/; this is not an npm package tarball`,
+        )
+      }
+    }
+    return ROOT
+  }
+  // 'auto': one shared top-level directory, and every entry must live below it.
+  // A lone file at the root means there is no wrapper to remove.
+  if (heads.size !== 1) return undefined
+  const [head] = heads
+  if (entries.some((entry) => entry.path.split('/').length === 1)) return undefined
+  return head
+}
+
+/**
+ * Remove a decided prefix from one already-safe path.
+ * @param {string} path - a path returned by {@link safePath}.
+ * @param {string | undefined} prefix - from {@link rootPrefix}.
+ * @returns {string} the path the caller will join onto its target directory.
+ */
+function strip(path, prefix) {
+  return prefix === undefined ? path : path.slice(prefix.length + 1)
 }
 
 /**
@@ -282,8 +343,7 @@ function inflate(gzipped, maxTotalBytes) {
 }
 
 /**
- * Reduce a tarball path to a relative path that cannot escape its target, and
- * strip the `package/` root every npm tarball has.
+ * Reduce a tarball path to a relative path that cannot escape its target.
  *
  * **This is the security-critical function in this file.** Every entry path
  * reaches the filesystem through it, and each rejection below is a way out of
@@ -305,10 +365,12 @@ function inflate(gzipped, maxTotalBytes) {
  * up. Two extractors that normalise slightly differently is precisely where
  * path-escape bugs live, and no npm tarball needs it.
  * @param {string} raw - the entry path exactly as the archive spells it.
- * @returns {string} the path relative to `package/`.
- * @throws {TarError} if the path is unsafe, or outside `package/`.
+ * @returns {string} the safe path, exactly as the archive spells it. Removing
+ * a root directory is a separate decision — see {@link rootPrefix} — because
+ * `'auto'` cannot make it until every path has been seen.
+ * @throws {TarError} if the path is unsafe.
  */
-function safeRelativePath(raw) {
+function safePath(raw) {
   const path = raw.replace(/\\/g, '/')
   /** @param {string} why - the specific rule that refused it. */
   const refuse = (why) => {
@@ -327,16 +389,7 @@ function safeRelativePath(raw) {
     if (part.includes(':')) refuse('`:` in a component (NTFS alternate data stream)')
   }
 
-  // A tarball with content outside `package/` is not an npm package, whatever
-  // else it might be.
-  if (parts[0] !== ROOT) {
-    throw new TarError(
-      'ERR_TAR_OUTSIDE_PACKAGE',
-      `tar entry ${JSON.stringify(raw)} is not under ${ROOT}/; this is not an npm package tarball`,
-    )
-  }
-  if (parts.length === 1) refuse(`nothing under ${ROOT}/`)
-  return parts.slice(1).join('/')
+  return parts.join('/')
 }
 
 /**

@@ -61,6 +61,12 @@ async function refusal(fn: () => unknown): Promise<{ name: string; code: string;
   throw new Error('expected a refusal, got none')
 }
 
+// Derived from the default rather than written out, so moving the default
+// catalog moves every lookalike with it instead of quietly testing a host the
+// app no longer ships.
+const DEFAULT_HOST = new URL(DEFAULT_CATALOG).host
+const DEFAULT_PATH = new URL(DEFAULT_CATALOG).pathname
+
 describe('isAllowedSource', () => {
   it('allows the shipped default catalog and nothing else by default', () => {
     expect(isAllowedSource(DEFAULT_CATALOG)).toBe(true)
@@ -69,7 +75,7 @@ describe('isAllowedSource', () => {
 
   it('rejects every scheme but https, localhost included', () => {
     for (const url of [
-      'http://xxsluna.github.io/DeepSeek-Harness-Desktop-Marketplace/index.json',
+      DEFAULT_CATALOG.replace('https://', 'http://'),
       'file:///C:/catalog/index.json',
       'data:application/json,{"version":1}',
       'ftp://example.com/index.json',
@@ -94,9 +100,9 @@ describe('isAllowedSource', () => {
     // these contains or resembles the allowed source without being it.
     expect(isAllowedSource(`https://evil.com/?x=${DEFAULT_CATALOG}`)).toBe(false)
     expect(isAllowedSource(`https://evil.com/#${DEFAULT_CATALOG}`)).toBe(false)
-    expect(isAllowedSource('https://xxsluna.github.io.evil.com/DeepSeek-Harness-Desktop-Marketplace/index.json')).toBe(false)
+    expect(isAllowedSource(`https://${DEFAULT_HOST}.evil.com${DEFAULT_PATH}`)).toBe(false)
     // Here the part that looks like the host is a username; the host is evil.com.
-    expect(isAllowedSource('https://xxsluna.github.io@evil.com/DeepSeek-Harness-Desktop-Marketplace/index.json')).toBe(false)
+    expect(isAllowedSource(`https://${DEFAULT_HOST}@evil.com${DEFAULT_PATH}`)).toBe(false)
   })
 
   it('rejects credentials even on an otherwise allowed source', () => {
@@ -106,15 +112,15 @@ describe('isAllowedSource', () => {
   })
 
   it('rejects a source differing only by a trailing slash', () => {
-    // `/index.json/` is a different resource, so it must not inherit the
+    // A trailing slash names a different resource, so it must not inherit the
     // allowance; the comparison keeps the path exactly as the URL spec has it.
     expect(isAllowedSource(`${DEFAULT_CATALOG}/`)).toBe(false)
   })
 
   it('matches an allowed source through host case, the default port and dot segments', () => {
-    expect(isAllowedSource(DEFAULT_CATALOG.replace('xxsluna.github.io', 'XXSLuna.GitHub.IO'))).toBe(true)
-    expect(isAllowedSource(DEFAULT_CATALOG.replace('github.io/', 'github.io:443/'))).toBe(true)
-    expect(isAllowedSource(DEFAULT_CATALOG.replace('/index.json', '/./index.json'))).toBe(true)
+    expect(isAllowedSource(DEFAULT_CATALOG.replace(DEFAULT_HOST, DEFAULT_HOST.toUpperCase()))).toBe(true)
+    expect(isAllowedSource(DEFAULT_CATALOG.replace(DEFAULT_HOST, `${DEFAULT_HOST}:443`))).toBe(true)
+    expect(isAllowedSource(DEFAULT_CATALOG.replace(DEFAULT_PATH, `/.${DEFAULT_PATH}`))).toBe(true)
   })
 
   it('never throws, whatever it is handed', () => {
@@ -299,7 +305,7 @@ describe('fetchCatalog', () => {
       : new Response(CATALOG_TEXT, { status: 200 })))
 
     await fetchCatalog(DEFAULT_CATALOG, { fetchImpl: impl })
-    expect(calls[1].url).toBe('https://xxsluna.github.io/moved/index.json')
+    expect(calls[1].url).toBe(`https://${DEFAULT_HOST}/moved/index.json`)
   })
 
   it('caps the redirect chain instead of walking a loop', async () => {

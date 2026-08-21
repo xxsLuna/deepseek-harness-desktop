@@ -14,8 +14,9 @@ interface TarEntry {
   bytes: Buffer
 }
 
-const read = readTarball as (gzipped: Buffer, options?: { maxTotalBytes?: number, maxEntries?: number }) => TarEntry[]
-const files = tarballFiles as (gzipped: Buffer, options?: object) => Map<string, Buffer>
+interface ReadOptions { maxTotalBytes?: number, maxEntries?: number, stripPrefix?: 'package' | 'auto' | 'none' }
+const read = readTarball as (gzipped: Buffer, options?: ReadOptions) => TarEntry[]
+const files = tarballFiles as (gzipped: Buffer, options?: ReadOptions) => Map<string, Buffer>
 
 const BLOCK = 512
 
@@ -212,7 +213,13 @@ describe('readTarball path-escape defence', () => {
   })
 
   it('rejects a bare package entry with nothing under it', () => {
-    expectCode('ERR_TAR_UNSAFE_PATH', () => read(tarball(entry({ name: 'package' }, 'x'))))
+    // Was ERR_TAR_UNSAFE_PATH until the root check moved out of the per-entry
+    // path audit and into the prefix decision, which is what `stripPrefix:
+    // 'auto'` needed — it cannot know which root to remove until every path has
+    // been seen. The rejection is unchanged; only the code moved, and the new
+    // one describes it better. A lone `package` entry is not an unsafe path,
+    // it is simply not an npm package.
+    expectCode('ERR_TAR_OUTSIDE_PACKAGE', () => read(tarball(entry({ name: 'package' }, 'x'))))
   })
 })
 
@@ -511,5 +518,62 @@ describe('readTarball against real `npm pack` output', () => {
     const paths = [...files(paxed).keys()]
     expect(paths).toContain(`lib/${'z'.repeat(120)}.js`)
     expect(files(paxed).get(`lib/${'z'.repeat(120)}.js`)?.toString('utf8')).toBe('export const z = 2\n')
+  })
+})
+
+describe('readTarball stripPrefix', () => {
+  it("defaults to 'package', so every existing caller is unaffected", () => {
+    const map = files(tarball(entry({ name: 'package/a.js' }, 'x')))
+    expect([...map.keys()]).toEqual(['a.js'])
+  })
+
+  it("'auto' removes a single shared root, which is what a git archive has", () => {
+    // A repository archive roots at `<repo>-<ref>/`, a name we cannot know in
+    // advance — the whole reason this mode exists.
+    const map = files(
+      tarball(
+        entry({ name: 'myplugin-a1b2c3/.claude-plugin/plugin.json' }, '{}'),
+        entry({ name: 'myplugin-a1b2c3/skills/foo/SKILL.md' }, '# foo'),
+      ),
+      { stripPrefix: 'auto' },
+    )
+    expect([...map.keys()].sort()).toEqual(['.claude-plugin/plugin.json', 'skills/foo/SKILL.md'])
+  })
+
+  it("'auto' removes nothing when the archive is already at its root", () => {
+    const map = files(
+      tarball(
+        entry({ name: '.claude-plugin/plugin.json' }, '{}'),
+        entry({ name: 'skills/foo/SKILL.md' }, '# foo'),
+      ),
+      { stripPrefix: 'auto' },
+    )
+    expect([...map.keys()].sort()).toEqual(['.claude-plugin/plugin.json', 'skills/foo/SKILL.md'])
+  })
+
+  it("'auto' removes nothing when a file sits beside the would-be root", () => {
+    // One shared head is not enough: a loose file at the top means there is no
+    // wrapper directory, and stripping would eat a real path component.
+    const map = files(
+      tarball(entry({ name: 'wrapper/a.js' }, 'x'), entry({ name: 'README.md' }, 'y')),
+      { stripPrefix: 'auto' },
+    )
+    expect([...map.keys()].sort()).toEqual(['README.md', 'wrapper/a.js'])
+  })
+
+  it("'none' keeps paths as written but still audits them", () => {
+    expect([...files(tarball(entry({ name: 'a/b.js' }, 'x')), { stripPrefix: 'none' }).keys()])
+      .toEqual(['a/b.js'])
+    // The escape defences are not part of the prefix decision and still apply.
+    expectCode('ERR_TAR_UNSAFE_PATH', () => read(tarball(entry({ name: '../evil' }, 'x')), { stripPrefix: 'none' }))
+  })
+
+  it('detects a collision that stripping CREATES', () => {
+    // Two distinct paths that become one after the root comes off. This is why
+    // duplicate detection had to move after stripping rather than before it.
+    expectCode('ERR_TAR_DUPLICATE_PATH', () => read(
+      tarball(entry({ name: 'root/a.js' }, 'x'), entry({ name: 'root/a.js' }, 'y')),
+      { stripPrefix: 'auto' },
+    ))
   })
 })

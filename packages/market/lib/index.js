@@ -25,7 +25,8 @@
  * and body-size checks upstream would have applied are this module's own job —
  * the same shape `@dsh-desktop/picker` uses for its answer route.
  */
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -33,10 +34,22 @@ import { readProfileManifest, resolveProfileDir, writeProfileManifest } from '@d
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CATALOG, fetchCatalog, fetchTarball, isAllowedSource } from './fetch.js'
-import { addInstalled, isPluginName, isPluginVersion, parseInstalled, removeInstalled } from './registry.js'
-import { readTarball, tarballFiles } from './tar.js'
+import { MARKETPLACE_FILE, parseCatalog } from './catalog.js'
+import { DEFAULT_CATALOG, fetchCatalogText, fetchTarball, isAllowedSource } from './fetch.js'
+import { classifyPlugin } from './kind.js'
+import { fetchGit } from './git.js'
+import {
+  CLAUDE_PLUGINS_DIR,
+  INSTALLED_FILE,
+  addInstalled as recordClaude,
+  installPath,
+  parseInstalled as parseClaude,
+  removeInstalled as forgetClaude,
+} from './installed.js'
+import { addInstalled, isPluginName, parseInstalled, removeInstalled } from './registry.js'
+import { readTarball } from './tar.js'
 
+/** @typedef {import('./catalog.js').CatalogPlugin} Listing */
 /** @typedef {import('node:http').IncomingMessage} Request */
 /** @typedef {import('node:http').ServerResponse} Response */
 /**
@@ -147,6 +160,35 @@ export function apply(ctx, config) {
   const profileDir = resolveProfileDir(PROFILE, home)
   const modulesDir = join(profileDir, 'node_modules')
 
+  /** Where Claude-format plugins live. The layout IS the contract with
+   * `@dsh-desktop/claude-plugins`, which reads this tree and knows nothing
+   * about this package — which is why a hand-copied plugin works too. */
+  const claudeRoot = join(home, CLAUDE_PLUGINS_DIR)
+  /** The record of what this package put there. */
+  const claudeRecord = join(claudeRoot, INSTALLED_FILE)
+  /** Dot-prefixed, because the skill provider skips dot directories at every
+   * level — so a half-fetched tree is never walked mid-write. */
+  const stagingRoot = join(claudeRoot, '.staging')
+
+  /** @returns {any} the Claude install record, or an empty one. */
+  function readClaudeRecord() {
+    if (!existsSync(claudeRecord)) return { version: 1, plugins: [] }
+    try {
+      return JSON.parse(readFileSync(claudeRecord, 'utf8'))
+    } catch {
+      // Total, like every other read of this file: a hand-mangled record must
+      // not stop the tab rendering. The rows it did hold are lost, but the
+      // directories are still on disk and the provider still publishes them.
+      return { version: 1, plugins: [] }
+    }
+  }
+
+  /** @param {any} doc - the record to persist. */
+  function writeClaudeRecord(doc) {
+    mkdirSync(claudeRoot, { recursive: true })
+    writeFileSync(claudeRecord, `${JSON.stringify(doc, undefined, 2)}\n`, 'utf8')
+  }
+
   /**
    * The installed set this process actually booted with.
    *
@@ -189,6 +231,34 @@ export function apply(ctx, config) {
   })
 
   /**
+   * The sibling that publishes Claude plugins, when it is mounted.
+   *
+   * Optional on purpose. The two packages share a directory layout, not an
+   * import, and the two things that cross between them are a nudge that the
+   * tree changed and a read of what that tree publishes. Without it an install
+   * still lands correctly — it just waits for the provider's own next look
+   * instead of being seen immediately, and the tab shows no skill detail.
+   *
+   * Typed structurally rather than by importing the sibling's typedef, so a
+   * checkout that has not been staged still typechecks. That means drift is
+   * not caught here; `tests/contract/market-tab.spec.ts` reads this route
+   * against the real service and is what actually holds the shape.
+   * @type {{
+   *   refresh: () => void,
+   *   inventory: () => Promise<{
+   *     plugins: { id: string, name: string, version: string }[],
+   *     skills: { name: string, kind: string, plugin: string, renamedFrom?: string }[],
+   *     refused: { plugin: string, code: string, name?: string, message: string }[],
+   *     errors: { path: string, message: string }[],
+   *   }>,
+   * } | undefined}
+   */
+  let claudePlugins
+  ctx.inject(['claudePlugins'], (/** @type {any} */ pluginsCtx) => {
+    claudePlugins = pluginsCtx.claudePlugins
+  })
+
+  /**
    * Whether a name resolves from the profile — i.e. whether the next boot will
    * actually find it.
    *
@@ -212,66 +282,80 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Unpack one verified tarball into the profile, or reject it.
-   *
-   * The gate is the security boundary, and every clause closes a real hole: a
-   * package with no `dsh.bundle` makes `loadProfile` throw and the app stop
-   * booting; runtime `dependencies` cannot be satisfied without a package
-   * manager, so a package that declares one would resolve to nothing at load;
-   * and a name or version that does not match what the catalog promised means
-   * the bytes are not the thing that was approved.
-   * @param {Buffer} bytes - the verified tarball.
-   * @param {{ name: string, version: string }} expected - name and version the catalog promised.
-   * @returns {object} the accepted manifest.
-   * @throws when the package fails the gate.
+   * Write a verified archive's files into a staging directory.
+   * @param {Buffer} bytes - the archive, already checked against its digest.
+   * @param {string} staging - an empty directory to write into.
+   * @returns {void}
    */
-  function unpack(bytes, expected) {
-    const files = tarballFiles(bytes)
-    const manifestBytes = files.get('package.json')
-    if (manifestBytes === undefined) throw new Error('the package contains no package.json')
-    /** @type {{ name?: unknown, version?: unknown, dependencies?: unknown, dsh?: { bundle?: { patch?: unknown } } }} */
-    const manifest = JSON.parse(manifestBytes.toString('utf8'))
+  function unpackInto(bytes, staging) {
+    // 'auto' rather than 'package': an npm tarball roots at `package/`, but an
+    // archive published for a plugin may root at its own wrapper directory or
+    // at nothing at all, and only the archive knows which.
+    for (const entry of readTarball(bytes, { stripPrefix: 'auto' })) {
+      const target = join(staging, entry.path)
+      // Belt and braces over tar.js's own path checks: never write outside.
+      if (!resolvePath(target).startsWith(resolvePath(staging))) throw new Error('the package tried to escape its directory')
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, entry.bytes, { mode: entry.mode & 0o777 })
+    }
+  }
 
-    if (manifest.name !== expected.name) {
-      throw new Error(`the package is ${String(manifest.name)}, not ${expected.name} as the catalog said`)
-    }
-    if (manifest.version !== expected.version) {
-      throw new Error(`the package is version ${String(manifest.version)}, not ${expected.version}`)
-    }
-    const declared = manifest.dsh?.bundle?.patch
-    if (typeof declared !== 'string') {
-      throw new Error('the package declares no dsh.bundle.patch, so it is not a harness plugin')
-    }
-    // Resolved the same way `loadProfile` will: relative to the package root.
-    const patchKey = declared.replace(/^\.\//, '')
-    if (!files.has(patchKey)) throw new Error(`its declared patch file ${declared} is not in the package`)
-    const dependencies = manifest.dependencies
-    if (typeof dependencies === 'object' && dependencies !== null && Object.keys(dependencies).length > 0) {
-      throw new Error('the package declares runtime dependencies, which this app cannot install')
-    }
-
-    // Extract beside the destination and rename into place: a rename inside one
-    // directory is atomic enough that a crash mid-write cannot leave a
-    // half-written package that the next boot would try to load.
-    mkdirSync(modulesDir, { recursive: true })
-    const staging = mkdtempSync(join(modulesDir, '.market-'))
+  /**
+   * Bring one listing's bytes down into a fresh staging directory.
+   *
+   * Transport is chosen by the catalog's `source` discriminant, and the two
+   * kinds arrive differently: an archive is bytes this process unpacks, while a
+   * git source is a tree `git` writes itself. Splitting here rather than inside
+   * the gate is what lets both end at the same directory — an earlier version
+   * of this file was built on tarball bytes and had nowhere to put a clone.
+   * @param {Listing} listing - the validated catalog row.
+   * @returns {Promise<string>} the staging directory; the caller must remove it.
+   */
+  async function fetchToStaging(listing) {
+    mkdirSync(stagingRoot, { recursive: true })
+    const staging = mkdtempSync(join(stagingRoot, '.fetch-'))
     try {
-      for (const entry of readTarball(bytes)) {
-        const target = join(staging, entry.path)
-        // Belt and braces over tar.js's own path checks: never write outside.
-        if (!resolvePath(target).startsWith(resolvePath(staging))) throw new Error('the package tried to escape its directory')
-        mkdirSync(dirname(target), { recursive: true })
-        writeFileSync(target, entry.bytes, { mode: entry.mode & 0o777 })
+      if (listing.source.source === 'archive') {
+        // The standard spells an archive digest as bare hex; `fetch.js` verifies
+        // SRI. Re-spelling it into SRI *before* the call means the download goes
+        // through the one verification path that already exists, rather than a
+        // second one here that could drift from it — and `fetchTarball` parses
+        // the digest before it opens a socket, so a bad one costs no request.
+        const sri = `sha256-${Buffer.from(listing.source.sha256, 'hex').toString('base64')}`
+        unpackInto(Buffer.from(await fetchTarball(listing.source.url, sri)), staging)
+      } else {
+        await fetchGit(listing.source, staging)
       }
-      const dest = join(modulesDir, ...expected.name.split('/'))
-      mkdirSync(dirname(dest), { recursive: true })
-      rmSync(dest, { recursive: true, force: true })
-      renameSync(staging, dest)
+      return staging
     } catch (error) {
       rmSync(staging, { recursive: true, force: true })
       throw error
     }
-    return manifest
+  }
+
+  /**
+   * Move a staged tree onto its final path, without a moment where it is absent.
+   *
+   * The old tree is renamed aside first and deleted afterwards. A plain
+   * delete-then-rename leaves a window with nothing there, and the skill
+   * provider walks the disk on every `list()` — so an upgrade would make a
+   * plugin briefly vanish from the model's catalog. Two renames cost nothing
+   * and remove the window.
+   * @param {string} staging - the staged plugin root.
+   * @param {string} dest - where it belongs.
+   */
+  function moveIntoPlace(staging, dest) {
+    mkdirSync(dirname(dest), { recursive: true })
+    const aside = `${dest}.replaced-${String(Date.now())}`
+    const hadPrevious = existsSync(dest)
+    if (hadPrevious) renameSync(dest, aside)
+    try {
+      renameSync(staging, dest)
+    } catch (error) {
+      if (hadPrevious) renameSync(aside, dest)
+      throw error
+    }
+    if (hadPrevious) rmSync(aside, { recursive: true, force: true })
   }
 
   /**
@@ -280,7 +364,16 @@ export function apply(ctx, config) {
    */
   async function catalog(res) {
     const sources = trustedSources()
-    /** @type {{id: string, name: string, version: string, publisher: string, description: string, source: string}[]} */
+    /**
+     * What the tab renders. Deliberately not the catalog row spread wholesale:
+     * a row's `source` is its TRANSPORT descriptor, while the tab's `source` is
+     * which catalog it came from, and letting those two share a name is how a
+     * URL ends up where an object was expected.
+     * @type {{
+     *   name: string, displayName: string, description: string, version: string,
+     *   publisher: string, kind: string, source: string, marketplace: string,
+     * }[]}
+     */
     const entries = []
     /** @type {{source: string, message: string}[]} */
     const errors = []
@@ -290,10 +383,27 @@ export function apply(ctx, config) {
         continue
       }
       try {
-        const view = await fetchCatalog(source, { extraSources: sources })
-        for (const plugin of view.plugins) entries.push({ ...plugin, source })
-        for (const dropped of view.dropped ?? []) {
-          errors.push({ source, message: `a listing was dropped: ${String(dropped.reason ?? 'malformed')}` })
+        const view = parseCatalog(await readSource(source))
+        for (const plugin of view.plugins) {
+          const hinted = plugin.metadata?.kind
+          entries.push({
+            name: plugin.name,
+            displayName: plugin.displayName,
+            description: plugin.description ?? '',
+            version: plugin.version ?? '',
+            // The plugin's own author when it names one, else whoever lists it.
+            publisher: plugin.author?.name ?? view.owner.name,
+            // A hint from the catalog, shown so the confirmation can warn
+            // correctly. `classifyPlugin()` decides for real, from the bytes.
+            kind: hinted === 'claude' || hinted === 'dsh' ? hinted : 'unknown',
+            source,
+            marketplace: view.name,
+          })
+        }
+        for (const dropped of view.dropped) {
+          // Named, not counted: a submitter who mistyped a source type needs to
+          // read which row and why, and the reasons are stable codes for that.
+          errors.push({ source, message: `${String(dropped.name ?? `row ${String(dropped.index)}`)} was dropped: ${dropped.reason}` })
         }
       } catch (error) {
         errors.push({ source, message: error instanceof Error ? error.message : String(error) })
@@ -303,26 +413,100 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Read one catalog source's document.
+   * @param {string} source - the source URL.
+   * @returns {Promise<string>} the manifest text.
+   */
+  async function readSource(source) {
+    return fetchCatalogText(source, { extraSources: trustedSources() })
+  }
+
+  /**
    * GET /market/installed — what is on disk, and whether it is live.
+   *
+   * Also carries the Claude-side inventory, because for that kind "installed"
+   * and "published" are not the same claim: a plugin can be on disk with every
+   * one of its skills withheld, and a tab that showed only the row would be
+   * telling the user something that is true and useless. The inventory is
+   * asked of `claudePlugins`, which may not be composed — the two packages are
+   * deliberately independent — so its absence degrades to no detail rather
+   * than an error.
    * @param {Response} res - the response.
    */
-  function installed(res) {
+  async function installed(res) {
     const { manifest, names } = readInstalled()
     const dependencies = /** @type {Record<string, string>} */ (
       typeof manifest.dependencies === 'object' && manifest.dependencies !== null ? manifest.dependencies : {}
     )
+    // Two kinds, one list, and the difference the tab has to show is `active`:
+    // a dsh plugin is code the Loader composed at boot, so it is live only if
+    // it was there when this process started. A Claude plugin is data the
+    // provider re-reads on every lookup, so it is live the moment it is on disk.
+    /** @type {{name: string, version: string, kind: string, active: boolean, managed: boolean}[]} */
     const entries = names.map((pkg) => ({
       name: pkg,
       version: dependencies[pkg] ?? 'unknown',
+      kind: 'dsh',
       active: bootedWith.has(pkg),
+      managed: true,
     }))
+    for (const row of parseClaude(readClaudeRecord()).entries) {
+      entries.push({ name: row.name, version: row.version, kind: 'claude', active: true, managed: true })
+    }
     const onDisk = new Set(names)
-    const restartRequired = entries.some((e) => !e.active)
+    const restartRequired = entries.some((e) => e.kind === 'dsh' && !e.active)
       || [...bootedWith].some((pkg) => !onDisk.has(pkg))
+    // What each Claude plugin actually contributes, grouped by the row it
+    // belongs to. A refusal is the interesting half: it names a skill the
+    // plugin ships that this app will not publish, and why.
+    /** @type {Record<string, { skills: {name: string, kind: string, renamedFrom?: string}[], refused: {name?: string, code: string, message: string}[] }>} */
+    const detail = {}
+    /** @type {{path: string, message: string}[]} */
+    const skillErrors = []
+    if (claudePlugins !== undefined) {
+      try {
+        const view = await claudePlugins.inventory()
+        // Keyed by plugin NAME, which is what the row carries; the inventory
+        // keys by id (`<source>/<name>`) because two sources may ship the same
+        // name, and this collapses that on purpose — the row is per name.
+        const nameOf = new Map(view.plugins.map((plugin) => [plugin.id, plugin.name]))
+        for (const plugin of view.plugins) detail[plugin.name] ??= { skills: [], refused: [] }
+        for (const skill of view.skills) {
+          const bucket = detail[nameOf.get(skill.plugin) ?? skill.plugin]
+          bucket?.skills.push({
+            name: skill.name,
+            kind: skill.kind,
+            ...skill.renamedFrom === undefined ? {} : { renamedFrom: skill.renamedFrom },
+          })
+        }
+        for (const refusal of view.refused) {
+          const bucket = detail[nameOf.get(refusal.plugin) ?? refusal.plugin]
+          bucket?.refused.push({
+            ...refusal.name === undefined ? {} : { name: refusal.name },
+            code: refusal.code,
+            message: refusal.message,
+          })
+        }
+        // A Claude plugin can be under the root without this installer having
+        // put it there — copied in by hand, or left behind by an older
+        // install whose record was lost. Its skills are already live, so
+        // omitting the row would show the user skills with no visible source.
+        // It is listed and marked unmanaged instead: removing a directory this
+        // app did not create is not this app's call.
+        const listed = new Set(entries.filter((e) => e.kind === 'claude').map((e) => e.name))
+        for (const plugin of view.plugins) {
+          if (listed.has(plugin.name)) continue
+          entries.push({ name: plugin.name, version: plugin.version, kind: 'claude', active: true, managed: false })
+        }
+        skillErrors.push(...view.errors)
+      } catch (error) {
+        skillErrors.push({ path: claudeRoot, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
     // `failed` comes from the row's config, set only by a safe-mode boot. It is
     // NOT derived from the manifest: a plugin the boot entry disabled is still
     // listed as installed, which is exactly why it needs saying separately.
-    json(res, 200, { entries, failed: config.failed, restartRequired })
+    json(res, 200, { entries, failed: config.failed, restartRequired, detail, skillErrors })
   }
 
   /**
@@ -337,43 +521,82 @@ export function apply(ctx, config) {
     if (wanted === undefined || !isPluginName(wanted)) {
       return json(res, 400, { ok: false, message: 'not a usable package name' })
     }
+    // Resolved from the catalog, never from the request: the request carries a
+    // name, and the source, ref and digest come from a catalog the user chose
+    // to trust. A caller cannot point this at bytes of its own choosing.
+    const found = await findListing(wanted)
+    if (found === undefined) {
+      return json(res, 404, { ok: false, message: `${wanted} is not listed by any trusted source` })
+    }
+    const { listing, sourceId } = found
+
+    /** @type {string | undefined} */
+    let staging
+    try {
+      staging = await fetchToStaging(listing)
+      const { kind, version } = classifyPlugin(staging, listing)
+
+      // The catalog may advertise a kind, and the tab shows it before anything
+      // is downloaded — which is how the confirmation knows whether to warn
+      // about code or about a prompt. So a package that turns out to be the
+      // other kind was consented to under the wrong warning, whatever else it
+      // is. The bytes are still the authority; this only refuses a disagreement.
+      const hinted = listing.metadata?.kind
+      if ((hinted === 'claude' || hinted === 'dsh') && hinted !== kind) {
+        throw new Error(`the catalog listed ${listing.name} as a ${hinted} plugin, but it is a ${kind} plugin`)
+      }
+
+      if (kind === 'claude') {
+        const dest = join(home, ...installPath(sourceId, listing.name))
+        moveIntoPlace(staging, dest)
+        staging = undefined
+        writeClaudeRecord(recordClaude(readClaudeRecord(), {
+          name: listing.name, version, source: sourceId, kind: 'claude',
+        }))
+        // Live, with no restart: the provider walks the disk on every list(),
+        // and this is what tells the registry its cached catalog is stale.
+        claudePlugins?.refresh()
+        return json(res, 200, { ok: true, kind, restartRequired: false })
+      }
+
+      moveIntoPlace(staging, join(modulesDir, ...listing.name.split('/')))
+      staging = undefined
+      // Upstream's failure here is silent — the client-module scan caches an
+      // unresolvable name as "not a client package" and logs nothing — so a
+      // package that will not resolve is removed rather than left looking
+      // installed until a restart that then does nothing.
+      if (!resolvesFromProfile(listing.name)) {
+        rmSync(join(modulesDir, ...listing.name.split('/')), { recursive: true, force: true })
+        return json(res, 500, { ok: false, message: `${listing.name} was written but does not resolve; it was removed` })
+      }
+      const { manifest } = readInstalled()
+      writeProfileManifest(profileDir, addInstalled(manifest, listing.name, version))
+      return json(res, 200, { ok: true, kind, restartRequired: true })
+    } catch (error) {
+      return json(res, 502, { ok: false, message: error instanceof Error ? error.message : String(error) })
+    } finally {
+      if (staging !== undefined) rmSync(staging, { recursive: true, force: true })
+    }
+  }
+
+  /**
+   * Find one plugin across every trusted catalog.
+   * @param {string} wanted - the plugin name the request asked for.
+   * @returns {Promise<{ listing: Listing, sourceId: string } | undefined>} the row
+   * and the catalog it came from; the catalog is a path level, so it is what
+   * lets two marketplaces publish one name without colliding on disk.
+   */
+  async function findListing(wanted) {
     const sources = trustedSources()
-    // Resolved from the catalog, never from the request: the request names an
-    // id, and the tarball URL, version and digest come from a source the user
-    // trusted. A caller cannot point this at bytes of its own choosing.
-    /** @type {{ name: string, version: string, tarball: string, integrity: string } | undefined} */
-    let listing
     for (const source of sources) {
       if (!isAllowedSource(source, sources)) continue
       try {
-        const view = await fetchCatalog(source, { extraSources: sources })
-        const found = view.plugins.find((p) => p.name === wanted)
-        if (found !== undefined) {
-          listing = found
-          break
-        }
+        const view = parseCatalog(await readSource(source))
+        const listing = view.plugins.find((one) => one.name === wanted)
+        if (listing !== undefined) return { listing, sourceId: view.name }
       } catch { /* a dead source is reported by /market/catalog, not here */ }
     }
-    if (listing === undefined) return json(res, 404, { ok: false, message: `${wanted} is not listed by any trusted source` })
-    if (!isPluginVersion(listing.version)) {
-      return json(res, 422, { ok: false, message: `the catalog gave ${listing.name} an unusable version` })
-    }
-
-    try {
-      const bytes = await fetchTarball(listing.tarball, listing.integrity)
-      unpack(Buffer.from(bytes), { name: listing.name, version: listing.version })
-    } catch (error) {
-      return json(res, 502, { ok: false, message: error instanceof Error ? error.message : String(error) })
-    }
-
-    if (!resolvesFromProfile(listing.name)) {
-      rmSync(join(modulesDir, ...listing.name.split('/')), { recursive: true, force: true })
-      return json(res, 500, { ok: false, message: `${listing.name} was written but does not resolve; it was removed` })
-    }
-
-    const { manifest } = readInstalled()
-    writeProfileManifest(profileDir, addInstalled(manifest, listing.name, listing.version))
-    json(res, 200, { ok: true, restartRequired: true })
+    return undefined
   }
 
   /**
@@ -387,15 +610,28 @@ export function apply(ctx, config) {
     const wanted = typeof body.name === 'string' ? body.name : undefined
     if (wanted === undefined) return json(res, 400, { ok: false, message: 'no package named' })
 
-    // Manifest first, directory second. If the delete fails, the next boot
-    // simply does not compose it — whereas a directory removed while still
-    // listed makes `loadProfile` throw and the app stop booting.
+    // A Claude plugin is gone the moment the provider stops seeing it, so this
+    // half needs no restart. Directory first here, then the record: the record
+    // is only a label on a tree, and a row pointing at nothing is harmless
+    // where a tree nothing lists would be invisible but still published.
+    const claude = parseClaude(readClaudeRecord()).entries.find((one) => one.name === wanted)
+    if (claude !== undefined) {
+      rmSync(join(home, ...installPath(claude.source, claude.name)), { recursive: true, force: true })
+      writeClaudeRecord(forgetClaude(readClaudeRecord(), wanted))
+      claudePlugins?.refresh()
+      return json(res, 200, { ok: true, kind: 'claude', restartRequired: false })
+    }
+
+    // Manifest first, directory second — the opposite order, for the opposite
+    // reason. If the delete fails, the next boot simply does not compose it,
+    // whereas a directory removed while still listed makes `loadProfile` throw
+    // and the app stop booting.
     const { manifest } = readInstalled()
     writeProfileManifest(profileDir, removeInstalled(manifest, wanted))
     if (isPluginName(wanted)) {
       rmSync(join(modulesDir, ...wanted.split('/')), { recursive: true, force: true })
     }
-    json(res, 200, { ok: true, restartRequired: true })
+    json(res, 200, { ok: true, kind: 'dsh', restartRequired: true })
   }
 
   /**
@@ -425,7 +661,7 @@ export function apply(ctx, config) {
 
   const routes = [
     { path: '/market/catalog', methods: ['GET'], handler: (/** @type {Request} */ _req, /** @type {Response} */ res) => catalog(res) },
-    { path: '/market/installed', methods: ['GET'], handler: (/** @type {Request} */ _req, /** @type {Response} */ res) => { installed(res) } },
+    { path: '/market/installed', methods: ['GET'], handler: (/** @type {Request} */ _req, /** @type {Response} */ res) => installed(res) },
     { path: '/market/install', methods: ['POST'], handler: install },
     { path: '/market/remove', methods: ['POST'], handler: remove },
     { path: '/market/sources', methods: ['GET', 'POST'], handler: sources },
