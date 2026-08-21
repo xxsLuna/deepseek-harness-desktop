@@ -37,17 +37,32 @@ Sessions, credentials, and settings live in `~/.dsh`, shared with the `dsh` CLI 
 
 **Settings → Plugins → Marketplace** lists plugins from a curated catalog and installs the ones you pick. Nothing is installed for you: a fresh install has zero plugins, there is no auto-install and no auto-update.
 
-The app ships **only the catalog's URL** — no catalog content and no plugin code. The catalog lives in its own repository ([DeepSeek-Harness-Desktop-Marketplace](https://github.com/xxsLuna/DeepSeek-Harness-Desktop-Marketplace)) so listings can change without an app release, and a plugin's package is downloaded at the moment you click Install. The default source is listed in the tab like any other and can be removed; you can add your own HTTPS catalogs beside it.
+The app ships **only the catalog's URL** — no catalog content and no plugin code. The catalog lives in its own repository ([DeepSeek-Harness-Desktop-Marketplace](https://github.com/xxsLuna/DeepSeek-Harness-Desktop-Marketplace)) so listings can change without an app release, and a plugin is downloaded at the moment you click Install. A catalog is a `.claude-plugin/marketplace.json` file in a repository — the same format the Claude plugin ecosystem uses — so a marketplace needs no site build and no release step. The default source is listed in the tab like any other and can be removed; you can add your own HTTPS catalogs beside it.
+
+### Two kinds of plugin
+
+A catalog can list both, the tab badges which is which, and the installer decides from the downloaded files rather than from what the catalog claimed — a package that turns out to be the other kind is refused rather than installed under the wrong warning.
+
+| | **Skills** (Claude format) | **Extension** (dsh format) |
+| --- | --- | --- |
+| identified by | `.claude-plugin/plugin.json` | `dsh.bundle.patch` in `package.json` |
+| what it is | markdown the agent reads | code the harness loads |
+| what it can do | steer the agent through the tools it already has | anything the harness process can |
+| lands in | `~/.dsh/claude-plugins/` | `~/.dsh/profiles/desktop/` |
+| takes effect | immediately | after a restart |
+
+Claude-format plugins work unmodified because the harness's skill format *is* Claude's: `<name>/SKILL.md`, the same frontmatter keys, the same `references/` and `scripts/` beside it. Copying one into `~/.dsh/claude-plugins/<anything>/<plugin>/` by hand works exactly as well as installing it — the tab lists those too, and says it did not put them there.
+
+Two limits worth knowing. A skill declaring `allowed-tools` is **withheld**, because the harness has no way to enforce a tool restriction and publishing it anyway would silently widen what its author narrowed; the tab names each withheld skill and why. And a plugin's `agents/`, `hooks/` and `.mcp.json` are ignored — the harness has no counterpart for them yet — so a plugin built around those installs and does nothing.
 
 What the app checks before a plugin lands on disk:
 
-- the download matches the `sha512` digest the catalog published
-- the package declares `dsh.bundle.patch`, so it is really a harness plugin
-- it has no runtime `dependencies` — there is no package manager to install them with
-- its name and version match what the catalog promised
-- once written, it actually resolves — otherwise it is removed again rather than left looking installed
+- the download matches the digest the catalog published (`sha256` for an archive, the commit `sha` for a git source)
+- it is one of the two kinds above, and the one the catalog said it was
+- an extension has no runtime `dependencies` — there is no package manager to install them with
+- once written, an extension actually resolves — otherwise it is removed again rather than left looking installed
 
-Installed plugins live in `~/.dsh/profiles/desktop`, which is outside the app, so an app update never removes them. A plugin is composed when the session server starts, so installing one asks you to restart; if an installed plugin ever stops the app from starting, the next launch disables all of them, opens anyway, and the tab names the ones it dropped.
+Installed plugins live under `~/.dsh`, outside the app, so an app update never removes them. Extensions are composed when the session server starts, so installing one asks you to restart; if one ever stops the app from starting, the next launch disables all of them, opens anyway, and the tab names the ones it dropped.
 
 A plugin runs inside the harness process with the same access to your files and shell that the agent has. The catalog is curated for that reason, and adding a source of your own is you taking that judgement on yourself.
 
@@ -115,7 +130,8 @@ The app is a thin Electron shell around the **unmodified** published harness:
 | `@dsh-desktop/picker` | a `directoryPicker` provider delegating the pick to the launcher's window-owned dialog |
 | `@dsh-desktop/chrome` | the merged title band, injected into the served document; the launcher configures its height, leading inset and menu button through the patch layer |
 | `@dsh-desktop/settings` | the **Desktop Settings** section, registered into upstream's `settings.section` slot. Its values are launcher facts (close behaviour, notifications, title bar, auto-update), so its browser half talks to the launcher rather than the sidecar |
-| `@dsh-desktop/market` | the plugin marketplace: the installer (catalog fetch, sha512 verification, its own tar reader — the app ships no package manager), the trusted-source settings namespace, and the **Marketplace** tab registered into upstream's `settings.plugins.tab` slot |
+| `@dsh-desktop/market` | the plugin marketplace: the installer (catalog fetch, digest verification, `git clone` for git sources, its own tar reader — the app ships no package manager), the trusted-source settings namespace, and the **Marketplace** tab registered into upstream's `settings.plugins.tab` slot |
+| `@dsh-desktop/claude-plugins` | publishes Claude-format plugins on disk as harness skills, through `ctx.skills.registerProvider`. Separate from the marketplace on purpose: it publishes whatever is under the install root, and the marketplace is only one way for something to get there — the two share a directory layout, not an import |
 | `@dsh-desktop/bundle` | the surface glue — dist fallback owner, the two SSE event routes, the desktop-surface prompt section and `DSH_SURFACE` — plus the sidecar boot entry and the patch layer that composes all of the above |
 
   Everything the harness process does differently for the desktop is one of those rows. What cannot be a row is the Electron launcher in `src/`: it is the host process that *spawns* the harness, so it runs before any plugin exists and owns things no plugin can reach — the window and its title bar, the tray, native menus, notifications, downloads, the updater, and the `dsh://` protocol handler.

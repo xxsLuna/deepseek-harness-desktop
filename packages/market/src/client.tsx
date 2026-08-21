@@ -14,8 +14,20 @@
  * Install and remove go to the harness (`/market/*`), because the harness
  * process is the only writer of $DSH_HOME state. Restart goes to the LAUNCHER
  * (`/__desktop-host/market/restart`), because only the process that spawned the
- * sidecar can respawn it — and a restart is the only way an install takes
- * effect, since a newly installed plugin's patch layer is composed at boot.
+ * sidecar can respawn it.
+ *
+ * A catalog lists TWO kinds of plugin and the difference is visible throughout,
+ * because it is the difference the user is consenting to:
+ *
+ * - a **dsh** plugin is code the loader imports into the sidecar, so it can do
+ *   anything the agent can, and it only exists once the sidecar restarts;
+ * - a **Claude** plugin is markdown the harness reads as skills, so it enters
+ *   the model's prompt rather than the process, and it applies immediately.
+ *
+ * So the confirmation warns differently per kind, the rows say when each takes
+ * effect, and an installed Claude plugin shows what it actually published —
+ * including the skills this app WITHHELD and why, since a plugin can be on
+ * disk with everything it ships refused, and a row alone would hide that.
  *
  * Styling matches @dsh-desktop/settings: self-contained and colour-free, drawn
  * in `currentColor` at varying opacity so it inherits whichever theme the page
@@ -23,17 +35,29 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 
+/** Which sort of plugin a row is. `unknown` when the catalog did not say. */
+type Kind = 'claude' | 'dsh' | 'unknown'
+
 /** One row of the merged catalog, as `/market/catalog` reports it. */
 interface CatalogEntry {
-  id: string
-  /** The npm package name — the resolution key, not a label. */
+  /** The package name — the install key, not a label. */
   name: string
-  /** What a person reads. `parseCatalog` falls back to `name`. */
-  title: string
+  /** What a person reads. The catalog parser falls back to `name`. */
+  displayName: string
   version: string
   publisher: string
   description: string
+  /**
+   * The catalog's own claim about the kind, which is why it is only ever used
+   * to word the warning. The installer re-decides from the downloaded bytes and
+   * refuses a package that turns out to be the other kind, so a lying catalog
+   * gets a refusal rather than the wrong consent.
+   */
+  kind: Kind
+  /** The catalog URL the row came from. */
   source: string
+  /** The catalog's own name for itself. */
+  marketplace: string
 }
 
 /** What `/market/catalog` answers. */
@@ -47,8 +71,22 @@ interface CatalogView {
 interface InstalledEntry {
   name: string
   version: string
+  kind: Kind
   /** Whether the row is live in the running tree, or waiting for a restart. */
   active: boolean
+  /**
+   * Whether this app put it there. A Claude plugin copied under the install
+   * root by hand publishes its skills exactly like an installed one, so it is
+   * listed — but deleting a directory the marketplace did not create is not the
+   * marketplace's call, so it is shown without a Remove button.
+   */
+  managed: boolean
+}
+
+/** What one installed Claude plugin published, and what it did not. */
+interface PluginDetail {
+  skills: { name: string, kind: string, renamedFrom?: string }[]
+  refused: { name?: string, code: string, message: string }[]
 }
 
 /** What `/market/installed` answers. */
@@ -58,6 +96,10 @@ interface InstalledView {
   failed: string[]
   /** True when the on-disk set no longer matches the running tree. */
   restartRequired: boolean
+  /** Per Claude plugin, keyed by name: what it publishes and what was withheld. */
+  detail: Record<string, PluginDetail | undefined>
+  /** Files present under the Claude root that could not be read at all. */
+  skillErrors: { path: string, message: string }[]
 }
 
 const MARKET = '/market/'
@@ -144,8 +186,51 @@ const styles = {
     border: '1px solid color-mix(in srgb, currentColor 26%, transparent)',
   },
   warning: { fontSize: '12px', lineHeight: 1.5, opacity: 0.85 },
+  badge: {
+    fontSize: '10px',
+    fontWeight: 600,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    padding: '1px 6px',
+    borderRadius: '4px',
+    border: '1px solid color-mix(in srgb, currentColor 26%, transparent)',
+    opacity: 0.7,
+  },
+  labelRow: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+  detail: { display: 'flex', flexDirection: 'column', gap: '2px', paddingTop: '4px' },
+  withheld: { fontSize: '11px', lineHeight: 1.5, opacity: 0.75 },
   actions: { display: 'flex', gap: '8px', justifyContent: 'flex-end' },
 } satisfies Record<string, React.CSSProperties>
+
+/** What each kind is called in the badge. */
+const KIND_LABEL: Record<Kind, string> = { claude: 'Skills', dsh: 'Extension', unknown: 'Plugin' }
+
+/**
+ * When each kind starts working, which is the practical difference between
+ * them: a dsh plugin is composed into the sidecar's plugin tree at boot, so it
+ * does not exist until the next one; a Claude plugin is markdown the skill
+ * provider re-reads on every lookup, so it exists as soon as it is on disk.
+ */
+const KIND_TIMING: Record<Kind, string> = {
+  claude: 'available immediately',
+  dsh: 'available after a restart',
+  unknown: 'availability depends on what it turns out to be',
+}
+
+/**
+ * What the user is actually agreeing to, per kind. Two genuinely different
+ * risks, so two genuinely different sentences — a single generic warning would
+ * either overstate the Claude case or understate the dsh one, and a warning
+ * that does not fit what is in front of you is one people learn to click past.
+ */
+const KIND_WARNING: Record<Kind, string> = {
+  claude: 'This adds skills the agent can read and follow. Their text enters the model’s prompt, '
+    + 'so it can steer what the agent does with the tools it already has — it does not add tools of its own.',
+  dsh: 'This is code. It is loaded into the harness process and runs with the same access to your '
+    + 'files and shell that the agent has. Install it only if you trust its publisher.',
+  unknown: 'The catalog did not say what this is. It will be loaded as code, or as skills the agent '
+    + 'reads, depending on what it contains — assume the stronger of the two and trust the publisher first.',
+}
 
 /**
  * The install confirmation. Rendered in the page rather than as a native
@@ -164,19 +249,67 @@ function Confirm({ entry, onCancel, onConfirm }: {
 }): ReactNode {
   return (
     <div style={styles.confirm}>
-      <div style={styles.label}>Install {entry.title}?</div>
+      <div style={styles.labelRow}>
+        <span style={styles.label}>Install {entry.displayName}?</span>
+        <span style={styles.badge}>{KIND_LABEL[entry.kind]}</span>
+      </div>
       <div style={styles.hint}>
-        Version {entry.version} · published by {entry.publisher}
+        {entry.version === '' ? 'Unversioned' : `Version ${entry.version}`} · published by {entry.publisher}
+        {' '}· {KIND_TIMING[entry.kind]}
       </div>
-      <div style={styles.meta}>{entry.name} · from {entry.source}</div>
-      <div style={styles.warning}>
-        A plugin runs inside the harness process, with the same access to your files and
-        shell that the agent has. Install it only if you trust its publisher.
-      </div>
+      <div style={styles.meta}>{entry.name} · listed by {entry.marketplace} ({entry.source})</div>
+      <div style={styles.warning}>{KIND_WARNING[entry.kind]}</div>
       <div style={styles.actions}>
         <button type="button" style={styles.button} onClick={onCancel}>Cancel</button>
         <button type="button" style={styles.button} onClick={onConfirm}>Install</button>
       </div>
+    </div>
+  )
+}
+
+/**
+ * What one installed Claude plugin contributed.
+ *
+ * Both halves matter and the second is the reason this exists. A plugin can
+ * install cleanly and publish nothing, because this app withholds any skill it
+ * cannot honour as written — one declaring `allowed-tools` is the common case,
+ * since the harness has no way to enforce a tool restriction and quietly
+ * widening what an author narrowed is worse than not publishing it. The person
+ * who installed it has to be able to see that, and to see the reason, or the
+ * plugin simply appears not to work.
+ * @param props - the detail for one plugin, absent when the sibling package
+ * that publishes them is not composed.
+ * @returns the published and withheld lists, or nothing to say.
+ */
+function Published({ detail }: { detail?: PluginDetail }): ReactNode {
+  if (detail === undefined) return null
+  if (detail.skills.length === 0 && detail.refused.length === 0) {
+    return <span style={styles.withheld}>Ships no skills this app can read.</span>
+  }
+  return (
+    <div style={styles.detail}>
+      {detail.skills.length === 0
+        ? null
+        : (
+          <span style={styles.withheld}>
+            Skills:{' '}
+            {detail.skills.map((skill, index) => (
+              <span key={skill.name}>
+                {index === 0 ? '' : ', '}
+                {skill.name}
+                {/* A rename is not cosmetic: it is the name the user has to
+                    type, and it happened because another plugin already had
+                    the plain one. */}
+                {skill.renamedFrom === undefined ? '' : ` (was ${skill.renamedFrom})`}
+              </span>
+            ))}
+          </span>
+          )}
+      {detail.refused.map((refusal) => (
+        <span key={`${refusal.code}:${refusal.name ?? ''}:${refusal.message}`} style={styles.withheld}>
+          Withheld{refusal.name === undefined ? '' : ` ${refusal.name}`}: {refusal.message}
+        </span>
+      ))}
     </div>
   )
 }
@@ -199,7 +332,7 @@ function MarketplaceTab(): ReactNode {
       market<InstalledView>('installed'),
     ])
     setCatalog(next ?? { entries: [], errors: [{ source: 'harness', message: 'the marketplace route did not answer' }] })
-    setInstalled(live ?? { entries: [], failed: [], restartRequired: false })
+    setInstalled(live ?? { entries: [], failed: [], restartRequired: false, detail: {}, skillErrors: [] })
   }, [])
 
   useEffect(() => { void refresh() }, [refresh])
@@ -229,11 +362,16 @@ function MarketplaceTab(): ReactNode {
 
   return (
     <div style={styles.page}>
+      {/* Only ever raised by the dsh half — the harness composes those at boot.
+          Worded so it does not imply the Claude plugins are waiting too, since
+          they are already live and telling someone to restart for them would
+          teach them to restart for nothing. */}
       {installed.restartRequired
         ? (
           <div style={styles.notice}>
             <span>
-              Installed. A plugin is composed when the session server starts, so restart to apply it.
+              An extension is waiting: code plugins are composed when the session server starts,
+              so restart to apply it. Skills are already active.
             </span>
             <button
               type="button"
@@ -258,6 +396,12 @@ function MarketplaceTab(): ReactNode {
           )}
 
       {failure === undefined ? null : <div style={styles.notice}><span>{failure}</span></div>}
+
+      {installed.skillErrors.map((error) => (
+        <div key={error.path} style={styles.notice}>
+          <span>Could not read {error.path}: {error.message}</span>
+        </div>
+      ))}
 
       {catalog.errors.map((error) => (
         <div key={error.source} style={styles.notice}>
@@ -286,26 +430,39 @@ function MarketplaceTab(): ReactNode {
           : catalog.entries.map((entry) => {
             const live = installedByName.get(entry.name)
             return (
-              <div key={`${entry.source}:${entry.id}`} style={styles.row}>
+              <div key={`${entry.source}:${entry.name}`} style={styles.row}>
                 <div style={styles.rowText}>
-                  <span style={styles.label}>{entry.title}</span>
+                  <span style={styles.labelRow}>
+                    <span style={styles.label}>{entry.displayName}</span>
+                    {/* The badge reads the CATALOG's claim, which is all that is
+                        known before a download; once installed, the row below
+                        shows the kind the installer actually found. */}
+                    <span style={styles.badge}>{KIND_LABEL[live?.kind ?? entry.kind]}</span>
+                  </span>
                   <span style={styles.hint}>{entry.description}</span>
                   <span style={styles.meta}>
-                    {entry.version} · {entry.publisher}
+                    {entry.version === '' ? entry.name : entry.version} · {entry.publisher}
                     {live === undefined ? '' : live.active ? ' · installed' : ' · installed, pending restart'}
                   </span>
+                  {live === undefined || live.kind !== 'claude'
+                    ? null
+                    : <Published detail={installed.detail[entry.name]} />}
                 </div>
-                <button
-                  type="button"
-                  style={styles.button}
-                  disabled={busy === entry.name}
-                  onClick={() => {
-                    if (live === undefined) setPending(entry)
-                    else void act('remove', entry)
-                  }}
-                >
-                  {busy === entry.name ? '…' : live === undefined ? 'Install' : 'Remove'}
-                </button>
+                {live !== undefined && !live.managed
+                  ? <span style={styles.meta}>placed by hand</span>
+                  : (
+                    <button
+                      type="button"
+                      style={styles.button}
+                      disabled={busy === entry.name}
+                      onClick={() => {
+                        if (live === undefined) setPending(entry)
+                        else void act('remove', entry)
+                      }}
+                    >
+                      {busy === entry.name ? '…' : live === undefined ? 'Install' : 'Remove'}
+                    </button>
+                    )}
               </div>
             )
           })}
@@ -320,21 +477,30 @@ function MarketplaceTab(): ReactNode {
           <section>
             <div style={styles.groupTitle}>Installed, not listed</div>
             {installed.entries.filter((e) => !catalog.entries.some((c) => c.name === e.name)).map((entry) => (
-              <div key={entry.name} style={styles.row}>
+              <div key={`${entry.kind}:${entry.name}`} style={styles.row}>
                 <div style={styles.rowText}>
-                  <span style={styles.label}>{entry.name}</span>
-                  <span style={styles.meta}>
-                    {entry.version}{entry.active ? '' : ' · pending restart'}
+                  <span style={styles.labelRow}>
+                    <span style={styles.label}>{entry.name}</span>
+                    <span style={styles.badge}>{KIND_LABEL[entry.kind]}</span>
                   </span>
+                  <span style={styles.meta}>
+                    {entry.version === '' ? 'unversioned' : entry.version}
+                    {entry.active ? '' : ' · pending restart'}
+                  </span>
+                  {entry.kind !== 'claude' ? null : <Published detail={installed.detail[entry.name]} />}
                 </div>
-                <button
-                  type="button"
-                  style={styles.button}
-                  disabled={busy === entry.name}
-                  onClick={() => { void act('remove', entry) }}
-                >
-                  {busy === entry.name ? '…' : 'Remove'}
-                </button>
+                {entry.managed
+                  ? (
+                    <button
+                      type="button"
+                      style={styles.button}
+                      disabled={busy === entry.name}
+                      onClick={() => { void act('remove', entry) }}
+                    >
+                      {busy === entry.name ? '…' : 'Remove'}
+                    </button>
+                    )
+                  : <span style={styles.meta}>placed by hand</span>}
               </div>
             ))}
           </section>
@@ -381,7 +547,8 @@ function Sources({ onChanged }: { onChanged: () => Promise<void> }): ReactNode {
     <section>
       <div style={styles.groupTitle}>Sources</div>
       <div style={{ ...styles.hint, paddingBottom: '4px' }}>
-        Catalogs the app will read. HTTPS only. The default is listed like any other and can be removed.
+        Marketplaces the app will read, each a URL to a <code>.claude-plugin/marketplace.json</code>.
+        HTTPS only. The default is listed like any other and can be removed.
       </div>
       {sources.map((source) => (
         <div key={source} style={styles.row}>
@@ -399,7 +566,7 @@ function Sources({ onChanged }: { onChanged: () => Promise<void> }): ReactNode {
         <input
           style={styles.input}
           value={draft}
-          placeholder="https://example.com/index.json"
+          placeholder="https://raw.githubusercontent.com/…/.claude-plugin/marketplace.json"
           onChange={(event) => { setDraft(event.target.value) }}
         />
         <button
