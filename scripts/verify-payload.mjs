@@ -64,7 +64,14 @@ if (existsSync(join(resources, 'node'))) {
 const harness = join(resources, 'harness')
 assertExists(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), 'harness')
 assertExists(join(harness, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'), 'desktop bundle')
-assertExists(join(harness, 'node_modules', '@dsh-desktop', 'connection', 'lib', 'client.js'), 'desktop client bundle')
+// Every package declaring `dsh.client` must ship the bundle its exports promise.
+// Upstream's client-module registry resolves `exports['./client']` at boot and
+// throws MissingClientBundleError when the file is absent — so a packaged build
+// that skipped build-client.mjs does not degrade, it refuses to start. Asserting
+// it here names the missing bundle instead.
+for (const pkg of ['connection', 'settings', 'market']) {
+  assertExists(join(harness, 'node_modules', '@dsh-desktop', pkg, 'lib', 'client.js'), `${pkg} client bundle`)
+}
 // The band ships as page assets read at request time, so a missing one is only
 // found when a window opens; assert them here instead.
 for (const asset of ['index.js', 'block.js', 'desktop-chrome.css', 'desktop-chrome.js']) {

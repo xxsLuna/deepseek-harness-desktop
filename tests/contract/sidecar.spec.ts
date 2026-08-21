@@ -403,6 +403,63 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(existsSync(join(fallback, '@deepseek-ai', 'dsh'))).toBe(true)
   })
 
+  it('answers the marketplace routes, with the default catalog registered', async () => {
+    // A fresh profile has nothing installed — that is the shipped state, and it
+    // is what makes installation opt-in rather than something the app did for
+    // you. The restart flag must be false too: nothing has been asked for yet.
+    const live = await socketRequest(socketPath, { path: '/market/installed' })
+    expect(live.status).toBe(200)
+    const installed = JSON.parse(live.body) as { entries: unknown[], restartRequired: boolean }
+    expect(installed.entries).toEqual([])
+    expect(installed.restartRequired).toBe(false)
+
+    // The default catalog reaches the tab through the settings `base` layer, so
+    // it is visible and removable rather than a constant nobody can reach. If
+    // this list were empty, the marketplace would be registered nowhere.
+    const sources = await socketRequest(socketPath, { path: '/market/sources' })
+    expect(sources.status).toBe(200)
+    const listed = (JSON.parse(sources.body) as { sources: string[] }).sources
+    expect(listed.length).toBeGreaterThan(0)
+    for (const source of listed) expect(source.startsWith('https://')).toBe(true)
+  })
+
+  it('refuses a non-HTTPS marketplace source', async () => {
+    // The store path validates against the SAME policy the fetch path applies,
+    // so a source that could never be read cannot be saved and look accepted.
+    const res = await socketRequest(socketPath, {
+      path: '/market/sources',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sources: ['http://example.com/index.json'] }),
+    })
+    expect(res.status).toBe(422)
+    expect(res.body).toContain('HTTPS only')
+  })
+
+  it('refuses to install a plugin no trusted source lists', async () => {
+    // The request carries a name; everything else — the tarball URL, the version
+    // and the digest — is read from the catalog. A caller cannot point the
+    // installer at bytes of its own choosing, which is the whole reason the
+    // request shape is this narrow.
+    const res = await socketRequest(socketPath, {
+      path: '/market/install',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: '@evil/not-listed' }),
+    })
+    expect(res.status).toBe(404)
+    expect(JSON.parse(res.body)).toMatchObject({ ok: false })
+  })
+
+  it('serves the marketplace tab bundle', async () => {
+    // The tab is a client plugin like any other: upstream's client-module scan
+    // finds it by its `dsh.client` declaration and serves it. A silent
+    // resolution failure would show up here as a 404, not as a log line.
+    const res = await socketRequest(socketPath, { path: '/plugins/@dsh-desktop/market/client.js' })
+    expect(res.status).toBe(200)
+    expect(res.body).toContain('settings.plugins.tab')
+  })
+
   it('leaves the app-owned root config template untouched', () => {
     // The template is version-controlled as `[]`, but in a dev checkout it is an
     // ordinary writable file — so it is exposed to the same write-back. If this

@@ -5,6 +5,7 @@ out/
 spike/
 packages/connection/lib/client.js
 packages/settings/lib/client.js
+packages/market/lib/client.js
 *.log
 .DS_Store
 dev-overrides.css
@@ -13,3 +14,6 @@ dev-eval.out.json
 dev-capture.request
 dev-capture.png
 dev-click.request
+
+# Agent worktrees: full repo copies, created under .claude by isolated subagents.
+.claude/worktrees/
