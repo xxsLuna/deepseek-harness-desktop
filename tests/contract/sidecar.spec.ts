@@ -10,7 +10,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -337,6 +337,80 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     const cwd = (described.value as { cwd: string }).cwd
     expect(cwd).not.toBe('/')
     expect(cwd.length).toBeGreaterThan(1)
+  })
+
+  // ── the plugin profile: the second module-resolution anchor ──
+  //
+  // Bare plugin names resolve from `ctx.baseUrl`, which is the directory holding
+  // the root config. Booting from a copy inside a profile directory under
+  // $DSH_HOME is what puts a writable `node_modules` on that resolution walk, so
+  // a plugin installed at runtime can be reached at all. These assert the
+  // mechanism actually engaged, because boot.js falls back to the app-owned
+  // config on any failure — and a run that silently took the fallback passes
+  // every other test in this file.
+
+  it('boots from a root config inside the profile, not the app payload', () => {
+    // Existence of this file is the proof: boot.js writes it only on the path
+    // that also returns it as the config to boot. If preparation had failed, the
+    // fallback would have left no profile root here.
+    const profileRoot = join(home, 'profiles', 'desktop', 'cordis.yml')
+    expect(existsSync(profileRoot)).toBe(true)
+
+    // contract: still an empty entry list after a full boot. The vendored
+    // Loader's `tree.write()` serializes the fully patch-COMPOSED entry list
+    // into this file, and it fires from paths this app never calls (any fiber
+    // config update; any fiber that dies unexpectedly). Baked, the next boot
+    // re-applies every bundle patch on top and dies on `duplicate loader entry
+    // id`. This is the assertion that catches that in CI instead of at a user's
+    // next launch.
+    const meaningful = readFileSync(profileRoot, 'utf8')
+      .split(/\r?\n/).map((l) => l.replace(/#.*$/, '').trim()).filter((l) => l !== '').join('')
+    expect(meaningful).toBe('[]')
+  })
+
+  it('seeds the profile with no bundles of its own', () => {
+    // The three app-owned layers (dsh-base, dsh-web-app, @dsh-desktop/bundle)
+    // stay app-owned and are loaded by boot.js directly. The profile's list
+    // holds ONLY what a user installed, so an app update and a user's plugin
+    // set can never fight over one list.
+    const manifest = JSON.parse(
+      readFileSync(join(home, 'profiles', 'desktop', 'package.json'), 'utf8'),
+    ) as { dsh?: { profile?: { bundles?: unknown } } }
+    expect(manifest.dsh?.profile?.bundles).toEqual([])
+  })
+
+  it('links every local package into the flat module fallback', () => {
+    // COUPLING, and a silent one. The fallback is healed from two anchors: the
+    // dsh installation (which links the upstream closure) and
+    // @dsh-desktop/bundle (which links ours, via its peerDependencies). Our
+    // packages are copied in BESIDE the dsh tree rather than depended on by it,
+    // so the dsh closure alone links none of them.
+    //
+    // Read from packages/ rather than hard-coded: a new package whose name was
+    // never added to @dsh-desktop/bundle's peerDependencies fails HERE, instead
+    // of resolving to nothing at runtime — where the client-module scan caches
+    // an unresolvable name as "not a client package" and logs nothing at all.
+    const local = readdirSync(join(root, 'packages'), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(root, 'packages', e.name, 'package.json')))
+      .map((e) => (JSON.parse(
+        readFileSync(join(root, 'packages', e.name, 'package.json'), 'utf8'),
+      ) as { name: string }).name)
+    expect(local.length).toBeGreaterThan(0)
+
+    const fallback = join(home, 'profiles', 'node_modules')
+    for (const name of local) expect(existsSync(join(fallback, name))).toBe(true)
+    // And the upstream closure landed too, or nothing composed would resolve.
+    expect(existsSync(join(fallback, '@deepseek-ai', 'dsh'))).toBe(true)
+  })
+
+  it('leaves the app-owned root config template untouched', () => {
+    // The template is version-controlled as `[]`, but in a dev checkout it is an
+    // ordinary writable file — so it is exposed to the same write-back. If this
+    // ever fails, a boot wrote through to the payload instead of the profile.
+    const template = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'config', 'cordis.yml')
+    const meaningful = readFileSync(template, 'utf8')
+      .split(/\r?\n/).map((l) => l.replace(/#.*$/, '').trim()).filter((l) => l !== '').join('')
+    expect(meaningful).toBe('[]')
   })
 
   it.skipIf(process.platform === 'win32')('holds no TCP listeners', async () => {
