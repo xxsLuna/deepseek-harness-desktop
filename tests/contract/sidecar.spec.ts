@@ -10,7 +10,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,6 +23,22 @@ const token = 'contract-test-token'
 // Resolved through the electron package rather than guessed at, so it follows
 // the version pinned in package.json.
 const electronBinary = createRequire(import.meta.url)('electron') as string
+
+/**
+ * What `/market/installed` answers, as the Marketplace tab reads it. Declared
+ * here rather than imported: the tab's copy is browser TSX in another project,
+ * and this is the wire between the two, so both being written out is the point.
+ */
+interface InstalledView {
+  entries: { name: string, version: string, kind: string, active: boolean, managed: boolean }[]
+  failed: string[]
+  restartRequired: boolean
+  detail: Record<string, {
+    skills: { name: string, kind: string, renamedFrom?: string }[]
+    refused: { name?: string, code: string, message: string }[]
+  } | undefined>
+  skillErrors: { path: string, message: string }[]
+}
 
 interface SocketResponse {
   status: number
@@ -87,12 +103,44 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   let socketDir: string
   let socketPath: string
 
+  /**
+   * Place one Claude-format SKILL.md under a hand-made plugin tree.
+   * @param slug - the skill's directory name, which is also its name.
+   * @param extra - further frontmatter lines, after name and description.
+   */
+  const placeHandSkill = (slug: string, extra: string[] = []): void => {
+    const dir = join(home, 'claude-plugins', 'handplaced', 'note-taker', 'skills', slug)
+    mkdirSync(dir, { recursive: true })
+    const lines = [
+      '---',
+      `name: ${slug}`,
+      `description: Placed by the contract suite (${slug}).`,
+      ...extra,
+      '---',
+      '',
+      'Body.',
+      '',
+    ]
+    writeFileSync(join(dir, 'SKILL.md'), lines.join('\n'), 'utf8')
+  }
+
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), 'dsh-contract-home-'))
     socketDir = mkdtempSync(join(tmpdir(), 'dsh-contract-sock-'))
     socketPath = process.platform === 'win32'
       ? `\\\\.\\pipe\\dsh-contract-${Date.now()}-${process.pid}`
       : join(socketDir, 's')
+
+    // Two Claude plugins placed by HAND, before the sidecar starts — no
+    // marketplace involved. This is what justifies @dsh-desktop/claude-plugins
+    // being its own package: it publishes what is on disk, and the installer is
+    // only one way for something to get there.
+    placeHandSkill('contract-note')
+    // The second declares a tool restriction the harness has no counterpart
+    // for. It must be withheld rather than published with the agent's whole
+    // toolset — silently widening what its author narrowed is the failure this
+    // whole policy exists to prevent.
+    placeHandSkill('contract-restricted', ['allowed-tools: Bash(ls:*)'])
     // Electron's own binary, as the launcher spawns it — not this runner's Node.
     // The harness boots on Electron's Node in the shipped app, so booting it on
     // anything else here would leave the one runtime that matters untested.
@@ -403,14 +451,61 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(existsSync(join(fallback, '@deepseek-ai', 'dsh'))).toBe(true)
   })
 
+  it('reports what a Claude plugin published and what it withheld', async () => {
+    // The wire shape the Marketplace tab reads. @dsh-desktop/market types this
+    // service structurally rather than importing the sibling's typedef — the
+    // two packages share a directory layout, not an import — so nothing but
+    // this test holds the shape. If the inventory drifts, the tab silently
+    // renders no skills and no refusals, which looks exactly like a plugin
+    // that ships neither.
+    const live = await socketRequest(socketPath, { path: '/market/installed' })
+    const view = JSON.parse(live.body) as InstalledView
+
+    // Placed by hand, so it must be listed and must NOT offer removal: this
+    // app did not create the directory, so it does not delete it.
+    const row = view.entries.find((entry) => entry.name === 'note-taker')
+    expect(row, `hand-placed plugins are missing from ${JSON.stringify(view.entries)}`).toBeDefined()
+    expect(row?.kind).toBe('claude')
+    expect(row?.managed).toBe(false)
+    expect(row?.active).toBe(true)
+
+    const detail = view.detail['note-taker']
+    expect(detail?.skills.map((skill) => skill.name)).toContain('contract-note')
+    // The refusal is the half the tab exists to show: the skill is on disk and
+    // deliberately not published, and the user has to be able to see why.
+    const refused = detail?.refused.find((one) => one.name === 'contract-restricted')
+    expect(refused?.code).toBe('allowed-tools')
+    expect(refused?.message.length ?? 0).toBeGreaterThan(0)
+  })
+
+  it('publishes a hand-placed Claude plugin as a harness skill', async () => {
+    // The format is not translated: the harness reads Claude's SKILL.md as its
+    // own, and this is the end-to-end proof. skill.list is session-scoped, so a
+    // workspace and a session come first — the same calls the UI makes.
+    const created = await rpc(socketPath, 'workspace.create', { path: home })
+    expect(created.ok, JSON.stringify(created)).toBe(true)
+    const workspaces = await rpc(socketPath, 'workspace.list')
+    const workspaceId = (workspaces.value as { items: { workspaceId: string }[] }).items[0]?.workspaceId
+    const session = await rpc(socketPath, 'session.create', { workspaceId })
+    expect(session.ok, JSON.stringify(session)).toBe(true)
+    const sessionId = (session.value as { sessionId?: string }).sessionId
+
+    const listed = await rpc(socketPath, 'skill.list', { sessionId })
+    expect(listed.ok, JSON.stringify(listed)).toBe(true)
+    const names = (listed.value as { skills: { name: string }[] }).skills.map((one) => one.name)
+
+    expect(names, 'the hand-placed skill never reached the catalog').toContain('contract-note')
+    expect(names, 'a skill declaring allowed-tools was published anyway').not.toContain('contract-restricted')
+  })
+
   it('answers the marketplace routes, with the default catalog registered', async () => {
-    // A fresh profile has nothing installed — that is the shipped state, and it
+    // A fresh profile has installed nothing — that is the shipped state, and it
     // is what makes installation opt-in rather than something the app did for
     // you. The restart flag must be false too: nothing has been asked for yet.
     const live = await socketRequest(socketPath, { path: '/market/installed' })
     expect(live.status).toBe(200)
-    const installed = JSON.parse(live.body) as { entries: unknown[], restartRequired: boolean }
-    expect(installed.entries).toEqual([])
+    const installed = JSON.parse(live.body) as InstalledView
+    expect(installed.entries.filter((entry) => entry.managed)).toEqual([])
     expect(installed.restartRequired).toBe(false)
 
     // The default catalog reaches the tab through the settings `base` layer, so
