@@ -4,7 +4,7 @@
  * harness process is the only writer of $DSH_HOME state, and the
  * single-instance lock in main guarantees at most one per machine user.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type SpawnOptions } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { join } from 'node:path'
 import type { SidecarAddress } from './socket-path.js'
@@ -14,6 +14,27 @@ export interface SidecarPaths {
   /** The staged harness root (holding node_modules). */
   readonly harnessRoot: string
 }
+
+/**
+ * The slice of a child process this class touches.
+ *
+ * Declared structurally so the supervision rules — which exit counts as a
+ * crash, what a restart does to the process before it — can be unit-tested
+ * against a stub instead of a real harness boot. Each of those rules fails
+ * silently when wrong, which is the class of bug this repo pins in tests.
+ */
+export interface SidecarProcess {
+  readonly stdout: NodeJS.ReadableStream | null
+  readonly stderr: NodeJS.ReadableStream | null
+  /** null while the process runs; the status once it is gone. */
+  readonly exitCode: number | null
+  on(event: 'exit', listener: (code: number | null) => void): void
+  once(event: 'exit', listener: () => void): void
+  kill(signal: NodeJS.Signals): void
+}
+
+/** How the harness process is launched. Satisfied by node's own `spawn`. */
+export type SidecarSpawn = (command: string, args: string[], options: SpawnOptions) => SidecarProcess
 
 export interface SidecarOptions extends SidecarPaths {
   readonly address: SidecarAddress
@@ -31,6 +52,14 @@ export interface SidecarOptions extends SidecarPaths {
   readonly onLog: (line: string) => void
   /** Called when the process exits without stop() being requested. */
   readonly onUnexpectedExit: (code: number | null) => void
+  /**
+   * The two steps that touch the outside world, injected only by the unit
+   * tests — production passes neither. The alternative is leaving the
+   * start/stop/restart rules untested, and the `stopping` flag below has
+   * already shown what that costs.
+   */
+  readonly spawn?: SidecarSpawn
+  readonly probe?: (address: SidecarAddress) => Promise<boolean>
 }
 
 /** One GET / probe over the socket; resolves true on any HTTP answer. */
@@ -56,15 +85,36 @@ function probe(address: SidecarAddress): Promise<boolean> {
 }
 
 export class Sidecar {
-  private child: ChildProcess | undefined
+  private child: SidecarProcess | undefined
+  /**
+   * Set by stop() and cleared by start(), for exactly one purpose: the exit
+   * handler reads it to tell an intentional shutdown from a crash, so that
+   * onUnexpectedExit — and therefore the crash recovery in main — fires for a
+   * crash alone.
+   *
+   * Clearing it in start() is load-bearing. It used to be set and never reset,
+   * which left crash recovery dead for the rest of the app's life after the
+   * first stop/start cycle. That was invisible while shutdown was the only
+   * caller of stop(), and became a real hole the moment restart() became
+   * another one. Pinned in tests/unit/sidecar.spec.ts.
+   */
   private stopping = false
+  /** The restart in flight, if any. See restart() for why it is shared. */
+  private restarting: Promise<void> | undefined
 
   constructor(private readonly options: SidecarOptions) {}
 
   /** Spawn and resolve once the socket answers (rejects after timeoutMs). */
   async start(timeoutMs = 60_000): Promise<void> {
     const { harnessRoot, address, titleBand, path, cwd, onLog, onUnexpectedExit } = this.options
+    // Annotated, not inferred: the union of the injected and the real one
+    // widens `child` to both shapes and their event overloads then conflict.
+    const launch: SidecarSpawn = this.options.spawn ?? spawn
+    const answers: (address: SidecarAddress) => Promise<boolean> = this.options.probe ?? probe
     const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
+    // A fresh process is not the one that was stopped, so it gets crash
+    // recovery back.
+    this.stopping = false
     // process.execPath is this app's own Electron binary, and
     // ELECTRON_RUN_AS_NODE below makes it behave as plain node. It replaces the
     // second stock Node binary this used to ship beside the harness — 89MB for
@@ -73,7 +123,7 @@ export class Sidecar {
     // prebuild in the staged tree loads unchanged. Asserted in
     // tests/contract/native-tools.spec.ts, node:sqlite included — Electron has
     // historically omitted that one, and the sqlite backends need it.
-    const child = spawn(process.execPath, [entry], {
+    const child = launch(process.execPath, [entry], {
       // A GUI launch inherits the session manager's cwd (often `/`), which the
       // harness would use as its relative-path base and sandbox root.
       cwd,
@@ -114,7 +164,7 @@ export class Sidecar {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`sidecar exited during startup with code ${child.exitCode}`)
-      if (await probe(address)) return
+      if (await answers(address)) return
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
     throw new Error(`sidecar did not answer on its socket within ${timeoutMs}ms`)
@@ -131,5 +181,41 @@ export class Sidecar {
     await exited
     clearTimeout(timer)
     this.child = undefined
+  }
+
+  /**
+   * Stop the harness and bring it back, resolving once the new process answers
+   * its socket.
+   *
+   * This is the only way a plugin installed while the app runs takes effect: a
+   * bundle patch row is composed into the tree at boot, and there is no
+   * hot-compose path for a row that appeared afterwards. Nothing above the
+   * sidecar has to be rebuilt for it — SidecarAddress is generated once per app
+   * run, so the socket path and bearer token do not move across a restart and
+   * the protocol handler built over them stays valid.
+   *
+   * Requests in flight over the socket during the gap DO fail. That is left
+   * alone rather than queued: the caller reloads the page afterwards, which is
+   * what actually repairs the view, and a queue would only defer the same
+   * failures to a moment where they read as fresh ones.
+   */
+  async restart(): Promise<void> {
+    // Coalesced because more than one caller can ask at once — two clicks in
+    // the marketplace, or a crash-recovery start landing on top of a requested
+    // restart. Each would otherwise run its own stop/start and race into two
+    // live harness processes against one $DSH_HOME, which the header comment
+    // above says has exactly one writer.
+    const inFlight = this.restarting
+    if (inFlight !== undefined) return await inFlight
+    const run = (async (): Promise<void> => {
+      await this.stop()
+      await this.start()
+    })()
+    this.restarting = run
+    try {
+      await run
+    } finally {
+      this.restarting = undefined
+    }
   }
 }
