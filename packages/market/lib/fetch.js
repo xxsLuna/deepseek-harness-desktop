@@ -16,8 +16,18 @@
  */
 import { createHash, timingSafeEqual } from 'node:crypto'
 
-/** The one catalog the app ships knowledge of. Content lives in its own repo. */
-export const DEFAULT_CATALOG = 'https://xxsluna.github.io/DeepSeek-Harness-Desktop-Marketplace/index.json'
+/**
+ * The one catalog the app ships knowledge of. Content lives in its own repo.
+ *
+ * A raw file URL, not a Pages URL, and that is the whole point of adopting the
+ * standard layout: `.claude-plugin/marketplace.json` is a file IN the
+ * repository, so a marketplace is just a repository and needs no site build,
+ * no `.nojekyll`, and no publish step between an edit and a user seeing it.
+ * raw.githubusercontent.com is CDN-fronted (`Via: varnish`, `max-age=300`), so
+ * this costs nothing that Pages was buying.
+ */
+export const DEFAULT_CATALOG =
+  'https://raw.githubusercontent.com/xxsLuna/DeepSeek-Harness-Desktop-Marketplace/main/.claude-plugin/marketplace.json'
 
 /**
  * Cap on a catalog body. A catalog is an index, not content — a few hundred
@@ -176,11 +186,16 @@ export function isAllowedSource(url, extraSources) {
 /**
  * Parse a URL that must be https, throwing rather than returning a flag —
  * used on every redirect hop, where a soft failure would mean continuing.
+ *
+ * Exported because `catalog.js` needs the SAME rule with a soft outcome (a bad
+ * URL drops one catalog row rather than aborting a transfer). It wraps this in
+ * a try/catch rather than restating the rule: two spellings of one scheme check
+ * is precisely where a hole opens, since only one of them gets updated.
  * @param {unknown} value - the URL to check.
  * @param {string} what - what this URL is, for the message.
  * @returns {URL} the parsed URL.
  */
-function requireHttps(value, what) {
+export function requireHttps(value, what) {
   if (typeof value !== 'string' || value === '') {
     throw new MarketError(`market: ${what} is not a URL`, 'ERR_MARKET_SCHEME')
   }
@@ -494,6 +509,23 @@ async function retrieve(url, options) {
  * @returns {Promise<Catalog>} the validated catalog.
  */
 export async function fetchCatalog(url, options = {}) {
+  return parseCatalog(await fetchCatalogText(url, options))
+}
+
+/**
+ * The same retrieval, stopping short of parsing.
+ *
+ * Split out because the catalog format moved to the standard
+ * `.claude-plugin/marketplace.json`, whose parser lives in `catalog.js` — and
+ * `catalog.js` must not import the network edge to reach it. The policy check
+ * and the transfer rules stay here, where the redirect and size handling they
+ * belong to already lives.
+ * @param {string} url - the catalog source.
+ * @param {{ extraSources?: unknown, fetchImpl?: FetchImpl, maxBytes?: number }} [options] - policy and transport.
+ * @returns {Promise<string>} the body as text.
+ * @throws {MarketError} when the source is not allowed, or the transfer fails.
+ */
+export async function fetchCatalogText(url, options = {}) {
   // Policy before I/O: an unallowed source must not produce a request at all,
   // so a source planted in configuration cannot even be used as a beacon.
   if (!isAllowedSource(url, options.extraSources)) {
@@ -504,7 +536,7 @@ export async function fetchCatalog(url, options = {}) {
     maxBytes: options.maxBytes ?? MAX_CATALOG_BYTES,
     accept: 'application/json',
   })
-  return parseCatalog(Buffer.from(bytes).toString('utf8'))
+  return Buffer.from(bytes).toString('utf8')
 }
 
 /**
