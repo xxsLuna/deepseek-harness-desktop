@@ -1,0 +1,35 @@
+{
+  "// why": [
+    "This package is node-only -- there is no browser half, so unlike",
+    "packages/market's project this one does not need dom in `lib`. It is kept",
+    "here anyway so the two projects stay one shape: the wiring worker adds a",
+    "`tsc --noEmit -p packages/claude-plugins` leg beside the others, and a",
+    "project that differs from its neighbours for no reason is one more thing",
+    "to re-derive on the next bump.",
+    "",
+    "`checkJs` is the point of the file. The `// @ts-check` pragmas on lib/*.js",
+    "are otherwise honoured by editors only and never by CI, so a JSDoc type",
+    "could rot silently -- exactly the failure class CLAUDE.md says to pin.",
+    "",
+    "Resolution reaches the staged harness through packages/claude-plugins/",
+    "node_modules, a symlink to build/harness/node_modules created beside the",
+    "stage. `npm run typecheck` therefore needs the UNPRUNED tree, because the",
+    "prune removes the very declarations this project compiles against --",
+    "AGENTS.md says the same of packages/connection and packages/settings."
+  ],
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["lib"]
+}

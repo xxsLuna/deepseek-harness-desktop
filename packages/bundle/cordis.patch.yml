@@ -74,6 +74,14 @@
     - id: desktop-settings
       name: '@dsh-desktop/settings'
 
+    # Exposes Claude-format plugins already on disk as harness skills. Its own
+    # row rather than part of desktop-market because it stands alone: a plugin
+    # copied in by hand works exactly as well as one the marketplace installed,
+    # and the marketplace is useful without it. The two share a directory
+    # layout, not an import.
+    - id: desktop-claude-plugins
+      name: '@dsh-desktop/claude-plugins'
+
     # The plugin marketplace: the installer's routes, the trusted-source
     # settings namespace, and the Marketplace tab in Plugins settings. Carries
     # no config — the default catalog is seeded through the settings `base`

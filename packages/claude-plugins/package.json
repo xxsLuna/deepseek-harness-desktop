@@ -1,0 +1,22 @@
+{
+  "name": "@dsh-desktop/claude-plugins",
+  "version": "0.1.0-rc.6-2",
+  "description": "Claude Code plugins already on disk, exposed to the harness as skills",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./discover": "./lib/discover.js",
+    "./policy": "./lib/policy.js",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-skill": "*",
+    "@deepseek-ai/schemastery": "*",
+    "yaml": "*"
+  }
+}
