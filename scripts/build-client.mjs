@@ -8,7 +8,6 @@
 // different runtime than the page's — hooks fail and services do not match.
 // Upstream's own client bundles keep exactly these external.
 import { build } from 'esbuild'
-import { rmSync, symlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -43,14 +42,6 @@ const BUNDLES = [
 
 for (const bundle of BUNDLES) {
   const pkg = join(root, 'packages', bundle.dir)
-
-  // Node-style resolution for tsc and editors: the package's node_modules is a
-  // symlink into the staged harness tree (gitignored; skipped by staging).
-  // Recreated each build — a stale absolute link (moved repo, container mount)
-  // reads as absent to existsSync yet still blocks symlinkSync.
-  const link = join(pkg, 'node_modules')
-  rmSync(link, { recursive: true, force: true })
-  symlinkSync(staged, link, 'junction')
 
   const banner = `window.__ModuleLoader__.load({ id: ${JSON.stringify(bundle.id)}, factory: (require) => {`
     + '\nvar module = { exports: {} }; var exports = module.exports;'

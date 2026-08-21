@@ -11,6 +11,7 @@
     "@deepseek-ai/schemastery": "*",
     "koffi": "*",
     "@dsh-desktop/carrier": "*",
+    "@dsh-desktop/claude-plugins": "*",
     "@dsh-desktop/chrome": "*",
     "@dsh-desktop/connection": "*",
     "@dsh-desktop/market": "*",

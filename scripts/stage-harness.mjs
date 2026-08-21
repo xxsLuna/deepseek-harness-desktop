@@ -2,7 +2,7 @@
 // of the official @deepseek-ai/dsh package, plus this repo's desktop plugin
 // packages copied in beside it. The staged tree is what ships as an Electron
 // extraResource and what the contract tests boot.
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -92,6 +92,20 @@ if (existsSync(packagesDir)) {
     const pkgName = JSON.parse(readFileSync(pkgJsonPath, 'utf8')).name
     const dest = join(stageDir, 'node_modules', ...pkgName.split('/'))
     const sourceDir = join(packagesDir, entry.name)
+
+    // Node-style resolution for tsc and editors: each local package's
+    // node_modules is a junction into the staged tree, so its bare
+    // `@deepseek-ai/*` imports resolve the same way they will once staged.
+    // Every package needs it, not just the ones with a browser bundle — a
+    // node-only package is typechecked too, and without the link its imports
+    // fail to resolve with a message about a missing module rather than a
+    // missing link. Recreated each run: a stale absolute link (moved repo,
+    // container mount) reads as absent to existsSync yet still blocks
+    // symlinkSync. Gitignored, and excluded from the copy below.
+    const link = join(sourceDir, 'node_modules')
+    rmSync(link, { recursive: true, force: true })
+    symlinkSync(join(stageDir, 'node_modules'), link, 'junction')
+
     rmSync(dest, { recursive: true, force: true })
     mkdirSync(dirname(dest), { recursive: true })
     cpSync(sourceDir, dest, {
