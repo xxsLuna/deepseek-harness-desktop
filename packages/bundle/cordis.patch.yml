@@ -74,6 +74,14 @@
     - id: desktop-settings
       name: '@dsh-desktop/settings'
 
+    # The plugin marketplace: the installer's routes, the trusted-source
+    # settings namespace, and the Marketplace tab in Plugins settings. Carries
+    # no config — the default catalog is seeded through the settings `base`
+    # layer so a user can remove it, which is the difference between a
+    # marketplace that is registered and one that is baked in.
+    - id: desktop-market
+      name: '@dsh-desktop/market'
+
     # directoryPicker with the `native` interaction, delegated over the carrier
     # socket to the launcher's window-owned Electron dialog. Replaces the
     # disabled auto-chooser row above.

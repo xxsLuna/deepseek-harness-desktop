@@ -32,6 +32,13 @@ const BUNDLES = [
     entry: 'client.tsx',
     external: ['react', 'react-dom', 'react/jsx-runtime', '@deepseek-ai/*'],
   },
+  {
+    // Same as settings: a React tab, rendered by upstream's Plugins section.
+    dir: 'market',
+    id: '@dsh-desktop/market',
+    entry: 'client.tsx',
+    external: ['react', 'react-dom', 'react/jsx-runtime', '@deepseek-ai/*'],
+  },
 ]
 
 for (const bundle of BUNDLES) {
