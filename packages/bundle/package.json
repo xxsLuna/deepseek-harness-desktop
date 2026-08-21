@@ -9,6 +9,12 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/schemastery": "*",
-    "koffi": "*"
+    "koffi": "*",
+    "@dsh-desktop/carrier": "*",
+    "@dsh-desktop/chrome": "*",
+    "@dsh-desktop/connection": "*",
+    "@dsh-desktop/market": "*",
+    "@dsh-desktop/picker": "*",
+    "@dsh-desktop/settings": "*"
   }
 }
