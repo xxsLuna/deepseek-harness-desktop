@@ -32,6 +32,7 @@
  * Runs inside the harness sidecar (plain Node, no Electron).
  */
 import { MarketError, requireHttps } from './fetch.js'
+import { isSafeSegment } from './installed.js'
 import { isPluginName } from './registry.js'
 
 /**
@@ -576,6 +577,18 @@ export function parseCatalog(text) {
   }
   const name = nonEmpty(envelope.name)
   if (name === undefined) throw new MarketError('market: catalog has no name', 'ERR_MARKET_CATALOG')
+  // Refused here, at parse time, because this string becomes a DIRECTORY: a
+  // Claude plugin is installed to `claude-plugins/<catalog name>/<plugin>`.
+  // Accepting anything non-empty and discovering at install time that it is not
+  // a usable path segment makes an entire catalog list normally and refuse
+  // every row it offers, one confusing failure at a time. The rule is the
+  // installer's own, so the two cannot drift apart.
+  if (!isSafeSegment(name)) {
+    throw new MarketError(
+      `market: catalog name ${JSON.stringify(name)} cannot be used as a directory name`,
+      'ERR_MARKET_CATALOG',
+    )
+  }
   // Required, and required to be usable. `owner` is the only field that says
   // who is offering this code, and every row under it is code that will run
   // in-process with the harness's own privileges. A document that will not name

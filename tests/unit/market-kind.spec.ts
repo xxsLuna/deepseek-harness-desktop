@@ -66,6 +66,22 @@ describe('classifyPlugin', () => {
     expect(classifyPlugin(root, { name: 'p', version: '0.0.1' })).toEqual({ kind: 'claude', version: '1.2.3' })
   })
 
+  it('reports an empty version when neither the tree nor the row has one', () => {
+    // Stated rather than implied, because the empty string is what the install
+    // path has to notice: both records refuse it, and both record writes used
+    // to happen AFTER the tree had already been moved into place — leaving a
+    // live plugin with nothing recording it and no way to remove it. `version`
+    // is optional in the marketplace format and in plugin.json alike, so this
+    // is an ordinary third-party row, not a malformed one.
+    const root = tree({ '.claude-plugin/plugin.json': JSON.stringify({ name: 'p' }) })
+    expect(classifyPlugin(root, { name: 'p' })).toEqual({ kind: 'claude', version: '' })
+    const dsh = tree({
+      'package.json': JSON.stringify({ name: 'p', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+      'cordis.patch.yml': '- insert: []\n',
+    })
+    expect(classifyPlugin(dsh, { name: 'p' })).toEqual({ kind: 'dsh', version: '' })
+  })
+
   it('falls back to the row version when the plugin declares none', () => {
     const root = tree({ '.claude-plugin/plugin.json': JSON.stringify({ description: 'x' }) })
     expect(classifyPlugin(root, { name: 'p', version: '0.4.0' })).toEqual({ kind: 'claude', version: '0.4.0' })

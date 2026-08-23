@@ -262,7 +262,16 @@ export function apply(ctx, config) {
         registration.signal.throwIfAborted()
         const locator = /** @type {Locator} */ (candidate.locator)
         const read = await readEntry(locator, { parseYaml, ...options.signal === undefined ? {} : { signal: options.signal } })
-        if (read.entry === undefined) return undefined
+        if (read.entry === undefined) {
+          // Said out loud. A skill that lists and then will not load looks to
+          // the user like the model ignoring it, and `readEntry` already knows
+          // exactly which file and why — dropping that leaves nothing anywhere
+          // to explain a skill that is visibly present and inert.
+          for (const failure of read.errors) {
+            ctx.logger.warn(`claude-plugins: ${failure.path} ${failure.message}`)
+          }
+          return undefined
+        }
         const planned = planEntry(read.entry, { rank })
         if (planned.ok === false) {
           ctx.logger.warn(`claude-plugins: ${planned.refusal.plugin} withheld ${planned.refusal.message}`)
