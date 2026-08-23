@@ -17,7 +17,7 @@
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 // @ts-expect-error — plain JS module shipped inside the market package
@@ -453,6 +453,39 @@ withGit('a real repository', () => {
     expect(readFileSync(join(dest, 'b.txt'), 'utf8')).toBe('two\n')
     expect(existsSync(join(dest, 'a.txt'))).toBe(false)
     expect(existsSync(`${dest}.subdir`), 'the holding directory was left behind').toBe(false)
+  })
+
+  it('leaves a neighbour named after the checkout alone', async () => {
+    // The promotion used to move the subtree through `${dest}.subdir` and
+    // delete that path first. A real directory already sitting there — a plugin
+    // literally called `<something>.subdir`, or any scratch dir a caller keeps
+    // beside its checkouts — was destroyed. The holding directory is an
+    // mkdtemp now, which cannot name something that already exists.
+    const base = scratch('neighbour')
+    const bystander = join(base, 'tree.subdir')
+    mkdirSync(bystander, { recursive: true })
+    writeFileSync(join(bystander, 'IMPORTANT.txt'), 'not ours\n')
+
+    const dest = join(base, 'tree')
+    await fetchGit({ source: 'git-subdir', url, path: 'sub' }, dest)
+
+    expect(readdirSync(dest).sort()).toEqual(['b.txt'])
+    expect(existsSync(join(bystander, 'IMPORTANT.txt')), 'the neighbour was deleted').toBe(true)
+  })
+
+  it('promotes correctly when the destination carries a trailing separator', async () => {
+    // `${dest}.subdir` on a path ending in a separator names a child INSIDE the
+    // checkout, so the holding directory was deleted along with the tree it was
+    // holding and the final rename failed ENOENT — losing everything. The path
+    // is resolved before anything is derived from it now.
+    const base = scratch('trailing')
+    mkdirSync(base, { recursive: true })
+    const dest = join(base, 'tree')
+    await fetchGit({ source: 'git-subdir', url, path: 'sub' }, `${dest}${sep}`)
+
+    expect(readdirSync(dest).sort()).toEqual(['b.txt'])
+    // No holding directory survives beside it.
+    expect(readdirSync(base).sort()).toEqual(['tree'])
   })
 
   it('refuses a git-subdir path the repository does not have', async () => {
