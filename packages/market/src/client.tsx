@@ -530,15 +530,16 @@ function Sources({ onChanged }: { onChanged: () => Promise<void> }): ReactNode {
   }, [])
   useEffect(() => { void load() }, [load])
 
-  const write = useCallback(async (next: string[]) => {
+  const write = useCallback(async (next: string[]): Promise<boolean> => {
     setRejected(undefined)
     const answer = await market<{ ok: boolean, message?: string, sources?: string[] }>('sources', { sources: next })
     if (answer === undefined || !answer.ok) {
       setRejected(answer?.message ?? 'the harness refused that source')
-      return
+      return false
     }
     setSources(answer.sources ?? next)
     await onChanged()
+    return true
   }, [onChanged])
 
   if (sources === undefined) return null
@@ -574,7 +575,11 @@ function Sources({ onChanged }: { onChanged: () => Promise<void> }): ReactNode {
           style={styles.button}
           disabled={draft.trim() === ''}
           onClick={() => {
-            void write([...sources, draft.trim()]).then(() => { setDraft('') })
+            // Cleared only on success. Clearing it after a refusal throws away
+            // the URL the user typed along with their chance to fix the typo,
+            // while the message beside it still explains what was wrong with a
+            // string no longer on screen.
+            void write([...sources, draft.trim()]).then((accepted) => { if (accepted) setDraft('') })
           }}
         >
           Add source
