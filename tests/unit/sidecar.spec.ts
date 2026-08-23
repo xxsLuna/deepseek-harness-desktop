@@ -82,14 +82,20 @@ function dyingHarness() {
 
 describe('Sidecar.start', () => {
   it('runs the bundle boot entry on this binary in node mode', async () => {
-    // Both are silent couplings: a wrong entry path is a missing module at
-    // first launch, and a missing ELECTRON_RUN_AS_NODE boots a second Electron
-    // GUI instead of the harness.
+    // All three are silent couplings: a wrong entry path is a missing module at
+    // first launch, a missing ELECTRON_RUN_AS_NODE boots a second Electron GUI
+    // instead of the harness, and a missing --expose-internals leaves the
+    // plugin loader unable to resolve anything installed into the profile —
+    // every dsh plugin then fails to load and safe mode disables them all,
+    // with the app opening as though nothing were wrong.
     const h = harness()
     await h.sidecar.start()
     expect(h.launches).toHaveLength(1)
     expect(h.launches[0]!.command).toBe(process.execPath)
-    expect(h.launches[0]!.args[0]).toBe(join('/opt', 'harness', 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'))
+    expect(h.launches[0]!.args).toEqual([
+      '--expose-internals',
+      join('/opt', 'harness', 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'),
+    ])
     expect(h.launches[0]!.env.ELECTRON_RUN_AS_NODE).toBe('1')
   })
 
