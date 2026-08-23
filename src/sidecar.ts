@@ -123,7 +123,35 @@ export class Sidecar {
     // prebuild in the staged tree loads unchanged. Asserted in
     // tests/contract/native-tools.spec.ts, node:sqlite included — Electron has
     // historically omitted that one, and the sqlite backends need it.
-    const child = launch(process.execPath, [entry], {
+    // `--expose-internals` is not a debugging leftover: it is what makes a
+    // runtime-installed plugin resolvable at all, and the loader asks for it by
+    // name. `cordis-plugin-loader` imports a row three ways —
+    // `loader.internal.import(name, ctx.baseUrl)` when it has Node's internal
+    // ESM loader, a baseUrl-relative import for a `./` specifier, and otherwise
+    // a bare `import(name)` resolved from the LOADER's own file. Only the first
+    // consults `baseUrl`, which is the desktop profile, and it is the whole
+    // mechanism behind installing a plugin after the build.
+    //
+    // The loader reaches that internal loader through `node-addon-require-builtin`,
+    // and measured on Electron 43 / Node 24.18 that addon loads and then refuses:
+    // `unsupported: Unsupported/no-realm`. Stock Node 22 has no such trouble. So
+    // on the runtime this app ships — and only there — the loader silently falls
+    // through to the bare import, `$DSH_HOME/profiles/desktop/node_modules` is
+    // never on the resolution path, and every dsh plugin fails to load with
+    // `Cannot find package`. Safe mode then disables all of them and the app
+    // opens looking fine.
+    //
+    // The flag is the loader's OWN first strategy (`process.execArgv.includes`),
+    // so this restores upstream's intended path rather than working around it.
+    // It has to be argv: Electron refuses `--expose-internals` in NODE_OPTIONS.
+    // It grants nothing to a plugin that a plugin does not already have — this
+    // process runs plugin code with the user's full filesystem and shell access
+    // by design, which is what the install confirmation warns about.
+    //
+    // `tests/contract/sidecar.spec.ts` installs a plugin and reboots, so a
+    // future Electron that fixes the addon, or a loader that stops honouring the
+    // flag, fails by name instead of at a user's first install.
+    const child = launch(process.execPath, ['--expose-internals', entry], {
       // A GUI launch inherits the session manager's cwd (often `/`), which the
       // harness would use as its relative-path base and sandbox root.
       cwd,

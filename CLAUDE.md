@@ -93,6 +93,29 @@ binary (Node major against the pin, NAPI level, `node:sqlite`, worker threads,
 whole tree on it, so a bad bump fails by name instead of at a user's first
 terminal.
 
+Two divergences found the hard way, both invisible until something real ran on
+the shipped binary. Neither is hypothetical and both are now pinned:
+
+- **`rmSync` will not delete a read-only file.** Stock Node 22 does; Electron
+  43's Node 24.18 raises `EPERM`. Node 24 moved `rmSync` to a native binding and
+  lost the JS rimraf's chmod-and-retry, so `force` no longer covers the Windows
+  read-only attribute. Git writes its object store read-only, so this broke
+  every install from a git source. `packages/market/lib/remove-tree.js` is the
+  answer, and every tree deletion in that package goes through it.
+- **The plugin loader's baseUrl-aware import is off.** `cordis-plugin-loader`
+  resolves a row against `ctx.baseUrl` — the desktop profile, and the whole
+  reason we boot from one — only when it can reach Node's internal ESM loader,
+  which it does through `node-addon-require-builtin`. On Electron that addon
+  loads and then refuses with `Unsupported/no-realm`, so the loader falls back
+  to a bare `import(name)` resolved from its own file, which never walks into
+  `$DSH_HOME`. Every installed plugin then fails with `Cannot find package`,
+  safe mode disables the lot, and the window opens looking healthy. The launcher
+  passes `--expose-internals`, which is the loader's own first strategy for
+  finding that internal loader. `tests/contract/profile-plugin.spec.ts` installs
+  a plugin, reboots through the real `Sidecar`, and requires its `apply()` to
+  have run — the absence of an error is not evidence here, because a plugin that
+  never loaded produces exactly that.
+
 ## The payload is pruned, never bundled
 
 `scripts/prune-payload.mjs` strips what the app never loads from the staged
