@@ -47,9 +47,10 @@
  * `tests/unit/market-git.spec.ts` also clones a real repository.
  */
 import { execFile } from 'node:child_process'
-import { lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync, mkdirSync, mkdtempSync, renameSync } from 'node:fs'
+import { dirname, join, resolve as resolvePath } from 'node:path'
 import { MarketError, requireHttps } from './fetch.js'
+import { removeTree } from './remove-tree.js'
 
 /**
  * Ceiling on the whole operation — every git invocation shares one budget, so
@@ -511,7 +512,7 @@ export async function fetchGit(source, dest, options = {}) {
   // and it invites some later tool to make a network call from a directory
   // that is supposed to be inert. Removed after the verification, because the
   // verification is the last thing that needs it.
-  rmSync(join(dest, '.git'), { recursive: true, force: true })
+  removeTree(join(dest, '.git'))
   if (resolved.path !== undefined) promoteSubdirectory(dest, resolved.path)
   return { url: resolved.url, ref: resolved.ref, sha: head }
 }
@@ -525,14 +526,26 @@ export async function fetchGit(source, dest, options = {}) {
  * keeps `git-subdir` a fact about the transport, so nothing after this point
  * has to know a plugin can arrive as part of a larger tree.
  *
- * The move is done by rename into a sibling and back, not by copying: it is one
- * directory entry each way, so a large repository costs nothing extra, and the
- * old tree is deleted only after the wanted subtree is already out of it.
- * @param {string} dest - the checkout, which becomes the subtree.
+ * The move is done by rename out and back, not by copying: it is one directory
+ * entry each way, so a large repository costs nothing extra, and the old tree
+ * is deleted only after the wanted subtree is already out of it.
+ *
+ * The place it moves THROUGH is a fresh `mkdtemp`, never a name derived from
+ * `dest`. A derived name is a path this function then deletes, and it has no
+ * way to know whether anything is already there: `${dest}.subdir` would have
+ * destroyed a real neighbouring directory that happened to carry that name, and
+ * a `dest` ending in a separator would have put it INSIDE the checkout, so the
+ * tree was deleted with the subtree still in it. `mkdtemp` cannot name
+ * something that already exists, which removes both failures by construction
+ * rather than by checking for them.
+ * @param {string} rawDest - the checkout, which becomes the subtree.
  * @param {string} path - posix-form subdirectory, already validated.
  * @throws {MarketError} when the path is not a real directory in the checkout.
  */
-function promoteSubdirectory(dest, path) {
+function promoteSubdirectory(rawDest, path) {
+  // Normalised first: every path below is derived from it, and a trailing
+  // separator makes `dirname` name the checkout itself rather than its parent.
+  const dest = resolvePath(rawDest)
   const inner = join(dest, ...path.split('/'))
   // `lstat`, so a symlink is seen as a symlink. Clones run with
   // `core.symlinks=false`, which writes a link as a plain file holding its
@@ -547,9 +560,18 @@ function promoteSubdirectory(dest, path) {
   if (!stats.isDirectory()) {
     throw new MarketError(`market: ${path} is not a directory in the repository`, 'ERR_MARKET_GIT_PATH')
   }
-  const held = `${dest}.subdir`
-  rmSync(held, { recursive: true, force: true })
-  renameSync(inner, held)
-  rmSync(dest, { recursive: true, force: true })
-  renameSync(held, dest)
+  // Alongside the checkout rather than inside it, because the checkout is about
+  // to be deleted; `mkdtemp` guarantees the name is not already in use.
+  const holder = mkdtempSync(join(dirname(dest), '.promote-'))
+  const held = join(holder, 'tree')
+  try {
+    renameSync(inner, held)
+    removeTree(dest)
+    renameSync(held, dest)
+  } finally {
+    // Empty in the ordinary case. Non-empty only if the final rename failed,
+    // and then the subtree inside it is already unreachable — leaving it would
+    // strand a whole repository's worth of files next to the checkout.
+    removeTree(holder)
+  }
 }

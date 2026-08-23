@@ -26,7 +26,7 @@
  * the same shape `@dsh-desktop/picker` uses for its answer route.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -37,16 +37,18 @@ import z from '@deepseek-ai/schemastery'
 import { MARKETPLACE_FILE, parseCatalog } from './catalog.js'
 import { DEFAULT_CATALOG, fetchCatalogText, fetchTarball, isAllowedSource } from './fetch.js'
 import { classifyPlugin } from './kind.js'
+import { removeTree } from './remove-tree.js'
 import { fetchGit } from './git.js'
 import {
   CLAUDE_PLUGINS_DIR,
   INSTALLED_FILE,
   addInstalled as recordClaude,
   installPath,
+  isRecordableVersion,
   parseInstalled as parseClaude,
   removeInstalled as forgetClaude,
 } from './installed.js'
-import { addInstalled, isPluginName, parseInstalled, removeInstalled } from './registry.js'
+import { addInstalled, isPluginName, isPluginVersion, parseInstalled, removeInstalled } from './registry.js'
 import { readTarball } from './tar.js'
 
 /** @typedef {import('./catalog.js').CatalogPlugin} Listing */
@@ -201,14 +203,25 @@ export function apply(ctx, config) {
    */
   const bootedWith = new Set(readInstalled().names)
 
-  /** @returns the profile manifest and the installed names it lists. */
+  /**
+   * @returns the profile manifest and the installed names it lists.
+   * @throws when the manifest exists but cannot be read.
+   *
+   * Absent and unreadable are deliberately NOT the same answer. A missing
+   * profile is "nothing installed" — the boot entry creates it, and these
+   * routes must still answer. A manifest that exists and will not parse is a
+   * different thing entirely, and treating it as empty is destructive: the
+   * empty fallback goes straight back through `writeProfileManifest` on the
+   * next install or remove, which deregisters every other plugin the user had.
+   * Truncation from a mid-write kill is exactly how that file gets damaged, so
+   * this is a state the app can reach on its own.
+   */
   function readInstalled() {
     try {
       const manifest = readProfileManifest(name, profileDir)
       return { manifest, names: parseInstalled(manifest) }
-    } catch {
-      // No profile yet (or an unreadable one) is "nothing installed", not an
-      // error: the boot entry creates it, and this route must still answer.
+    } catch (error) {
+      if (existsSync(join(profileDir, 'package.json'))) throw error
       // Shaped like a real manifest, `dependencies` included: a narrower
       // fallback makes the union type hide the field every reader below uses.
       return { manifest: { name: `dsh-profile-${PROFILE}`, private: true, dependencies: {} }, names: [] }
@@ -328,7 +341,7 @@ export function apply(ctx, config) {
       }
       return staging
     } catch (error) {
-      rmSync(staging, { recursive: true, force: true })
+      removeTree(staging)
       throw error
     }
   }
@@ -355,7 +368,7 @@ export function apply(ctx, config) {
       if (hadPrevious) renameSync(aside, dest)
       throw error
     }
-    if (hadPrevious) rmSync(aside, { recursive: true, force: true })
+    if (hadPrevious) removeTree(aside)
   }
 
   /**
@@ -459,8 +472,12 @@ export function apply(ctx, config) {
     // What each Claude plugin actually contributes, grouped by the row it
     // belongs to. A refusal is the interesting half: it names a skill the
     // plugin ships that this app will not publish, and why.
+    // `Object.create(null)`, not `{}`: a package may legitimately be called
+    // `constructor` or `toString`, and on a plain object `detail[name] ??= …`
+    // then finds an inherited function, skips the assignment, and the push
+    // below throws — blanking the whole inventory for every other plugin too.
     /** @type {Record<string, { skills: {name: string, kind: string, renamedFrom?: string}[], refused: {name?: string, code: string, message: string}[] }>} */
-    const detail = {}
+    const detail = Object.create(null)
     /** @type {{path: string, message: string}[]} */
     const skillErrors = []
     if (claudePlugins !== undefined) {
@@ -524,7 +541,15 @@ export function apply(ctx, config) {
     // Resolved from the catalog, never from the request: the request carries a
     // name, and the source, ref and digest come from a catalog the user chose
     // to trust. A caller cannot point this at bytes of its own choosing.
-    const found = await findListing(wanted)
+    /** @type {{ listing: Listing, sourceId: string } | undefined} */
+    let found
+    try {
+      found = await findListing(wanted)
+    } catch (error) {
+      // Ambiguity across sources, which is a question for the user rather than
+      // a failure to retry — 409 rather than the wrapper's generic 500.
+      return json(res, 409, { ok: false, message: error instanceof Error ? error.message : String(error) })
+    }
     if (found === undefined) {
       return json(res, 404, { ok: false, message: `${wanted} is not listed by any trusted source` })
     }
@@ -544,6 +569,26 @@ export function apply(ctx, config) {
       const hinted = listing.metadata?.kind
       if ((hinted === 'claude' || hinted === 'dsh') && hinted !== kind) {
         throw new Error(`the catalog listed ${listing.name} as a ${hinted} plugin, but it is a ${kind} plugin`)
+      }
+
+      // Refused BEFORE anything moves, and that ordering is the whole point.
+      // Both records reject a version they cannot render — `isPluginVersion`
+      // demands one exact semver release, `isRecordableVersion` a short printable
+      // string — and both writes happen after an irreversible `moveIntoPlace`.
+      // Throwing there left the tree on disk with nothing recording it: a Claude
+      // plugin whose skills were already live and which `remove()` could no
+      // longer find, or a package sitting in the profile that no route lists and
+      // none will ever delete. Thrown here instead, `staging` is still the only
+      // copy on disk and the `finally` below sweeps it.
+      //
+      // Reachable from any catalog but our own: `version` is optional in the
+      // marketplace format and optional in `.claude-plugin/plugin.json`, so a
+      // row that omits both leaves `classifyPlugin` returning the empty string.
+      const recordable = kind === 'dsh' ? isPluginVersion(version) : isRecordableVersion(version)
+      if (!recordable) {
+        throw new Error(
+          `${listing.name} declares ${JSON.stringify(version)}, which cannot be recorded as an installed version`,
+        )
       }
 
       if (kind === 'claude') {
@@ -566,7 +611,7 @@ export function apply(ctx, config) {
       // package that will not resolve is removed rather than left looking
       // installed until a restart that then does nothing.
       if (!resolvesFromProfile(listing.name)) {
-        rmSync(join(modulesDir, ...listing.name.split('/')), { recursive: true, force: true })
+        removeTree(join(modulesDir, ...listing.name.split('/')))
         return json(res, 500, { ok: false, message: `${listing.name} was written but does not resolve; it was removed` })
       }
       const { manifest } = readInstalled()
@@ -575,7 +620,7 @@ export function apply(ctx, config) {
     } catch (error) {
       return json(res, 502, { ok: false, message: error instanceof Error ? error.message : String(error) })
     } finally {
-      if (staging !== undefined) rmSync(staging, { recursive: true, force: true })
+      if (staging !== undefined) removeTree(staging)
     }
   }
 
@@ -588,15 +633,27 @@ export function apply(ctx, config) {
    */
   async function findListing(wanted) {
     const sources = trustedSources()
+    /** @type {{ listing: Listing, sourceId: string }[]} */
+    const found = []
     for (const source of sources) {
       if (!isAllowedSource(source, sources)) continue
       try {
         const view = parseCatalog(await readSource(source))
         const listing = view.plugins.find((one) => one.name === wanted)
-        if (listing !== undefined) return { listing, sourceId: view.name }
+        if (listing !== undefined) found.push({ listing, sourceId: view.name })
       } catch { /* a dead source is reported by /market/catalog, not here */ }
     }
-    return undefined
+    // Two catalogs may offer the same name, and the request carries only a
+    // name. Taking the first would let a source added later decide, silently,
+    // which code a click installs — the user picked a row in a list, and
+    // nothing in that click says which of the two it was. Refusing names both.
+    if (found.length > 1) {
+      throw new Error(
+        `${wanted} is offered by more than one marketplace (${found.map((one) => one.sourceId).join(', ')}); `
+        + 'remove one of them before installing',
+      )
+    }
+    return found[0]
   }
 
   /**
@@ -616,7 +673,7 @@ export function apply(ctx, config) {
     // where a tree nothing lists would be invisible but still published.
     const claude = parseClaude(readClaudeRecord()).entries.find((one) => one.name === wanted)
     if (claude !== undefined) {
-      rmSync(join(home, ...installPath(claude.source, claude.name)), { recursive: true, force: true })
+      removeTree(join(home, ...installPath(claude.source, claude.name)))
       writeClaudeRecord(forgetClaude(readClaudeRecord(), wanted))
       claudePlugins?.refresh()
       return json(res, 200, { ok: true, kind: 'claude', restartRequired: false })
@@ -629,7 +686,7 @@ export function apply(ctx, config) {
     const { manifest } = readInstalled()
     writeProfileManifest(profileDir, removeInstalled(manifest, wanted))
     if (isPluginName(wanted)) {
-      rmSync(join(modulesDir, ...wanted.split('/')), { recursive: true, force: true })
+      removeTree(join(modulesDir, ...wanted.split('/')))
     }
     json(res, 200, { ok: true, kind: 'dsh', restartRequired: true })
   }
@@ -655,7 +712,12 @@ export function apply(ctx, config) {
     if (rejected.length > 0) {
       return json(res, 422, { ok: false, message: `refused: ${rejected.join(', ')} (HTTPS only, no credentials)` })
     }
-    await scope.update({ sources: next })
+    // Deduplicated, because a repeated URL is not a second marketplace: it
+    // would be fetched twice, list every row twice, collide on the tab's React
+    // keys, and make every install ambiguous against itself. Order is kept —
+    // it is the order the user added them in.
+    const unique = next.filter((source, index) => next.indexOf(source) === index)
+    await scope.update({ sources: unique })
     json(res, 200, { ok: true, sources: trustedSources() })
   }
 

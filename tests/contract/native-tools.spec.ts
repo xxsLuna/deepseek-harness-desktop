@@ -188,4 +188,87 @@ describe.skipIf(!existsSync(harnessRoot) || !existsSync(electronBinary))('native
     })
     expect(JSON.parse(out.trim().split('\n').at(-1) ?? 'null')).toEqual({ ran: true })
   })
+
+  it('needs removeTree to delete a read-only file, because rmSync will not', () => {
+    // A measured divergence between Electron's Node and the stock one, and the
+    // reason packages/market/lib/remove-tree.js exists at all:
+    //
+    //   stock Node 22.23   rmSync(read-only, { recursive, force })  -> ok
+    //   Electron 24.18     rmSync(read-only, { recursive, force })  -> EPERM
+    //
+    // Node 24 moved rmSync to a native binding and lost the JS rimraf's
+    // chmod-and-retry, so `force` no longer covers the Windows read-only
+    // attribute. Git writes its object store read-only, so before removeTree
+    // every plugin installed from a git source failed on Windows the moment
+    // `.git` was cleaned up.
+    //
+    // Asserted here rather than in a unit test because it is a fact about THIS
+    // binary. The assertion is one-sided on purpose: an Electron bump that
+    // restores the old behaviour must not fail this, but removeTree must keep
+    // working either way. What would be a real regression is removeTree itself
+    // breaking, and that is what the second half checks.
+    const removeTree = pathToFileURL(
+      join(root, 'packages', 'market', 'lib', 'remove-tree.js'),
+    ).href
+    const result = probe(`
+      import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+      import { tmpdir } from 'node:os'
+      import { join } from 'node:path'
+      import { removeTree } from ${JSON.stringify(removeTree)}
+
+      const make = () => {
+        const root = mkdtempSync(join(tmpdir(), 'dsh-ro-probe-'))
+        const dir = join(root, 'objects')
+        mkdirSync(dir, { recursive: true })
+        const file = join(dir, 'pack.idx')
+        writeFileSync(file, 'x')
+        chmodSync(file, 0o444)
+        return root
+      }
+
+      // What plain rmSync does on this binary, recorded either way.
+      const plain = make()
+      let plainCode = 'ok'
+      try {
+        const { rmSync } = await import('node:fs')
+        rmSync(plain, { recursive: true, force: true })
+      } catch (error) {
+        plainCode = error.code ?? 'unknown'
+      }
+
+      // What removeTree does. This one is not allowed to fail.
+      const ours = make()
+      let oursCode = 'ok'
+      try {
+        removeTree(ours)
+      } catch (error) {
+        oursCode = error.code ?? 'unknown'
+      }
+
+      console.log(JSON.stringify({
+        plainCode,
+        oursCode,
+        oursGone: !existsSync(ours),
+        node: process.versions.node,
+        platform: process.platform,
+      }))
+    `) as { plainCode: string, oursCode: string, oursGone: boolean, node: string, platform: string }
+
+    expect(
+      result.oursCode,
+      'removeTree could not delete a read-only file on the runtime this app ships; '
+      + 'every plugin installed from a git source will fail here',
+    ).toBe('ok')
+    expect(result.oursGone, 'removeTree reported success but the tree is still there').toBe(true)
+
+    // Not an assertion, a record: when this stops being EPERM on win32, the
+    // workaround has become unnecessary and the comment above has gone stale.
+    if (result.platform === 'win32' && result.plainCode === 'ok') {
+      console.log(
+        `note: Electron's Node ${result.node} now deletes read-only files with plain rmSync; `
+        + 'remove-tree.js is still correct but its rationale needs revisiting',
+      )
+    }
+  })
 }, 60_000)
+
