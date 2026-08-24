@@ -634,8 +634,36 @@ function ShortcutsSection(): ReactNode {
   )
 }
 
-/** How many weeks of daily history the grass shows. */
-const GRASS_WEEKS = 27
+/**
+ * How many weeks of daily history the grass shows.
+ *
+ * A year, and it is the width that decided it rather than the span. At 27 weeks
+ * of fixed 11px cells the grid came out 375px inside an 800px panel — a block
+ * hugging the left edge with half the row empty beside it, which reads as
+ * broken layout whether or not there is any data in it. Filling the panel takes
+ * roughly this many columns, and a year is the unit a contribution graph is
+ * read in anyway. Comfortably inside the record's own 400-day retention.
+ */
+const GRASS_WEEKS = 53
+
+/** Gap between cells, in px. */
+const GRASS_GAP = 2
+
+/**
+ * Narrowest the calendar may get before it scrolls instead of shrinking.
+ *
+ * The columns are fractional so the grid tracks the panel, but a cell has a
+ * floor: below about 7px the rounded corners eat the fill and neighbouring days
+ * stop being separable. Past that the wrapper scrolls, which keeps a narrow
+ * window legible rather than merely fitting.
+ *
+ * The gaps are part of the sum, which is the arithmetic that was wrong the
+ * first time: `weeks * cell` alone left the bound satisfied at a width where
+ * the cells had already been squeezed to 7.7px, so the floor never engaged.
+ * The gap is 2px rather than 3 for the same reason — a year of columns and 3px
+ * gaps does not leave a legible cell in a settings panel this wide.
+ */
+const GRASS_MIN_WIDTH = GRASS_WEEKS * 7 + (GRASS_WEEKS - 1) * GRASS_GAP
 
 /**
  * The three cut points that split a chart's own values into four shades.
@@ -717,14 +745,24 @@ export function grassDays(today: Date, weeks: number): string[] {
   return days
 }
 
-/** One cell of either chart. */
-function GrassCell({ level, title, size }: { level: number, title: string, size: number }): ReactNode {
+/**
+ * One cell of either chart.
+ *
+ * Square by aspect ratio rather than by a pixel height, so a cell can be laid
+ * out in a fractional column and still come out a square — that is what lets
+ * both charts stretch to whatever width the settings panel happens to be
+ * instead of sitting at a fixed size in the corner of it.
+ * @param level - shade index from {@link grassLevel}, or a fixed one for the legend.
+ * @param title - the hover text; empty for the legend swatches.
+ * @param size - a fixed pixel width, for the legend only. Omitted, the cell fills its column.
+ */
+function GrassCell({ level, title, size }: { level: number, title: string, size?: number }): ReactNode {
   return (
     <div
       title={title}
       style={{
-        width: `${size}px`,
-        height: `${size}px`,
+        width: size === undefined ? '100%' : `${size}px`,
+        aspectRatio: '1',
         borderRadius: '2px',
         background: `color-mix(in srgb, currentColor ${GRASS_SHADES[level] ?? '6%'}, transparent)`,
       }}
@@ -803,11 +841,17 @@ function UsageSection(): ReactNode {
               // Columns are weeks and rows are days, so the grid flows down
               // each week before moving right — which is what makes it read as
               // a calendar rather than a strip.
-              gridTemplateRows: 'repeat(7, 11px)',
+              //
+              // The columns are declared up front rather than left to
+              // gridAutoColumns: auto tracks cannot be fractional, so the grid
+              // would size to its content again and go back to hugging the
+              // left edge of the panel.
+              gridTemplateRows: 'repeat(7, auto)',
+              gridTemplateColumns: `repeat(${GRASS_WEEKS}, minmax(0, 1fr))`,
               gridAutoFlow: 'column',
-              gridAutoColumns: '11px',
-              gap: '3px',
-              width: 'max-content',
+              gap: `${GRASS_GAP}px`,
+              width: '100%',
+              minWidth: `${GRASS_MIN_WIDTH}px`,
             }}
           >
             {days.map((key) => {
@@ -817,7 +861,6 @@ function UsageSection(): ReactNode {
               return (
                 <GrassCell
                   key={key}
-                  size={11}
                   level={grassLevel(count, dayCuts)}
                   title={`${key} — ${count} turns${detail}`}
                 />
@@ -835,11 +878,17 @@ function UsageSection(): ReactNode {
           calendar above sums, read the other way.
         </div>
         <div style={{ overflowX: 'auto', paddingBottom: '4px' }}>
-          <div style={{ display: 'flex', gap: '3px', width: 'max-content' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(24, minmax(0, 1fr))',
+              gap: `${GRASS_GAP}px`,
+              width: '100%',
+            }}
+          >
             {usage.hourly.map((count, hour) => (
               <div key={hour} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
                 <GrassCell
-                  size={16}
                   level={grassLevel(count, hourCuts)}
                   title={`${String(hour).padStart(2, '0')}:00 — ${count} turns`}
                 />
