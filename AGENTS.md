@@ -479,6 +479,16 @@ It does **not** cover these, and each one fails with no error:
   `session.list` summary shape — and those decide whether a toast is suppressed
   and whether a turn is counted as yours, so a rename does not stop the feature,
   it makes it answer wrong. The Usage graphs go quietly empty by the same route.
+- **The token-usage vocabulary** — `src/notifications.ts` reads tokens off
+  `assistant/chunk` (`data.chunk.type === 'usage'`) and `assistant/message`
+  (`data.usage`), with `turn`/`step` beside them, mirroring `usageOf` in
+  `@deepseek-ai/dsh-token-meter`. Two ways this goes wrong in silence. A rename
+  leaves the Usage page reporting zero tokens forever, which looks like "I have
+  not used it much". And if upstream ever stops treating the second report for a
+  turn/step as a REPLACEMENT, our subtraction becomes wrong in the other
+  direction and every figure halves. The rule is pinned in
+  `tests/unit/usage-store.spec.ts`, but only against our own implementation —
+  nothing checks upstream still folds it the same way.
 - **`will-move` and `moved` for a CSS drag region** — `src/window-magnet.ts`
   snaps the window to a screen edge from those two events. Neither is documented
   as firing for a `-webkit-app-region: drag` strip, which is the only way this
