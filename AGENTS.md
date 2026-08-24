@@ -492,9 +492,24 @@ It does **not** cover these, and each one fails with no error:
 - **`will-move` and `moved` for a CSS drag region** — `src/window-magnet.ts`
   snaps the window to a screen edge from those two events. Neither is documented
   as firing for a `-webkit-app-region: drag` strip, which is the only way this
-  app's window is dragged. If a bump stops delivering them, snapping simply
-  never happens; nothing errors. The release-time handler is registered on every
-  platform for that reason, so at least one path survives losing the other.
+  app's window is dragged. Both DO fire, measured on Windows 11; if a bump stops
+  delivering them, snapping simply never happens and nothing errors. The
+  release-time handler is registered on every platform for that reason, so at
+  least one path survives losing the other.
+
+  Three things about that drag are measured rather than documented, and each one
+  produced a visible bug before it was known. `will-move`'s rectangle is the
+  OUTER frame, 16x8 larger than `getBounds()` — passing it to `setBounds` grew
+  the window by the invisible border on every snap, compounding. A programmatic
+  `setBounds` raises neither event, which is the only reason the live and
+  release paths cannot feed each other. And after `preventDefault`, Windows
+  re-anchors its next proposal to where the window now IS rather than to the
+  cursor, so snapping the proposal traps the window against the edge forever —
+  the magnet tracks cursor travel instead. All three are pinned in
+  `tests/unit/window-snap.spec.ts` with the numbers a real drag produced, but a
+  bump could change any of them and the tests would keep passing against our own
+  arithmetic. `DSH_MAGNET_TRACE=1` prints every decision, which is how they were
+  found.
 - **`ELECTRON_RUN_AS_NODE` inheritance** — set once on the sidecar and relied on
   by every descendant that re-executes `process.execPath`. The day upstream
   passes an explicit env to such a spawn, the child boots a GUI Electron instead

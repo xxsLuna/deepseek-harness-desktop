@@ -122,6 +122,92 @@ export function snapToDisplays(
 }
 
 /**
+ * Largest frame inset treated as a window border rather than a resize.
+ *
+ * Windows draws an invisible resize border outside the visible frame, and
+ * `will-move` reports the rectangle INCLUDING it while `setBounds` takes the
+ * one without. Measured on Windows 11: 8px each side and 8px at the bottom, so
+ * `newBounds` runs 16 wider and 8 taller than `getBounds()` on every single
+ * move. 32 leaves room for a heavier theme while staying far below the
+ * hundreds of pixels an actual OS-initiated snap would change.
+ */
+const MAX_FRAME_INSET = 32
+
+/**
+ * Translate the rectangle a move event proposes into the one setBounds takes.
+ *
+ * These are two different rectangles and confusing them is not subtle: feeding
+ * `will-move`'s bounds straight to `setBounds` sets the VISIBLE frame to the
+ * size of the OUTER one, so the window gains the border on every snap — and
+ * the next move proposes the new, larger outer rect, so it compounds. Measured
+ * at 16x8 per snap before this existed.
+ *
+ * The inset is derived from the size difference rather than assumed, because
+ * the number is a theme and DPI fact rather than a constant. The vertical
+ * difference is taken as bottom-only: on Windows the top of the visible frame
+ * and the top of the outer rect coincide, which the same measurement confirmed
+ * (`newBounds.y` equals `getBounds().y` on every event of a drag).
+ * @param proposed - the rectangle the move event carried.
+ * @param visible - the window's current bounds, as setBounds understands them.
+ * @returns the proposed position in visible coordinates at the window's CURRENT
+ * size, or undefined when the difference is too large to be a border — which is
+ * the OS proposing its own snap, and not ours to reinterpret.
+ */
+export function visibleFromProposed(
+  proposed: WindowBounds,
+  visible: WindowBounds,
+): WindowBounds | undefined {
+  const widthGap = proposed.width - visible.width
+  const heightGap = proposed.height - visible.height
+  if (widthGap < 0 || heightGap < 0) return undefined
+  if (widthGap > MAX_FRAME_INSET * 2 || heightGap > MAX_FRAME_INSET) return undefined
+  return {
+    x: proposed.x + Math.round(widthGap / 2),
+    y: proposed.y,
+    // Never the proposed size. The size is the window's, and a move does not
+    // change it; taking it from `proposed` is exactly the bug above.
+    width: visible.width,
+    height: visible.height,
+  }
+}
+
+/** A screen point, as the cursor reports one. */
+export interface Point {
+  x: number
+  y: number
+}
+
+/**
+ * Move a rectangle by how far the cursor moved.
+ *
+ * This is what makes a magnet releasable, and it is not optional on Windows.
+ * Measured: after the handler holds the window flush and the OS's own move is
+ * cancelled, the NEXT proposal is re-anchored to where the window now is rather
+ * than to where the cursor has travelled — proposals read 692, 692, 693 while
+ * the window sat at 692 and the pointer kept going. Since `will-move` fires
+ * about once per pixel, no single event can ever differ from the held edge by
+ * more than the snap threshold, so snapping the OS's proposal traps the window
+ * against the edge for the rest of the drag: it snaps once and never lets go.
+ *
+ * Tracking the cursor instead gives a position the magnet does not influence.
+ * The window is held flush while the virtual rectangle slides out from under
+ * it, and the moment that rectangle is further than the threshold the window
+ * pops off and lands where the pointer actually is.
+ * @param rect - the virtual, un-snapped rectangle.
+ * @param from - cursor position at the previous event.
+ * @param to - cursor position now.
+ * @returns the rectangle advanced by the cursor's travel.
+ */
+export function advanceByCursor(rect: WindowBounds, from: Point, to: Point): WindowBounds {
+  return {
+    x: rect.x + (to.x - from.x),
+    y: rect.y + (to.y - from.y),
+    width: rect.width,
+    height: rect.height,
+  }
+}
+
+/**
  * Whether two rectangles are the same to the pixel.
  *
  * The call site needs this to decide whether to interfere with the drag at all:
