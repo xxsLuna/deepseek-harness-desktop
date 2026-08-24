@@ -474,7 +474,17 @@ It does **not** cover these, and each one fails with no error:
 - **Notification event vocabulary** — `src/notifications.ts` switches on upstream
   frame `type` strings and field names (`approval/requested`, `approvalId`,
   `host/session-status`). A rename kills toasts and the approval badge quietly,
-  or leaks the badge count upward.
+  or leaks the badge count upward. It now also reads `host/session-added`,
+  `host/session-removed`, the literal `origin: 'subagent'`, and the
+  `session.list` summary shape — and those decide whether a toast is suppressed
+  and whether a turn is counted as yours, so a rename does not stop the feature,
+  it makes it answer wrong. The Usage graphs go quietly empty by the same route.
+- **`will-move` and `moved` for a CSS drag region** — `src/window-magnet.ts`
+  snaps the window to a screen edge from those two events. Neither is documented
+  as firing for a `-webkit-app-region: drag` strip, which is the only way this
+  app's window is dragged. If a bump stops delivering them, snapping simply
+  never happens; nothing errors. The release-time handler is registered on every
+  platform for that reason, so at least one path survives losing the other.
 - **`ELECTRON_RUN_AS_NODE` inheritance** — set once on the sidecar and relied on
   by every descendant that re-executes `process.execPath`. The day upstream
   passes an explicit env to such a spawn, the child boots a GUI Electron instead
