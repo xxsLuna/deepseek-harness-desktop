@@ -41,7 +41,15 @@
  * on the first drag. Not registering is the only honest behaviour.
  */
 import { screen, type BrowserWindow } from 'electron'
-import { sameBounds, snapToDisplays, SNAP_THRESHOLD } from './window-snap.js'
+import {
+  advanceByCursor,
+  sameBounds,
+  snapToDisplays,
+  SNAP_THRESHOLD,
+  visibleFromProposed,
+  type Point,
+} from './window-snap.js'
+import type { WindowBounds } from './window-state.js'
 
 /** How long after the last `move` a drag counts as finished, on the X11 path. */
 const SETTLE_MS = 140
@@ -97,32 +105,105 @@ export function installWindowMagnet(win: BrowserWindow, enabled: () => boolean):
 
   const disposers: (() => void)[] = []
 
+  /**
+   * Trace every decision, for diagnosing a drag no test can drive.
+   *
+   * Off unless `DSH_MAGNET_TRACE` is set. A magnet misbehaving is only ever
+   * reproducible by a person moving a real mouse, so the alternative to this is
+   * guessing at what the OS handed us.
+   */
+  const trace = process.env.DSH_MAGNET_TRACE === undefined
+    ? undefined
+    : (what: string, detail: Record<string, unknown>): void => {
+        console.log(`[magnet] ${what} ${JSON.stringify(detail)}`)
+      }
+
   /** Snap where the window currently is; a no-op when it is already flush. */
   const place = (): void => {
-    if (!enabled() || arranged()) return
+    if (!enabled() || arranged()) {
+      trace?.('moved:skipped', { arranged: arranged(), bounds: win.getBounds() })
+      return
+    }
     const current = win.getBounds()
     const snapped = snapToDisplays(current, workAreas(), SNAP_THRESHOLD)
-    if (sameBounds(snapped, current)) return
+    if (sameBounds(snapped, current)) {
+      trace?.('moved:noop', { current })
+      return
+    }
+    trace?.('moved:snap', { current, snapped })
     win.setBounds(snapped)
   }
 
   if (process.platform === 'win32') {
     /**
+     * Where the drag would have put the window with no magnet, and the cursor
+     * position that rectangle was last advanced from. Undefined between drags.
+     */
+    let drag: { virtual: WindowBounds, cursor: Point } | undefined
+
+    /**
      * @param event - the cancelable move, carrying the proposed rectangle.
      * @param newBounds - where the drag wants the window.
      */
     const onWillMove = (event: Electron.Event, newBounds: Electron.Rectangle): void => {
-      if (!enabled() || arranged()) return
-      const snapped = snapToDisplays(newBounds, workAreas(), SNAP_THRESHOLD)
-      // Most steps of a drag are nowhere near an edge. Cancelling those and
-      // re-applying identical bounds is a visible stutter for no gain, so the
-      // handler only intervenes when the rule actually moved something.
-      if (sameBounds(snapped, newBounds)) return
+      const current = win.getBounds()
+      if (!enabled() || arranged()) {
+        drag = undefined
+        trace?.('will-move:skipped', { arranged: arranged(), newBounds, current })
+        return
+      }
+      // `newBounds` is the OUTER rectangle, including the invisible resize
+      // border; `setBounds` takes the visible one. Translating is not optional:
+      // passing the former straight through grew the window by the border on
+      // every snap, and compounded, because the next move then proposed the
+      // larger outer rect.
+      const proposed = visibleFromProposed(newBounds, current)
+      if (proposed === undefined) {
+        // Too far apart to be a border, so this is the OS proposing its own
+        // arrangement rather than the user dragging. Not ours to reinterpret.
+        drag = undefined
+        trace?.('will-move:resize', { newBounds, current })
+        return
+      }
+
+      // The rectangle to snap is the one the CURSOR is dragging, not the one
+      // the OS proposes. Once the magnet holds the window, the OS re-anchors
+      // its proposals to the held position, so every event lands inside the
+      // threshold and the window can never escape the edge it caught on.
+      const cursor = screen.getCursorScreenPoint()
+      drag = drag === undefined
+        ? { virtual: proposed, cursor }
+        : { virtual: advanceByCursor(drag.virtual, drag.cursor, cursor), cursor }
+      // Size is always the window's own, whatever the drag has been through.
+      const virtual = { ...drag.virtual, width: current.width, height: current.height }
+      drag.virtual = virtual
+
+      const snapped = snapToDisplays(virtual, workAreas(), SNAP_THRESHOLD)
+      // Most steps of a drag are nowhere near an edge, and the OS is already
+      // putting the window where it belongs. Intervening on those would cancel
+      // and re-apply the same rectangle, which is a visible stutter for nothing.
+      if (sameBounds(snapped, proposed)) {
+        trace?.('will-move:noop', { newBounds, proposed, virtual })
+        return
+      }
+      trace?.('will-move:snap', { newBounds, proposed, virtual, snapped })
       event.preventDefault()
       win.setBounds(snapped)
     }
     win.on('will-move', onWillMove)
     disposers.push(() => win.off('will-move', onWillMove))
+
+    // The drag is over, so the next one starts its own virtual rectangle
+    // rather than resuming this one from wherever the cursor happens to be.
+    const onDragEnd = (): void => { drag = undefined }
+    win.on('moved', onDragEnd)
+    disposers.push(() => win.off('moved', onDragEnd))
+
+    if (trace !== undefined) {
+      const onResize = (): void => { trace('resize', { bounds: win.getBounds(), snapped: arranged() }) }
+      win.on('resize', onResize)
+      disposers.push(() => win.off('resize', onResize))
+    }
   }
 
   if (process.platform === 'win32' || process.platform === 'darwin') {
