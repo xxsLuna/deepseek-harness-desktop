@@ -10,7 +10,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -30,7 +30,7 @@ const electronBinary = createRequire(import.meta.url)('electron') as string
  * and this is the wire between the two, so both being written out is the point.
  */
 interface InstalledView {
-  entries: { name: string, version: string, kind: string, active: boolean, managed: boolean }[]
+  entries: { name: string, version: string, kind: string, active: boolean, enabled: boolean, managed: boolean }[]
   failed: string[]
   restartRequired: boolean
   detail: Record<string, {
@@ -476,6 +476,33 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     const refused = detail?.refused.find((one) => one.name === 'contract-restricted')
     expect(refused?.code).toBe('allowed-tools')
     expect(refused?.message.length ?? 0).toBeGreaterThan(0)
+  })
+
+  it('can disable a Claude plugin without uninstalling it', async () => {
+    // Disabling parks the tree under a dot-prefixed name, which the skill walk
+    // already skips — the same rule that keeps it from publishing out of a
+    // half-written staging directory. That reuse is the point: the two packages
+    // share a directory layout and no import, so "not this one" has to be
+    // sayable in the layout itself.
+    //
+    // Driven here against a HAND-PLACED plugin, which the marketplace never
+    // installed and has no record of, because the mechanism has to be the
+    // layout rather than the record for that case to work at all.
+    const parked = join(home, 'claude-plugins', 'handplaced', '.note-taker')
+    const live = join(home, 'claude-plugins', 'handplaced', 'note-taker')
+    const names = async (): Promise<string[]> => {
+      const workspaces = await rpc(socketPath, 'workspace.list')
+      const workspaceId = (workspaces.value as { items: { workspaceId: string }[] }).items[0]?.workspaceId
+      const session = await rpc(socketPath, 'session.create', { workspaceId })
+      const listed = await rpc(socketPath, 'skill.list', { sessionId: (session.value as { sessionId?: string }).sessionId })
+      return (listed.value as { skills: { name: string }[] }).skills.map((one) => one.name)
+    }
+
+    expect(await names()).toContain('contract-note')
+    renameSync(live, parked)
+    expect(await names(), 'a parked plugin is still being published').not.toContain('contract-note')
+    renameSync(parked, live)
+    expect(await names(), 'un-parking did not bring it back').toContain('contract-note')
   })
 
   it('publishes a hand-placed Claude plugin as a harness skill', async () => {

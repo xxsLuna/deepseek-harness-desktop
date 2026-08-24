@@ -75,6 +75,12 @@ interface InstalledEntry {
   /** Whether the row is live in the running tree, or waiting for a restart. */
   active: boolean
   /**
+   * Whether it is composed at all. Distinct from `active`: a disabled plugin is
+   * still installed and still on disk, it has just been taken out of what the
+   * app loads — nothing is re-downloaded to bring it back.
+   */
+  enabled: boolean
+  /**
    * Whether this app put it there. A Claude plugin copied under the install
    * root by hand publishes its skills exactly like an installed one, so it is
    * listed — but deleting a directory the marketplace did not create is not the
@@ -315,6 +321,38 @@ function Published({ detail }: { detail?: PluginDetail }): ReactNode {
 }
 
 /**
+ * Enable / disable, beside Remove.
+ *
+ * Worth having as its own control rather than folding into Remove, because the
+ * two answer different questions. Removing asks "do I want this at all"; this
+ * asks "do I want it right now", and the difference is whether coming back
+ * costs a download and whatever the plugin had configured. A plugin that is
+ * misbehaving, or that someone wants out of the way for an afternoon, wants
+ * this one.
+ * @param props - the installed row, the busy name, and the setter.
+ * @returns the toggle.
+ */
+function Toggle({ entry, busy, onSet }: {
+  entry: InstalledEntry
+  busy: string | undefined
+  onSet: (entry: { name: string }, enabled: boolean) => Promise<void>
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      style={{ ...styles.button, opacity: entry.enabled ? 1 : 0.6 }}
+      disabled={busy === entry.name}
+      title={entry.enabled
+        ? 'Keep it installed but stop loading it'
+        : 'Load it again — nothing is downloaded'}
+      onClick={() => { void onSet(entry, !entry.enabled) }}
+    >
+      {busy === entry.name ? '…' : entry.enabled ? 'Disable' : 'Enable'}
+    </button>
+  )
+}
+
+/**
  * The Marketplace tab: trusted sources, the merged catalog, and what is
  * installed.
  * @returns the tab body.
@@ -341,6 +379,15 @@ function MarketplaceTab(): ReactNode {
     () => new Map((installed?.entries ?? []).map((e) => [e.name, e])),
     [installed],
   )
+
+  const setEnabled = useCallback(async (entry: { name: string }, enabled: boolean) => {
+    setBusy(entry.name)
+    setFailure(undefined)
+    const answer = await market<{ ok: boolean, message?: string }>('enabled', { name: entry.name, enabled })
+    if (answer === undefined || !answer.ok) setFailure(answer?.message ?? 'could not change that')
+    setBusy(undefined)
+    await refresh()
+  }, [refresh])
 
   const act = useCallback(async (action: 'install' | 'remove', entry: { name: string }) => {
     setBusy(entry.name)
@@ -442,7 +489,11 @@ function MarketplaceTab(): ReactNode {
                   <span style={styles.hint}>{entry.description}</span>
                   <span style={styles.meta}>
                     {entry.version === '' ? entry.name : entry.version} · {entry.publisher}
-                    {live === undefined ? '' : live.active ? ' · installed' : ' · installed, pending restart'}
+                    {live === undefined
+                      ? ''
+                      : !live.enabled
+                          ? ' · installed, disabled'
+                          : live.active ? ' · installed' : ' · installed, pending restart'}
                   </span>
                   {live === undefined || live.kind !== 'claude'
                     ? null
@@ -451,17 +502,20 @@ function MarketplaceTab(): ReactNode {
                 {live !== undefined && !live.managed
                   ? <span style={styles.meta}>placed by hand</span>
                   : (
-                    <button
-                      type="button"
-                      style={styles.button}
-                      disabled={busy === entry.name}
-                      onClick={() => {
-                        if (live === undefined) setPending(entry)
-                        else void act('remove', entry)
-                      }}
-                    >
-                      {busy === entry.name ? '…' : live === undefined ? 'Install' : 'Remove'}
-                    </button>
+                    <span style={styles.actions}>
+                      {live === undefined ? null : <Toggle entry={live} busy={busy} onSet={setEnabled} />}
+                      <button
+                        type="button"
+                        style={styles.button}
+                        disabled={busy === entry.name}
+                        onClick={() => {
+                          if (live === undefined) setPending(entry)
+                          else void act('remove', entry)
+                        }}
+                      >
+                        {busy === entry.name ? '…' : live === undefined ? 'Install' : 'Remove'}
+                      </button>
+                    </span>
                     )}
               </div>
             )
@@ -485,20 +539,23 @@ function MarketplaceTab(): ReactNode {
                   </span>
                   <span style={styles.meta}>
                     {entry.version === '' ? 'unversioned' : entry.version}
-                    {entry.active ? '' : ' · pending restart'}
+                    {!entry.enabled ? ' · disabled' : entry.active ? '' : ' · pending restart'}
                   </span>
                   {entry.kind !== 'claude' ? null : <Published detail={installed.detail[entry.name]} />}
                 </div>
                 {entry.managed
                   ? (
-                    <button
-                      type="button"
-                      style={styles.button}
-                      disabled={busy === entry.name}
-                      onClick={() => { void act('remove', entry) }}
-                    >
-                      {busy === entry.name ? '…' : 'Remove'}
-                    </button>
+                    <span style={styles.actions}>
+                      <Toggle entry={entry} busy={busy} onSet={setEnabled} />
+                      <button
+                        type="button"
+                        style={styles.button}
+                        disabled={busy === entry.name}
+                        onClick={() => { void act('remove', entry) }}
+                      >
+                        {busy === entry.name ? '…' : 'Remove'}
+                      </button>
+                    </span>
                     )
                   : <span style={styles.meta}>placed by hand</span>}
               </div>
