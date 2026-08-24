@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { SidecarAddress } from './socket-path.js'
 import type { DesktopSettings } from './desktop-settings.js'
+import { tokensFrom } from './usage.js'
 import type { UsageStore } from './usage-store.js'
 
 interface SseSubscription {
@@ -121,6 +122,44 @@ async function rpc(address: SidecarAddress, method: string): Promise<unknown> {
   })
 }
 
+/** One model call's token report, located in the log. */
+interface TokenReport {
+  turn: number
+  step: number
+  usage: unknown
+}
+
+/**
+ * Find the token report on a session event, if it carries one.
+ *
+ * The two cases and their precedence are upstream's, copied deliberately from
+ * `usageOf` in `@deepseek-ai/dsh-token-meter`: a `usage` chunk is an early
+ * sample that survives a later failure, and the finished assistant message is
+ * the final sample for the SAME turn and step. They are not two calls, which is
+ * why the caller replaces rather than adds.
+ * @param type - the session event's type.
+ * @param data - its payload, typed `unknown` upstream and treated as such.
+ * @returns the report, or undefined when this event has no usage on it.
+ */
+function tokenReportFrom(type: unknown, data: unknown): TokenReport | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const record = data as Record<string, unknown>
+  const { turn, step } = record
+  if (typeof turn !== 'number' || typeof step !== 'number') return undefined
+
+  if (type === 'assistant/chunk') {
+    const chunk = record.chunk
+    if (typeof chunk !== 'object' || chunk === null) return undefined
+    const shape = chunk as Record<string, unknown>
+    if (shape.type !== 'usage') return undefined
+    return { turn, step, usage: shape.usage }
+  }
+  if (type === 'assistant/message' && record.usage !== undefined) {
+    return { turn, step, usage: record.usage }
+  }
+  return undefined
+}
+
 /** Pull the subagent session ids out of a session.list result. */
 function subagentIdsFrom(result: unknown): string[] {
   const value = (result as { value?: { items?: unknown } } | undefined)?.value?.items
@@ -189,6 +228,29 @@ export function startNotifications(
       }
       case 'question/requested': {
         if (!win.isFocused() && settings().notifyQuestions) notify('Question', 'The agent asked you a question.')
+        break
+      }
+      case 'session/event': {
+        if (sinks.usage === undefined) break
+        const event = frame.event
+        if (typeof event !== 'object' || event === null) break
+        const { type, time, data } = event as Record<string, unknown>
+        const report = tokenReportFrom(type, data)
+        if (report === undefined) break
+        const tokens = tokensFrom(report.usage)
+        if (tokens === undefined) break
+        // The event's own timestamp, not the clock: this frame can arrive after
+        // a reconnect replays nothing but the log still knows when it happened,
+        // and an hourly graph filed by arrival time would be wrong by however
+        // long the stream was down.
+        const at = typeof time === 'number' && Number.isFinite(time) ? time : Date.now()
+        sinks.usage.recordTokens(
+          typeof frame.sessionId === 'string' ? frame.sessionId : '',
+          at,
+          report.turn,
+          report.step,
+          tokens,
+        )
         break
       }
       default:

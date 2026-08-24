@@ -20,11 +20,29 @@ import {
   hourOf,
   parseUsage,
   pruneUsage,
+  sameTokens,
   splitSpan,
+  TOKEN_FIELDS,
   usageView,
   type UsageRecord,
+  type UsageTokens,
   type UsageView,
 } from './usage.js'
+
+/**
+ * The newest usage report seen for one session, and where it was filed.
+ *
+ * The bucket is remembered along with the numbers because a replacement has to
+ * be taken out of the hour the first sample went into, which is not necessarily
+ * the hour the replacement arrives in.
+ */
+interface LastSample {
+  turn: number
+  step: number
+  tokens: UsageTokens
+  day: string
+  hour: number
+}
 
 /** How long changes may sit in memory before being written. */
 const FLUSH_MS = 10_000
@@ -39,6 +57,8 @@ export class UsageStore {
   private record: UsageRecord
   private timer: NodeJS.Timeout | undefined
   private dirty = false
+  /** Newest usage report per session, for the replace-not-add rule below. */
+  private readonly lastSample = new Map<string, LastSample>()
 
   constructor(userDataPath: string = app.getPath('userData')) {
     this.path = join(userDataPath, 'usage.json')
@@ -110,6 +130,60 @@ export class UsageStore {
     this.touch(startMs)
   }
 
+  /**
+   * Record the tokens one model call reported.
+   *
+   * A step reports its usage TWICE: once as a streaming chunk, which survives a
+   * later failure, and again on the finished assistant message. Upstream's own
+   * fold treats the second as a REPLACEMENT for the first rather than a second
+   * charge, and so must this -- adding both would double every step's tokens.
+   *
+   * Upstream can keep one slot because reports for a turn/step are adjacent in
+   * a legal log; this keeps one per session for the same reason, since the
+   * launcher watches every session at once on a shared stream.
+   *
+   * The replacement is subtracted from the bucket the first sample went into,
+   * not the current one. A step that starts streaming at 10:59 and finishes at
+   * 11:00 would otherwise leave its early sample stranded in the earlier hour
+   * and charge the whole call again in the later one.
+   * @param sessionId - which session reported.
+   * @param at - the event's own timestamp, epoch ms.
+   * @param turn - the turn the report belongs to.
+   * @param step - the step within it.
+   * @param tokens - the four counts.
+   */
+  recordTokens(sessionId: string, at: number, turn: number, step: number, tokens: UsageTokens): void {
+    const previous = this.lastSample.get(sessionId)
+    const sameStep = previous !== undefined && previous.turn === turn && previous.step === step
+    if (sameStep && sameTokens(previous.tokens, tokens)) return
+    if (sameStep) this.addTokens(previous.day, previous.hour, previous.tokens, -1)
+
+    const day = dayKey(at)
+    const hour = hourOf(at)
+    this.addTokens(day, hour, tokens, 1)
+    this.lastSample.set(sessionId, { turn, step, tokens, day, hour })
+    this.touch(at)
+  }
+
+  /**
+   * Add or subtract one report from a bucket.
+   * @param day - local date key.
+   * @param hour - local hour.
+   * @param tokens - the counts.
+   * @param sign - 1 to add, -1 to take a superseded sample back out.
+   */
+  private addTokens(day: string, hour: number, tokens: UsageTokens, sign: 1 | -1): void {
+    this.record.days[day] ??= emptyDay()
+    const bucket = this.record.days[day]?.[hour]
+    if (bucket === undefined) return
+    for (const field of TOKEN_FIELDS) {
+      // Clamped, because a reset between the two samples of one step leaves
+      // nothing to subtract and a negative count would render as an empty cell
+      // that is somehow also the busiest.
+      bucket[field] = Math.max(0, bucket[field] + sign * tokens[field])
+    }
+  }
+
   /** @returns what the Usage page renders. */
   view(): UsageView {
     return usageView(this.record)
@@ -126,6 +200,9 @@ export class UsageStore {
    */
   reset(): void {
     this.record = { since: 0, days: {} }
+    // Or the next report for a step already counted would subtract from a
+    // record that no longer holds it.
+    this.lastSample.clear()
     this.dirty = true
     this.flush()
   }

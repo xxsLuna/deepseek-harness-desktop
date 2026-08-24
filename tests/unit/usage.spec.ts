@@ -7,12 +7,17 @@
 import { describe, expect, it } from 'vitest'
 import {
   dayKey,
+  EMPTY_BUCKET,
   emptyDay,
   hourOf,
+  NO_TOKENS,
   parseUsage,
   pruneUsage,
   RETENTION_DAYS,
+  sameTokens,
   splitSpan,
+  tokensFrom,
+  totalTokens,
   usageView,
   type UsageRecord,
 } from '../../src/usage.js'
@@ -123,13 +128,13 @@ describe('parseUsage', () => {
     }))
     expect(parsed.since).toBe(111)
     expect(Object.keys(parsed.days)).toEqual(['2026-08-24'])
-    expect(parsed.days['2026-08-24']?.[0]).toEqual({ turns: 3, subagentTurns: 1, activeMs: 50 })
+    expect(parsed.days['2026-08-24']?.[0]).toEqual({ ...EMPTY_BUCKET, turns: 3, subagentTurns: 1, activeMs: 50 })
   })
 
   it('pads every day to 24 buckets, so a sum never meets undefined', () => {
     const parsed = parseUsage(JSON.stringify({ since: 1, days: { '2026-08-24': [{ turns: 1 }] } }))
     expect(parsed.days['2026-08-24']).toHaveLength(24)
-    expect(parsed.days['2026-08-24']?.[23]).toEqual({ turns: 0, subagentTurns: 0, activeMs: 0 })
+    expect(parsed.days['2026-08-24']?.[23]).toEqual(EMPTY_BUCKET)
   })
 
   it('rejects negative and non-finite counts rather than storing them', () => {
@@ -137,7 +142,7 @@ describe('parseUsage', () => {
       since: 1,
       days: { '2026-08-24': [{ turns: -5, subagentTurns: Number.NaN, activeMs: 'lots' }] },
     }))
-    expect(parsed.days['2026-08-24']?.[0]).toEqual({ turns: 0, subagentTurns: 0, activeMs: 0 })
+    expect(parsed.days['2026-08-24']?.[0]).toEqual(EMPTY_BUCKET)
   })
 })
 
@@ -156,10 +161,10 @@ describe('pruneUsage', () => {
 describe('usageView', () => {
   it('draws both graphs from the same buckets, so they cannot disagree', () => {
     const day = emptyDay()
-    day[9] = { turns: 2, subagentTurns: 5, activeMs: 1000 }
-    day[14] = { turns: 3, subagentTurns: 0, activeMs: 2000 }
+    day[9] = { ...EMPTY_BUCKET, turns: 2, subagentTurns: 5, activeMs: 1000 }
+    day[14] = { ...EMPTY_BUCKET, turns: 3, activeMs: 2000 }
     const other = emptyDay()
-    other[9] = { turns: 1, subagentTurns: 0, activeMs: 500 }
+    other[9] = { ...EMPTY_BUCKET, turns: 1, activeMs: 500 }
 
     const view = usageView({ since: 42, days: { '2026-08-24': day, '2026-08-25': other } })
 
@@ -175,7 +180,7 @@ describe('usageView', () => {
 
   it('keeps subagent turns apart, so the graph can exclude them', () => {
     const day = emptyDay()
-    day[9] = { turns: 2, subagentTurns: 5, activeMs: 0 }
+    day[9] = { ...EMPTY_BUCKET, turns: 2, subagentTurns: 5 }
     const view = usageView({ since: 1, days: { '2026-08-24': day } })
     expect(view.daily['2026-08-24']).toBe(2)
     expect(view.dailySubagent['2026-08-24']).toBe(5)
@@ -185,8 +190,92 @@ describe('usageView', () => {
 
   it('reports an empty record as empty rather than as a zero day', () => {
     const view = usageView({ since: 0, days: {} })
-    expect(view.totals).toEqual({ turns: 0, subagentTurns: 0, activeMs: 0, days: 0 })
+    expect(view.totals).toEqual({ turns: 0, subagentTurns: 0, activeMs: 0, days: 0, tokens: NO_TOKENS })
     expect(view.hourly).toHaveLength(24)
     expect(view.since).toBe(0)
+  })
+})
+
+describe('tokensFrom', () => {
+  it('reads a provider report, defaulting the optional cache fields', () => {
+    // Upstream types the two cache fields optional and defaults them to 0 in
+    // its own fold; matching that is what keeps our totals comparable to the
+    // figures the app itself shows.
+    expect(tokensFrom({ inputTokens: 10, outputTokens: 4 }))
+      .toEqual({ inputTokens: 10, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 })
+    expect(tokensFrom({ inputTokens: 10, outputTokens: 4, cacheReadTokens: 7, cacheWriteTokens: 2 }))
+      .toEqual({ inputTokens: 10, outputTokens: 4, cacheReadTokens: 7, cacheWriteTokens: 2 })
+  })
+
+  it('ignores anything that is not a usage report', () => {
+    // `data` on a session event is typed `unknown` upstream on purpose, so this
+    // is a validator rather than a cast.
+    for (const bad of [undefined, null, 42, 'usage', [], {}, { inputTokens: 1 }, { outputTokens: 1 }]) {
+      expect(tokensFrom(bad), JSON.stringify(bad ?? null)).toBeUndefined()
+    }
+  })
+
+  it('refuses negative and non-finite counts', () => {
+    expect(tokensFrom({ inputTokens: -1, outputTokens: 4 })).toBeUndefined()
+    expect(tokensFrom({ inputTokens: Number.NaN, outputTokens: 4 })).toBeUndefined()
+    // An unusable optional field falls back rather than voiding the report.
+    expect(tokensFrom({ inputTokens: 1, outputTokens: 2, cacheReadTokens: -5 })?.cacheReadTokens).toBe(0)
+  })
+})
+
+describe('totalTokens', () => {
+  it('adds all four, because upstream states they are disjoint', () => {
+    // Billed input is uncached + cache reads + writes; output is separate. So
+    // the sum is the whole cost rather than a double count.
+    expect(totalTokens({ inputTokens: 1, outputTokens: 2, cacheReadTokens: 4, cacheWriteTokens: 8 })).toBe(15)
+    expect(totalTokens(NO_TOKENS)).toBe(0)
+  })
+})
+
+describe('sameTokens', () => {
+  it('compares every field, since one differing count is a new sample', () => {
+    const a = { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 }
+    expect(sameTokens(a, { ...a })).toBe(true)
+    expect(sameTokens(a, { ...a, cacheWriteTokens: 5 })).toBe(false)
+  })
+})
+
+describe('parseUsage, for a record written before tokens were counted', () => {
+  it('keeps the history and defaults the new fields', () => {
+    // The upgrade path. Discarding a day for lacking fields it could not have
+    // had would silently throw away the user's calendar on first launch.
+    const old = JSON.stringify({
+      since: 111,
+      days: { '2026-08-24': [{ turns: 3, subagentTurns: 1, activeMs: 50 }] },
+    })
+    const bucket = parseUsage(old).days['2026-08-24']?.[0]
+    expect(bucket?.turns).toBe(3)
+    expect(bucket).toMatchObject(NO_TOKENS)
+  })
+})
+
+describe('usageView, tokens', () => {
+  it('sums tokens by day and by hour from the same buckets', () => {
+    const day = emptyDay()
+    day[9] = { ...EMPTY_BUCKET, turns: 1, inputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1 }
+    day[14] = { ...EMPTY_BUCKET, turns: 1, inputTokens: 100, outputTokens: 50 }
+    const record: UsageRecord = { since: 1, days: { '2026-08-24': day } }
+    const view = usageView(record)
+
+    expect(view.dailyTokens['2026-08-24']).toBe(168)
+    expect(view.hourlyTokens[9]).toBe(18)
+    expect(view.hourlyTokens[14]).toBe(150)
+    expect(view.totals.tokens).toEqual({
+      inputTokens: 110, outputTokens: 55, cacheReadTokens: 2, cacheWriteTokens: 1,
+    })
+    // The two graphs read the same buckets, so their totals cannot diverge.
+    const daily = Object.values(view.dailyTokens).reduce((a, b) => a + b, 0)
+    expect(view.hourlyTokens.reduce((a, b) => a + b, 0)).toBe(daily)
+  })
+
+  it('reports no tokens for an empty record', () => {
+    const view = usageView({ since: 0, days: {} })
+    expect(view.totals.tokens).toEqual(NO_TOKENS)
+    expect(view.hourlyTokens).toHaveLength(24)
   })
 })

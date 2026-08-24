@@ -18,8 +18,42 @@
  * graph reads their own midnight, not UTC's.
  */
 
-/** One hour of one local day. Counts only; totals are sums over these. */
-export interface UsageBucket {
+/**
+ * Provider-reported tokens for one model call.
+ *
+ * The four are DISJOINT, which upstream states outright: `inputTokens` is
+ * uncached input only, and cached input is reported separately, so billed input
+ * is the sum of the three input figures. Adding them up is therefore the whole
+ * cost rather than a double count.
+ */
+export interface UsageTokens {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
+/** The token fields of a bucket, enumerable — several folds walk them. */
+export const TOKEN_FIELDS = [
+  'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+] as const satisfies readonly (keyof UsageTokens)[]
+
+/** A bucket with nothing in it. */
+export const NO_TOKENS: UsageTokens = {
+  inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+}
+
+/**
+ * One hour of one local day. Counts only; totals are sums over these.
+ *
+ * Tokens are NOT split between you and your subagents, unlike turns. A subagent
+ * runs because you asked for the work, and its tokens are billed to you the
+ * same as any other — so a token figure that excluded them would understate
+ * what the hour cost, which is the only reason to look at tokens at all. Turns
+ * are split because there the question is different: whether the agent has
+ * finished with YOU.
+ */
+export interface UsageBucket extends UsageTokens {
   /** Turns you started. */
   turns: number
   /** Turns a subagent started, kept apart so the graph can exclude them. */
@@ -40,7 +74,46 @@ export interface UsageRecord {
 export const RETENTION_DAYS = 400
 
 /** An empty bucket; every field must be present so a sum never sees undefined. */
-export const EMPTY_BUCKET: UsageBucket = { turns: 0, subagentTurns: 0, activeMs: 0 }
+export const EMPTY_BUCKET: UsageBucket = { turns: 0, subagentTurns: 0, activeMs: 0, ...NO_TOKENS }
+
+/**
+ * Read a provider usage report off an event, if it carries one.
+ *
+ * Total and defensive: `data` on a session event is typed `unknown` by upstream
+ * on purpose (a strict envelope around a wide payload), so this validates
+ * rather than casts. The two optional cache fields default to 0, exactly as
+ * upstream's own fold does.
+ * @param usage - the candidate `usage` object, of unknown shape.
+ * @returns the four counts, or undefined when this is not a usage report.
+ */
+export function tokensFrom(usage: unknown): UsageTokens | undefined {
+  if (typeof usage !== 'object' || usage === null) return undefined
+  const record = usage as Record<string, unknown>
+  const count = (key: string, required: boolean): number | undefined => {
+    const value = record[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+    return required ? undefined : 0
+  }
+  const inputTokens = count('inputTokens', true)
+  const outputTokens = count('outputTokens', true)
+  if (inputTokens === undefined || outputTokens === undefined) return undefined
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: count('cacheReadTokens', false) ?? 0,
+    cacheWriteTokens: count('cacheWriteTokens', false) ?? 0,
+  }
+}
+
+/** @returns every token in a report, added up. */
+export function totalTokens(tokens: UsageTokens): number {
+  return tokens.inputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens
+}
+
+/** @returns whether two reports are the same in every field. */
+export function sameTokens(a: UsageTokens, b: UsageTokens): boolean {
+  return TOKEN_FIELDS.every((field) => a[field] === b[field])
+}
 
 /**
  * The local date key for an instant.
@@ -141,7 +214,18 @@ export function parseUsage(raw: string | undefined): UsageRecord {
           typeof source[field] === 'number' && Number.isFinite(source[field]) && source[field] >= 0
             ? source[field]
             : 0
-        day[hour] = { turns: count('turns'), subagentTurns: count('subagentTurns'), activeMs: count('activeMs') }
+        day[hour] = {
+          turns: count('turns'),
+          subagentTurns: count('subagentTurns'),
+          activeMs: count('activeMs'),
+          // Absent in a record written before tokens were counted. Defaulting
+          // per field is what lets an existing file keep its history instead of
+          // being discarded for not having them.
+          inputTokens: count('inputTokens'),
+          outputTokens: count('outputTokens'),
+          cacheReadTokens: count('cacheReadTokens'),
+          cacheWriteTokens: count('cacheWriteTokens'),
+        }
       }
       days[key] = day
     }
@@ -179,8 +263,18 @@ export interface UsageView {
   hourly: number[]
   /** 24 entries: subagent turns by hour of day. */
   hourlySubagent: number[]
+  /** Local date key -> every token spent that day, yours and your subagents'. */
+  dailyTokens: Record<string, number>
+  /** 24 entries: tokens by hour of day. */
+  hourlyTokens: number[]
   /** Totals across the whole record. */
-  totals: { turns: number, subagentTurns: number, activeMs: number, days: number }
+  totals: {
+    turns: number
+    subagentTurns: number
+    activeMs: number
+    days: number
+    tokens: UsageTokens
+  }
 }
 
 /**
@@ -196,15 +290,19 @@ export interface UsageView {
 export function usageView(record: UsageRecord): UsageView {
   const daily: Record<string, number> = {}
   const dailySubagent: Record<string, number> = {}
+  const dailyTokens: Record<string, number> = {}
   const hourly = Array.from({ length: 24 }, () => 0)
   const hourlySubagent = Array.from({ length: 24 }, () => 0)
+  const hourlyTokens = Array.from({ length: 24 }, () => 0)
   let turns = 0
   let subagentTurns = 0
   let activeMs = 0
+  const tokens: UsageTokens = { ...NO_TOKENS }
 
   for (const [key, buckets] of Object.entries(record.days)) {
     let dayTurns = 0
     let daySub = 0
+    let dayTokens = 0
     for (let hour = 0; hour < 24; hour += 1) {
       const bucket = buckets[hour] ?? EMPTY_BUCKET
       dayTurns += bucket.turns
@@ -212,9 +310,14 @@ export function usageView(record: UsageRecord): UsageView {
       hourly[hour] = (hourly[hour] ?? 0) + bucket.turns
       hourlySubagent[hour] = (hourlySubagent[hour] ?? 0) + bucket.subagentTurns
       activeMs += bucket.activeMs
+      const bucketTokens = totalTokens(bucket)
+      dayTokens += bucketTokens
+      hourlyTokens[hour] = (hourlyTokens[hour] ?? 0) + bucketTokens
+      for (const field of TOKEN_FIELDS) tokens[field] += bucket[field]
     }
     daily[key] = dayTurns
     dailySubagent[key] = daySub
+    dailyTokens[key] = dayTokens
     turns += dayTurns
     subagentTurns += daySub
   }
@@ -223,8 +326,10 @@ export function usageView(record: UsageRecord): UsageView {
     since: record.since,
     daily,
     dailySubagent,
+    dailyTokens,
     hourly,
     hourlySubagent,
-    totals: { turns, subagentTurns, activeMs, days: Object.keys(record.days).length },
+    hourlyTokens,
+    totals: { turns, subagentTurns, activeMs, days: Object.keys(record.days).length, tokens },
   }
 }

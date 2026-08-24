@@ -58,7 +58,15 @@ interface Usage {
   dailySubagent: Record<string, number>
   hourly: number[]
   hourlySubagent: number[]
-  totals: { turns: number, subagentTurns: number, activeMs: number, days: number }
+  dailyTokens: Record<string, number>
+  hourlyTokens: number[]
+  totals: {
+    turns: number
+    subagentTurns: number
+    activeMs: number
+    days: number
+    tokens: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }
+  }
 }
 
 const ROUTE = '/__desktop-host/settings/'
@@ -635,6 +643,21 @@ function ShortcutsSection(): ReactNode {
 }
 
 /**
+ * A token count, short enough to sit in a tooltip.
+ *
+ * Three significant figures and a unit, because the number itself is never the
+ * point — nobody reads 1,204,873 as anything but "about 1.2 million", and the
+ * exact figure would push the rest of the tooltip off the screen.
+ * @param tokens - the count.
+ * @returns e.g. `0`, `847`, `12.4K`, `1.2M`.
+ */
+export function formatTokens(tokens: number): string {
+  if (tokens < 1_000) return String(Math.round(tokens))
+  if (tokens < 1_000_000) return `${Math.round(tokens / 100) / 10}K`
+  return `${Math.round(tokens / 100_000) / 10}M`
+}
+
+/**
  * How many weeks of daily history the grass shows.
  *
  * A year, and it is the width that decided it rather than the span. At 27 weeks
@@ -818,6 +841,8 @@ function UsageSection(): ReactNode {
   const hourCuts = grassThresholds(usage.hourly)
   const minutes = Math.round(usage.totals.activeMs / 60_000)
   const running = minutes < 90 ? `${minutes} minutes` : `${Math.round(minutes / 6) / 10} hours`
+  const spentTokens = usage.totals.tokens.inputTokens + usage.totals.tokens.outputTokens
+    + usage.totals.tokens.cacheReadTokens + usage.totals.tokens.cacheWriteTokens
   const started = usage.since === 0 ? undefined : new Date(usage.since)
 
   return (
@@ -828,8 +853,16 @@ function UsageSection(): ReactNode {
           ? <div style={styles.notice}>Nothing recorded yet. This counts turns from the moment it is installed — there is no history to fill in from before that.</div>
           : (
             <div style={{ ...styles.hint, paddingBottom: '10px' }}>
-              {usage.totals.turns} turns over {usage.totals.days} days, {running} running.
-              Recording since {started.toLocaleDateString()}.
+              {usage.totals.turns} turns over {usage.totals.days} days, {running} running,
+              {' '}{formatTokens(spentTokens)} tokens
+              {spentTokens === 0
+                ? null
+                // The four counts are disjoint, so the split adds back to the
+                // total rather than overlapping it.
+                : ` (${formatTokens(usage.totals.tokens.inputTokens)} in, `
+                  + `${formatTokens(usage.totals.tokens.outputTokens)} out, `
+                  + `${formatTokens(usage.totals.tokens.cacheReadTokens + usage.totals.tokens.cacheWriteTokens)} cached)`}.
+              {' '}Recording since {started.toLocaleDateString()}.
             </div>
           )}
         <div style={{ overflowX: 'auto', paddingBottom: '4px' }}>
@@ -857,12 +890,14 @@ function UsageSection(): ReactNode {
             {days.map((key) => {
               const count = usage.daily[key] ?? 0
               const sub = usage.dailySubagent[key] ?? 0
+              const spent = usage.dailyTokens[key] ?? 0
               const detail = sub === 0 ? '' : ` (+${sub} subagent)`
+              const cost = spent === 0 ? '' : ` · ${formatTokens(spent)} tokens`
               return (
                 <GrassCell
                   key={key}
                   level={grassLevel(count, dayCuts)}
-                  title={`${key} — ${count} turns${detail}`}
+                  title={`${key} — ${count} turns${detail}${cost}`}
                 />
               )
             })}
@@ -890,7 +925,10 @@ function UsageSection(): ReactNode {
               <div key={hour} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
                 <GrassCell
                   level={grassLevel(count, hourCuts)}
-                  title={`${String(hour).padStart(2, '0')}:00 — ${count} turns`}
+                  title={`${String(hour).padStart(2, '0')}:00 — ${count} turns${
+                    (usage.hourlyTokens[hour] ?? 0) === 0
+                      ? ''
+                      : ` · ${formatTokens(usage.hourlyTokens[hour] ?? 0)} tokens`}`}
                 />
                 {hour % 3 === 0
                   ? <span style={{ ...styles.hint, fontSize: '10px' }}>{hour}</span>
@@ -907,7 +945,7 @@ function UsageSection(): ReactNode {
           label="Reset usage"
           hint={confirming
             ? 'This cannot be undone; the counts are only kept here.'
-            : `Throws away every count and starts again. Subagent turns counted separately: ${usage.totals.subagentTurns}.`}
+            : `Throws away every count and starts again. Subagent turns counted separately: ${usage.totals.subagentTurns}; their tokens are not, because they are billed to you the same.`}
         >
           {confirming
             ? (
