@@ -23,6 +23,7 @@ import {
   type DesktopSettings,
 } from './desktop-settings.js'
 import { type UpdateMode } from './update-gate.js'
+import { DEFAULT_TOGGLE_ACCELERATOR } from './shortcuts.js'
 
 /** Fields the launcher can only honour at startup. */
 const RESTART_REQUIRED: readonly (keyof DesktopSettings)[] = ['mergedTitleBar']
@@ -43,6 +44,24 @@ export interface DesktopSettingsView {
   pendingRestart: readonly string[]
   /** Whether this platform merges the title bar at all (Linux does not). */
   titleBarMergeable: boolean
+  /**
+   * Whether this session can position its own window.
+   *
+   * False under Wayland, where the compositor owns placement. The Shortcuts and
+   * Window pages say so rather than offering a switch that does nothing.
+   */
+  canPositionWindow: boolean
+  /** The chord the app falls back to, so the page can offer "restore default". */
+  defaultToggleAccelerator: string
+  /**
+   * Whether the toggle accelerator is actually held right now.
+   *
+   * Registration is best-effort: another application may already own the chord,
+   * and that is an environment fact rather than a misconfiguration. Reporting it
+   * is the difference between a shortcut that looks set and does nothing, and
+   * one the page can say is taken.
+   */
+  toggleAcceleratorActive: boolean
 }
 
 /**
@@ -128,6 +147,9 @@ export interface DesktopSettingsViewInput {
   harnessVersion: string
   updates: UpdateMode
   titleBarMergeable: boolean
+  canPositionWindow: boolean
+  /** Reads whether the global shortcut is currently registered. */
+  toggleAcceleratorActive: () => boolean
 }
 
 /**
@@ -143,6 +165,9 @@ export function desktopSettingsView(input: DesktopSettingsViewInput): DesktopSet
     updates: input.updates,
     pendingRestart: input.store.pendingRestart(),
     titleBarMergeable: input.titleBarMergeable,
+    canPositionWindow: input.canPositionWindow,
+    defaultToggleAccelerator: DEFAULT_TOGGLE_ACCELERATOR,
+    toggleAcceleratorActive: input.toggleAcceleratorActive(),
   }
 }
 

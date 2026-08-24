@@ -43,6 +43,23 @@ type AutoUpdater = (typeof import('electron-updater'))['autoUpdater']
 type ManualOutcome = 'available' | 'up-to-date' | { failed: string }
 
 /**
+ * What a manual check reports back to whoever asked for it.
+ *
+ * The settings page renders this inline instead of only hearing about it
+ * through a dialog: before this existed the route fired the check and returned
+ * 204 immediately, so the button did nothing visible for up to thirty seconds
+ * and then a native window appeared, which reads as a broken button rather
+ * than a slow one.
+ */
+export interface UpdateCheckResult {
+  state: 'up-to-date' | 'downloading' | 'available' | 'unsupported' | 'failed'
+  /** One line for the page; the dialog says the same thing at more length. */
+  message: string
+  /** The version found, when the check found one. */
+  version?: string
+}
+
+/**
  * electron-updater's `autoUpdater` is a process singleton, so its listeners
  * belong to the process rather than to a check. Registering them inside the
  * check attached one more `error` listener every four hours: a single failure
@@ -95,7 +112,7 @@ async function autoUpdaterOnce(): Promise<AutoUpdater> {
 export function startUpdater(
   enabled: () => boolean = () => true,
   win?: BrowserWindow,
-): { stop: () => void, checkNow: () => void } {
+): { stop: () => void, checkNow: () => Promise<UpdateCheckResult> } {
   // Parented, every dialog below is a sheet. A parentless showMessageBox on
   // macOS runs a modal loop that blocks the main thread outright: no window
   // load, no sidecar output, nothing until someone clicks it (which is a hang
@@ -108,18 +125,16 @@ export function startUpdater(
     macUpdatesSigned: macUpdatesSigned(),
   })
   if (mode === 'disabled') {
+    const detail = app.isPackaged
+      ? 'This platform cannot self-update; download new versions from the releases page.'
+      : 'Development builds are not updated.'
     return {
       stop: () => {},
       // An unpackaged or unsupported build has nothing to check; say so rather
       // than leaving a menu item that appears to do nothing.
-      checkNow: () => {
-        void ask({
-          type: 'info',
-          message: 'Updates are not available for this build',
-          detail: app.isPackaged
-            ? 'This platform cannot self-update; download new versions from the releases page.'
-            : 'Development builds are not updated.',
-        })
+      checkNow: async () => {
+        void ask({ type: 'info', message: 'Updates are not available for this build', detail })
+        return { state: 'unsupported', message: detail }
       },
     }
   }
@@ -167,7 +182,7 @@ export function startUpdater(
    * responds cannot leave the menu item looking dead.
    * @returns nothing; it reports through a dialog.
    */
-  const checkAutoManual = async (): Promise<void> => {
+  const checkAutoManual = async (): Promise<UpdateCheckResult> => {
     const outcome = await new Promise<ManualOutcome>((resolve) => {
       const expiry = setTimeout(() => { resolve({ failed: 'The update check did not answer.' }) }, MANUAL_CHECK_TIMEOUT_MS)
       reportManual = (answer) => {
@@ -179,7 +194,7 @@ export function startUpdater(
     reportManual = undefined
     if (outcome === 'up-to-date') {
       void ask({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
-      return
+      return { state: 'up-to-date', message: `Up to date — version ${app.getVersion()}.` }
     }
     if (outcome === 'available') {
       // autoDownload is on and autoInstallOnAppQuit applies it, so the work is
@@ -189,9 +204,10 @@ export function startUpdater(
         message: 'A new version is downloading',
         detail: 'It installs when you quit DeepSeek Harness.',
       })
-      return
+      return { state: 'downloading', message: 'A new version is downloading; it installs when you quit.' }
     }
     void ask({ type: 'warning', message: 'Could not check for updates', detail: outcome.failed })
+    return { state: 'failed', message: outcome.failed }
   }
 
   const check = mode === 'auto' ? checkAuto : checkNotifyOnly
@@ -200,18 +216,34 @@ export function startUpdater(
   }
   checkIfEnabled()
   timer = setInterval(checkIfEnabled, CHECK_INTERVAL_MS)
+  /**
+   * The manual check in flight, if any.
+   *
+   * `reportManual` is a single module-level slot, so two overlapping manual
+   * checks would have the second overwrite the first's resolver and leave the
+   * first hanging until its own timeout. Sharing one promise makes a second
+   * click join the check already running instead of starting a race — which
+   * matters now that the button is clickable while it waits rather than being
+   * followed immediately by a modal dialog.
+   */
+  let inFlight: Promise<UpdateCheckResult> | undefined
+
+  const runCheck = async (): Promise<UpdateCheckResult> => {
+    if (mode === 'auto') return await checkAutoManual()
+    await checkNotifyOnly(true)
+    if (notified) {
+      return { state: 'available', message: 'A newer version is available on the releases page.' }
+    }
+    void ask({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
+    return { state: 'up-to-date', message: `Up to date — version ${app.getVersion()}.` }
+  }
+
   return {
     stop: () => clearInterval(timer),
     // A manual check reports "up to date" too; the scheduled one stays quiet.
-    checkNow: () => {
-      if (mode === 'auto') {
-        void checkAutoManual()
-        return
-      }
-      void checkNotifyOnly(true).then(() => {
-        if (notified) return
-        void ask({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
-      })
+    checkNow: async () => {
+      inFlight ??= runCheck().finally(() => { inFlight = undefined })
+      return await inFlight
     },
   }
 }

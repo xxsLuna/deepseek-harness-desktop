@@ -14,16 +14,45 @@ import {
 describe('parseDesktopSettings', () => {
   it('defaults to the behaviour the app shipped with', () => {
     // These defaults ARE the pre-settings behaviour: closing hid to the tray,
-    // every notification fired, the band was merged, updates were automatic.
+    // every notification about YOUR turn fired, the band was merged, updates
+    // were automatic.
+    //
+    // notifySubagentTurns is the one exception, and it is off deliberately: a
+    // subagent finishing raised a toast that read as "your turn is done" while
+    // the agent kept working, so the shipped behaviour was the bug.
     expect(DEFAULT_DESKTOP_SETTINGS).toEqual({
       closeAction: 'tray',
       notifyApprovals: true,
       notifyQuestions: true,
       notifyTurns: true,
+      notifySubagentTurns: false,
       mergedTitleBar: true,
       autoUpdate: true,
+      snapToEdges: true,
+      toggleAccelerator: 'CommandOrControl+Alt+D',
     })
     expect(parseDesktopSettings(undefined)).toEqual(DEFAULT_DESKTOP_SETTINGS)
+  })
+
+  it('takes an accelerator, including the empty one that means disabled', () => {
+    expect(parseDesktopSettings(JSON.stringify({ toggleAccelerator: '' })).toggleAccelerator).toBe('')
+    expect(parseDesktopSettings(JSON.stringify({ toggleAccelerator: 'Alt+Space' })).toggleAccelerator).toBe('Alt+Space')
+  })
+
+  it('refuses an accelerator that is not a bounded single-line string', () => {
+    // Not a syntax check — Electron owns accelerator grammar and rejecting a
+    // chord it would have taken is worse than letting globalShortcut report it
+    // unavailable. This only stops junk reaching a file parsed at every launch.
+    const fallback = DEFAULT_DESKTOP_SETTINGS.toggleAccelerator
+    for (const bad of [42, null, 'a'.repeat(200), 'Ctrl+\nA']) {
+      expect(parseDesktopSettings(JSON.stringify({ toggleAccelerator: bad })).toggleAccelerator).toBe(fallback)
+    }
+  })
+
+  it('merges the accelerator, and leaves it alone when the patch is unusable', () => {
+    const current = { ...DEFAULT_DESKTOP_SETTINGS, toggleAccelerator: 'Alt+Space' }
+    expect(mergeDesktopSettings({ toggleAccelerator: 'Ctrl+Alt+H' }, current).toggleAccelerator).toBe('Ctrl+Alt+H')
+    expect(mergeDesktopSettings({ toggleAccelerator: 7 }, current).toggleAccelerator).toBe('Alt+Space')
   })
 
   it('survives anything the file could contain', () => {
