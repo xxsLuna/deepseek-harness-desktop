@@ -12,6 +12,7 @@ DeepSeek Harness ships a Web UI served by a local HTTP server (`dsh web`). This 
 - **No open TCP ports** — the harness listens on a Unix domain socket (macOS/Linux) or a named pipe (Windows) instead of an HTTP port; the window talks to it over an internal `dsh://` scheme.
 - **The harness itself is untouched** — the upstream packages run exactly as published. The transport is swapped through the harness's own plugin composition layer, not by patching its code.
 - **Desktop integration** — tray icon, notifications for approvals and finished turns, global shortcut, deep links, auto-update (Windows/Linux).
+- **Plugins you add and drop from inside the app** — both Claude-format plugins and harness ones, from a catalog, with no reinstall and nothing to edit by hand. Skills apply the moment they land; extensions are code and take a restart. Either can be switched off without being thrown away.
 
 ## Install
 
@@ -35,7 +36,9 @@ Sessions, credentials, and settings live in `~/.dsh`, shared with the `dsh` CLI 
 
 ## Plugins
 
-**Settings → Plugins → Marketplace** lists plugins from a curated catalog and installs the ones you pick. Nothing is installed for you: a fresh install has zero plugins, there is no auto-install and no auto-update.
+**Settings → Plugins → Marketplace** lists plugins from a curated catalog and installs the ones you pick — add, disable, re-enable and remove, all from the tab, with no reinstall of the app and no file to edit. Nothing is installed for you: a fresh install has zero plugins, there is no auto-install and no auto-update.
+
+How quickly a change takes effect depends on which kind it is, and the tab says which on every row. A **skills** plugin is markdown the harness reads, so installing, disabling or removing one applies **immediately** — no restart. An **extension** is code the loader composes when the session server starts, so those take a restart, and the tab offers one. Disabling is not removing either way: the files stay, and turning it back on costs no download.
 
 The app ships **only the catalog's URL** — no catalog content and no plugin code. The catalog lives in its own repository ([DeepSeek-Harness-Desktop-Marketplace](https://github.com/xxsLuna/DeepSeek-Harness-Desktop-Marketplace)) so listings can change without an app release, and a plugin is downloaded at the moment you click Install. A catalog is a `.claude-plugin/marketplace.json` file in a repository — the same format the Claude plugin ecosystem uses — so a marketplace needs no site build and no release step. The default source is listed in the tab like any other and can be removed; you can add your own HTTPS catalogs beside it.
 
