@@ -28,7 +28,10 @@ import { startNotifications } from './notifications.js'
 import { startPickerHost } from './picker-host.js'
 import { clampWindowState, parseWindowState, type StoredWindowState } from './window-state.js'
 import { DEEP_LINK_SCHEME, deepLinkFromArgv, parseDeepLink } from './deep-link.js'
-import { macUpdatesSigned, startUpdater } from './updater.js'
+import { macUpdatesSigned, startUpdater, type UpdateCheckResult } from './updater.js'
+import { UsageStore } from './usage-store.js'
+import { canPositionWindow, installWindowMagnet } from './window-magnet.js'
+import type { ShortcutHandle } from './shortcuts.js'
 
 /** Product name shown in the menu bar, Dock, About panel, and notifications. */
 const APP_NAME = 'DeepSeek Harness'
@@ -181,7 +184,12 @@ async function run(): Promise<void> {
   // launcher business, and they must work while the sidecar gate is still
   // pending rather than queue behind it. `updater` is assigned below, after
   // the window; nothing can call this before then.
-  let updater: { stop: () => void, checkNow: () => void } | undefined
+  let updater: { stop: () => void, checkNow: () => Promise<UpdateCheckResult> } | undefined
+  // Assigned with the window below. The routes that read it are answered before
+  // the window guard, so both are looked up per request rather than captured.
+  let shortcuts: ShortcutHandle | undefined
+  const usage = new UsageStore()
+  app.on('before-quit', () => usage.flush())
   const desktopHost = createDesktopHost({
     getWindow: () => BrowserWindow.getAllWindows()[0],
     settings,
@@ -195,7 +203,15 @@ async function run(): Promise<void> {
       macUpdatesSigned: macUpdatesSigned(),
     }),
     titleBarMergeable: MERGED_TITLE_BAR_PLATFORM,
-    checkForUpdates: () => updater?.checkNow(),
+    canPositionWindow: canPositionWindow(process.platform, process.env.XDG_SESSION_TYPE),
+    toggleAcceleratorActive: () => shortcuts?.isActive() === true,
+    checkForUpdates: async () =>
+      await (updater?.checkNow() ?? Promise.resolve<UpdateCheckResult>({
+        state: 'unsupported',
+        message: 'The updater is not running yet.',
+      })),
+    usage: () => usage.view(),
+    resetUsage: () => usage.reset(),
     restartSidecar: () => sidecar.restart(),
   })
   protocol.handle('dsh', async (request) => {
@@ -259,14 +275,26 @@ async function run(): Promise<void> {
   // The tray is unconditional: it is how a hidden window comes back, and with
   // "quit on close" the app is gone anyway, so hiding the icon would only ever
   // remove the data folder and update entries.
-  const tray = installTray(win, () => updater?.checkNow())
+  // The tray item wants no answer back: checkNow reports through its own
+  // dialog, and the promise only exists so the settings page can render the
+  // outcome inline. Discarded explicitly rather than left floating.
+  const tray = installTray(win, () => { void updater?.checkNow() })
   app.on('before-quit', () => tray.destroy())
 
   const stopDownloads = installDownloads(win.webContents.session)
-  const stopShortcuts = installShortcuts(win)
+  shortcuts = installShortcuts(win, settings.get().toggleAccelerator)
+  const stopMagnet = installWindowMagnet(win, () => settings.get().snapToEdges)
+  // The accelerator is the one preference that cannot be read per use: the OS
+  // routes the chord, so the app has to be holding the right one in advance.
+  // Everything else here is read at the moment it matters.
+  const stopWatchingSettings = settings.subscribe((next) => {
+    shortcuts?.rebind(next.toggleAccelerator)
+  })
   app.on('before-quit', () => {
     stopDownloads()
-    stopShortcuts()
+    stopWatchingSettings()
+    stopMagnet()
+    shortcuts?.stop()
   })
 
   if (!app.isPackaged) {
@@ -278,7 +306,7 @@ async function run(): Promise<void> {
   await win.loadURL('dsh://app/')
 
   void sidecarReady.then(() => {
-    const stopNotifications = startNotifications(address, win, () => settings.get())
+    const stopNotifications = startNotifications(address, win, () => settings.get(), { usage })
     const stopPickerHost = startPickerHost(address, win)
     app.on('before-quit', () => {
       stopNotifications()

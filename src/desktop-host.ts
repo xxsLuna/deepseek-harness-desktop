@@ -28,6 +28,8 @@ import type { BrowserWindow } from 'electron'
 import { popupAppMenu } from './menu.js'
 import { desktopHostAction } from './socket-proxy.js'
 import { desktopSettingsView, type DesktopSettingsStore, type DesktopSettingsViewInput } from './settings-host.js'
+import type { UpdateCheckResult } from './updater.js'
+import type { UsageView } from './usage.js'
 
 /** A point in window coordinates, as the page measured it. */
 interface Point {
@@ -64,8 +66,18 @@ export interface DesktopHostDeps extends Omit<DesktopSettingsViewInput, 'store'>
   getWindow: () => BrowserWindow | undefined
   /** The desktop preferences store. */
   settings: DesktopSettingsStore
-  /** Run an update check now and report to the user. */
-  checkForUpdates: () => void
+  /**
+   * Run an update check now and report what it found.
+   *
+   * Awaited rather than fired and forgotten: the route used to return 204 the
+   * instant the check started, so the page had nothing to show for up to thirty
+   * seconds and the button read as broken. Overlapping callers share one check.
+   */
+  checkForUpdates: () => Promise<UpdateCheckResult>
+  /** The usage record the Usage page renders. */
+  usage: () => UsageView
+  /** Throw the usage record away and start counting again. */
+  resetUsage: () => void
   /**
    * Restart the harness sidecar, resolving only once the new process answers
    * its socket. Coalesced by the supervisor, so overlapping callers share one
@@ -106,8 +118,12 @@ export function createDesktopHost(deps: DesktopHostDeps) {
         settings.write(body)
         return view()
       case 'settings/check-updates':
-        deps.checkForUpdates()
-        return new Response(null, { status: 204 })
+        return Response.json(await deps.checkForUpdates())
+      case 'settings/usage':
+        return Response.json(deps.usage())
+      case 'settings/usage-reset':
+        deps.resetUsage()
+        return Response.json(deps.usage())
       default:
         break
     }

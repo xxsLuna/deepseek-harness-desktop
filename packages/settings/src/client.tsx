@@ -15,8 +15,8 @@
  * dark one, so everything is drawn in `currentColor` at varying opacity and
  * inherits whichever the page is painting.
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { navDividerCss } from './nav-divider.js'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { DESKTOP_SECTIONS, navGroupCss } from './nav-group.js'
 
 /** Mirrors src/desktop-settings.ts; the launcher is the authority. */
 interface DesktopSettings {
@@ -24,8 +24,11 @@ interface DesktopSettings {
   notifyApprovals: boolean
   notifyQuestions: boolean
   notifyTurns: boolean
+  notifySubagentTurns: boolean
   mergedTitleBar: boolean
   autoUpdate: boolean
+  snapToEdges: boolean
+  toggleAccelerator: string
 }
 
 /** Mirrors DesktopSettingsView in src/settings-host.ts. */
@@ -36,6 +39,26 @@ interface View {
   updates: 'auto' | 'notify-only' | 'disabled'
   pendingRestart: readonly string[]
   titleBarMergeable: boolean
+  canPositionWindow: boolean
+  defaultToggleAccelerator: string
+  toggleAcceleratorActive: boolean
+}
+
+/** Mirrors UpdateCheckResult in src/updater.ts. */
+interface UpdateCheck {
+  state: 'up-to-date' | 'downloading' | 'available' | 'unsupported' | 'failed'
+  message: string
+  version?: string
+}
+
+/** Mirrors UsageView in src/usage.ts. */
+interface Usage {
+  since: number
+  daily: Record<string, number>
+  dailySubagent: Record<string, number>
+  hourly: number[]
+  hourlySubagent: number[]
+  totals: { turns: number, subagentTurns: number, activeMs: number, days: number }
 }
 
 const ROUTE = '/__desktop-host/settings/'
@@ -47,7 +70,7 @@ const ROUTE = '/__desktop-host/settings/'
  * @returns the launcher's view of the settings, or undefined when it answered
  * with no content (a check request) or could not be reached.
  */
-async function call(action: string, body?: unknown): Promise<View | undefined> {
+async function call<T = View>(action: string, body?: unknown): Promise<T | undefined> {
   try {
     const response = await fetch(`${ROUTE}${action}`, {
       method: 'POST',
@@ -55,10 +78,37 @@ async function call(action: string, body?: unknown): Promise<View | undefined> {
       body: JSON.stringify(body ?? {}),
     })
     if (!response.ok || response.status === 204) return undefined
-    return await response.json() as View
+    return await response.json() as T
   } catch {
     return undefined
   }
+}
+
+/**
+ * Read the launcher's settings once, for a page that only renders them.
+ *
+ * Each section is mounted on its own by the shell — only the ACTIVE panel
+ * exists — so every one of them fetches for itself rather than sharing state
+ * that would not survive switching tabs.
+ * @returns the view, `undefined` while loading, and whether the read failed.
+ */
+function useDesktopView(): {
+  view: View | undefined
+  failed: boolean
+  setView: React.Dispatch<React.SetStateAction<View | undefined>>
+} {
+  const [view, setView] = useState<View | undefined>(undefined)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let live = true
+    void call('read').then((next) => {
+      if (!live) return
+      if (next === undefined) setFailed(true)
+      else setView(next)
+    })
+    return () => { live = false }
+  }, [])
+  return { view, failed, setView }
 }
 
 const styles = {
@@ -111,12 +161,28 @@ const styles = {
   },
 } as const satisfies Record<string, React.CSSProperties>
 
-/** One labelled row with its control on the right. */
-function Row({ label, hint, children }: { label: string, hint?: string, children: ReactNode }): ReactNode {
+/**
+ * One labelled row with its control on the right.
+ *
+ * `nested` indents the row and drops the rule above it, so it reads as a
+ * qualifier on the row before rather than a peer of it. That distinction is
+ * load-bearing for the subagent switch: as a peer it would look like a second,
+ * unrelated notification, when what it actually controls is a subset of the one
+ * above.
+ */
+function Row({ label, hint, nested, children }: {
+  label: string
+  hint?: string
+  nested?: boolean
+  children: ReactNode
+}): ReactNode {
+  const style = nested === true
+    ? { ...styles.row, borderTop: 0, paddingTop: 0, paddingLeft: '22px' }
+    : styles.row
   return (
-    <div style={styles.row}>
+    <div style={style}>
       <div style={styles.rowText}>
-        <span style={styles.label}>{label}</span>
+        <span style={{ ...styles.label, ...(nested === true ? { opacity: 0.85 } : {}) }}>{label}</span>
         {hint === undefined ? null : <span style={styles.hint}>{hint}</span>}
       </div>
       {children}
@@ -161,6 +227,38 @@ function Segmented<T extends string>({ value, options, disabled, onSelect }: {
         )
       })}
     </div>
+  )
+}
+
+/**
+ * A spinning ring, for a button whose work takes visible time.
+ *
+ * Drawn rather than animated with a keyframes rule, because this plugin injects
+ * no stylesheet of its own for the page — everything here is inline styles — and
+ * an @keyframes cannot be expressed inline. The rotation therefore comes from a
+ * <style> the component renders beside itself, named uniquely so mounting two
+ * of them cannot collide.
+ * @returns the spinner.
+ */
+function Spinner(): ReactNode {
+  return (
+    <>
+      <style>{'@keyframes dsh-desktop-spin { to { transform: rotate(360deg) } }'}</style>
+      <span
+        aria-hidden="true"
+        style={{
+          display: 'inline-block',
+          width: '11px',
+          height: '11px',
+          marginRight: '6px',
+          verticalAlign: '-1px',
+          borderRadius: '50%',
+          border: '1.5px solid color-mix(in srgb, currentColor 25%, transparent)',
+          borderTopColor: 'currentColor',
+          animation: 'dsh-desktop-spin 700ms linear infinite',
+        }}
+      />
+    </>
   )
 }
 
@@ -214,24 +312,27 @@ function Switch({ checked, disabled, onToggle }: {
  * @returns the section content, or null until the launcher has answered.
  */
 function DesktopSettingsSection(): ReactNode {
-  const [view, setView] = useState<View | undefined>(undefined)
-  const [failed, setFailed] = useState(false)
-
-  useEffect(() => {
-    let live = true
-    void call('read').then((next) => {
-      if (!live) return
-      if (next === undefined) setFailed(true)
-      else setView(next)
-    })
-    return () => { live = false }
-  }, [])
+  const { view, failed, setView } = useDesktopView()
+  const [check, setCheck] = useState<'idle' | 'checking'>('idle')
+  const [checked, setChecked] = useState<UpdateCheck | undefined>(undefined)
 
   const patch = useCallback((change: Partial<DesktopSettings>) => {
     // Optimistic: the launcher is in-process and the write cannot conflict
     // with anyone, so waiting a round trip to move a switch only feels slow.
     setView((current) => (current === undefined ? current : { ...current, settings: { ...current.settings, ...change } }))
     void call('write', change).then((next) => { if (next !== undefined) setView(next) })
+  }, [])
+
+  const runCheck = useCallback(() => {
+    setCheck('checking')
+    setChecked(undefined)
+    // The route now waits for electron-updater to answer, so this promise is
+    // the check. It used to return 204 the instant the check started, which is
+    // why the button appeared to do nothing for up to thirty seconds.
+    void call<UpdateCheck>('check-updates').then((result) => {
+      setCheck('idle')
+      setChecked(result ?? { state: 'failed', message: 'The launcher did not answer.' })
+    })
   }, [])
 
   if (failed) {
@@ -270,6 +371,18 @@ function DesktopSettingsSection(): ReactNode {
             onSelect={(choice) => { patch({ mergedTitleBar: choice === 'merged' }) }}
           />
         </Row>
+        <Row
+          label="Snap to screen edges"
+          hint={view.canPositionWindow
+            ? 'Dragging the window near an edge or corner pulls it flush.'
+            : 'This session lets the compositor place windows, so the app cannot move its own.'}
+        >
+          <Switch
+            checked={settings.snapToEdges}
+            disabled={!view.canPositionWindow}
+            onToggle={(snapToEdges) => { patch({ snapToEdges }) }}
+          />
+        </Row>
         {pendingRestart.length === 0
           ? null
           : <div style={{ ...styles.notice, marginTop: '12px' }}>Restart DeepSeek Harness to apply the title bar change.</div>}
@@ -285,6 +398,19 @@ function DesktopSettingsSection(): ReactNode {
         </Row>
         <Row label="Finished turns" hint="Only while the window is in the background.">
           <Switch checked={settings.notifyTurns} onToggle={(notifyTurns) => { patch({ notifyTurns }) }} />
+        </Row>
+        <Row
+          label="Including subagent turns"
+          nested
+          hint={settings.notifyTurns
+            ? 'A subagent finishing is a step inside your turn, not the end of it.'
+            : 'Turn notifications are off, so this has nothing to add to.'}
+        >
+          <Switch
+            checked={settings.notifySubagentTurns}
+            disabled={!settings.notifyTurns}
+            onToggle={(notifySubagentTurns) => { patch({ notifySubagentTurns }) }}
+          />
         </Row>
       </section>
 
@@ -304,11 +430,462 @@ function DesktopSettingsSection(): ReactNode {
         >
           <Switch checked={settings.autoUpdate} disabled={updates === 'disabled'} onToggle={(autoUpdate) => { patch({ autoUpdate }) }} />
         </Row>
-        <Row label="Version" hint={`Harness ${view.harnessVersion}`}>
+        <Row
+          label="Version"
+          hint={checked === undefined ? `Harness ${view.harnessVersion}` : checked.message}
+        >
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <span style={{ ...styles.hint, opacity: 0.75 }}>{view.version}</span>
-            <button type="button" style={styles.button} onClick={() => { void call('check-updates') }}>Check now</button>
+            <button
+              type="button"
+              style={{ ...styles.button, opacity: check === 'checking' ? 0.55 : 1, cursor: check === 'checking' ? 'default' : 'pointer' }}
+              disabled={check === 'checking'}
+              aria-busy={check === 'checking'}
+              onClick={runCheck}
+            >
+              {check === 'checking' ? <><Spinner /> Checking…</> : 'Check now'}
+            </button>
           </div>
+        </Row>
+      </section>
+    </div>
+  )
+}
+
+/**
+ * Turn a keydown into an Electron accelerator.
+ *
+ * Electron's grammar, not the browser's: `CommandOrControl` so one stored chord
+ * means Cmd on macOS and Ctrl elsewhere, and `event.code` rather than
+ * `event.key` for the base key, because `key` is what the modifiers PRODUCED —
+ * Shift+2 arrives as "@" and Alt+D on macOS as "∂", neither of which Electron
+ * will register.
+ * @param event - the keydown to read.
+ * @returns the accelerator, or undefined while the chord is not usable yet.
+ */
+export function acceleratorFrom(event: {
+  code: string
+  ctrlKey: boolean
+  metaKey: boolean
+  altKey: boolean
+  shiftKey: boolean
+}): string | undefined {
+  const parts: string[] = []
+  if (event.ctrlKey || event.metaKey) parts.push('CommandOrControl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+
+  const { code } = event
+  let key: string | undefined
+  if (/^Key[A-Z]$/.test(code)) key = code.slice(3)
+  else if (/^Digit\d$/.test(code)) key = code.slice(5)
+  else if (/^F\d{1,2}$/.test(code)) key = code
+  else if (code === 'Space') key = 'Space'
+  else if (code === 'Enter') key = 'Return'
+  else if (code === 'Backquote') key = '`'
+  else if (code.startsWith('Arrow')) key = code.slice(5)
+  if (key === undefined) return undefined
+
+  // A bare letter registered globally would swallow that key everywhere on the
+  // machine. Function keys are the one exception people actually reach for.
+  if (parts.length === 0 && !/^F\d{1,2}$/.test(key)) return undefined
+  parts.push(key)
+  return parts.join('+')
+}
+
+/**
+ * How an accelerator reads on this platform.
+ * @param accelerator - the stored chord.
+ * @param mac - whether to use the Apple glyphs.
+ * @returns a display string.
+ */
+export function prettyAccelerator(accelerator: string, mac: boolean): string {
+  if (accelerator === '') return 'Off'
+  return accelerator
+    .split('+')
+    .map((part) => {
+      if (part === 'CommandOrControl') return mac ? '⌘' : 'Ctrl'
+      if (part === 'Alt') return mac ? '⌥' : 'Alt'
+      if (part === 'Shift') return mac ? '⇧' : 'Shift'
+      return part
+    })
+    .join(mac ? '' : '+')
+}
+
+/** Desktop actions that are fixed, listed so the page is the whole answer. */
+const FIXED_SHORTCUTS: readonly { keys: string, what: string }[] = [
+  { keys: 'Alt', what: 'Open the menu bar' },
+  { keys: 'CommandOrControl+R', what: 'Reload the window' },
+  { keys: 'CommandOrControl+Shift+I', what: 'Toggle developer tools' },
+  { keys: 'CommandOrControl+Q', what: 'Quit' },
+]
+
+/**
+ * The Shortcuts page.
+ *
+ * Only one shortcut is the launcher's to change. Everything else in the menus is
+ * a role-based item, which means the platform picks its accelerator and the
+ * native behaviour comes with the role — rebinding would mean giving that up.
+ * Those are listed read-only rather than hidden, because "what are this app's
+ * shortcuts" is the question the page exists to answer, and a page showing one
+ * row would look broken.
+ * @returns the section content.
+ */
+function ShortcutsSection(): ReactNode {
+  const { view, failed, setView } = useDesktopView()
+  const [recording, setRecording] = useState(false)
+  const recorder = useRef<HTMLButtonElement | null>(null)
+  const mac = useMemo(() => navigator.platform.toLowerCase().includes('mac'), [])
+
+  const write = useCallback((toggleAccelerator: string) => {
+    setView((current) => (current === undefined
+      ? current
+      : { ...current, settings: { ...current.settings, toggleAccelerator } }))
+    // Waiting for the launcher's answer matters here, unlike the switches: it
+    // reports whether the chord actually registered, and another application
+    // may already hold it.
+    void call('write', { toggleAccelerator }).then((next) => { if (next !== undefined) setView(next) })
+  }, [setView])
+
+  if (failed) {
+    return <div style={styles.notice}>Desktop settings are unavailable — this window is not running inside the desktop app.</div>
+  }
+  if (view === undefined) return null
+
+  const { settings } = view
+  const isDefault = settings.toggleAccelerator === view.defaultToggleAccelerator
+
+  return (
+    <div style={styles.page}>
+      <section>
+        <div style={styles.groupTitle}>Global</div>
+        <Row
+          label="Show or hide the window"
+          hint={settings.toggleAccelerator === ''
+            ? 'No chord set; the tray icon still brings the window back.'
+            : view.toggleAcceleratorActive
+              ? 'Works from any application, even while the window is hidden.'
+              : 'Another application already holds this chord, so it is not active.'}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              ref={recorder}
+              type="button"
+              style={{
+                ...styles.button,
+                minWidth: '128px',
+                borderColor: recording
+                  ? 'color-mix(in srgb, currentColor 55%, transparent)'
+                  : 'color-mix(in srgb, currentColor 22%, transparent)',
+                opacity: settings.toggleAccelerator === '' && !recording ? 0.6 : 1,
+              }}
+              aria-label="Record a new shortcut"
+              onClick={() => { setRecording(true) }}
+              onBlur={() => { setRecording(false) }}
+              onKeyDown={(event) => {
+                if (!recording) return
+                // Swallow everything while recording, so the chord being
+                // captured cannot also activate the button or move focus off it.
+                event.preventDefault()
+                event.stopPropagation()
+                if (event.code === 'Escape') { setRecording(false); return }
+                if (event.code === 'Backspace' || event.code === 'Delete') {
+                  setRecording(false)
+                  write('')
+                  return
+                }
+                const next = acceleratorFrom(event)
+                if (next === undefined) return
+                setRecording(false)
+                write(next)
+                recorder.current?.blur()
+              }}
+            >
+              {recording ? 'Press keys…' : prettyAccelerator(settings.toggleAccelerator, mac)}
+            </button>
+            <button
+              type="button"
+              style={{ ...styles.button, opacity: isDefault ? 0.4 : 1, cursor: isDefault ? 'default' : 'pointer' }}
+              disabled={isDefault}
+              onClick={() => { write(view.defaultToggleAccelerator) }}
+            >
+              Reset
+            </button>
+          </div>
+        </Row>
+        <div style={{ ...styles.hint, paddingTop: '10px' }}>
+          Click the chord, then press the keys you want. Escape cancels, Backspace turns it off.
+        </div>
+      </section>
+
+      <section>
+        <div style={styles.groupTitle}>Fixed</div>
+        <div style={{ ...styles.hint, paddingBottom: '4px' }}>
+          These come from the platform’s own menu roles, which is where their
+          behaviour comes from too, so the app does not rebind them.
+        </div>
+        {FIXED_SHORTCUTS.map((shortcut) => (
+          <Row key={shortcut.keys} label={shortcut.what}>
+            <span style={{ ...styles.hint, opacity: 0.75 }}>{prettyAccelerator(shortcut.keys, mac)}</span>
+          </Row>
+        ))}
+      </section>
+    </div>
+  )
+}
+
+/** How many weeks of daily history the grass shows. */
+const GRASS_WEEKS = 27
+
+/**
+ * The three cut points that split a chart's own values into four shades.
+ *
+ * Quantiles of the NON-ZERO values, not fractions of the peak. Fractions of the
+ * peak look right until the chart has real data in it: usage clusters, so on a
+ * week where every working day is somewhere between 20 and 26 turns, every one
+ * of them is above 75% of the peak and the whole calendar comes out the same
+ * flat maximum — measured, on the first run with data in it. Ranking the values
+ * instead guarantees the shades are actually used, whatever the scale.
+ *
+ * Empty days are excluded before ranking. They are the majority of most
+ * calendars, and including them would push every real value into the top band —
+ * the same washout by the other route.
+ * @param values - every value in the chart.
+ * @returns three ascending cut points; equal ones simply merge two bands.
+ */
+export function grassThresholds(values: readonly number[]): [number, number, number] {
+  const active = values.filter((value) => value > 0).sort((a, b) => a - b)
+  if (active.length === 0) return [0, 0, 0]
+  // Indexed across `length - 1`, so the top cut lands strictly below the
+  // maximum. Indexing across `length` put the largest value ON the top cut, and
+  // with the bands compared inclusively the busiest day came out one shade
+  // short of the darkest — which is the one cell a reader looks for.
+  const last = active.length - 1
+  const at = (fraction: number): number => active[Math.floor(last * fraction)] ?? 0
+  return [at(0.25), at(0.5), at(0.75)]
+}
+
+/**
+ * Which of five shades a count earns.
+ *
+ * Compared strictly, so a value sitting exactly on a cut falls in the band
+ * below it and the maximum always reaches the top.
+ * @param count - the bucket's value.
+ * @param thresholds - from {@link grassThresholds} for the same chart.
+ * @returns 0 for empty, then 1-4.
+ */
+export function grassLevel(count: number, thresholds: readonly [number, number, number]): number {
+  if (count <= 0) return 0
+  if (count > thresholds[2]) return 4
+  if (count > thresholds[1]) return 3
+  if (count > thresholds[0]) return 2
+  return 1
+}
+
+/**
+ * The five shades, as opacities of currentColor.
+ *
+ * Colour-free like the rest of this page, because the app ships a light theme
+ * and a dark one and the section inherits whichever is painting. Level 0 is a
+ * faint wash rather than nothing, so an empty day still reads as a cell — the
+ * grid's shape is what makes it legible as a calendar. The top stops short of
+ * full: at 88% on the dark theme the busiest cells glare against everything
+ * around them, which draws the eye to the maximum rather than to the pattern.
+ */
+const GRASS_SHADES = ['6%', '18%', '34%', '54%', '76%'] as const
+
+/**
+ * The local date keys for the grass, oldest first, aligned to whole weeks.
+ *
+ * Built by walking the calendar rather than adding 86,400,000ms, so a DST day
+ * does not shift every subsequent column by an hour and duplicate a key.
+ * @param today - the last day to include.
+ * @param weeks - how many columns.
+ * @returns `weeks * 7` keys, the last of which is today.
+ */
+export function grassDays(today: Date, weeks: number): string[] {
+  const days: string[] = []
+  // Finish the current week so today lands in the last column, then walk back.
+  const total = weeks * 7
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (total - 1))
+  for (let index = 0; index < total; index += 1) {
+    const at = new Date(start.getFullYear(), start.getMonth(), start.getDate() + index)
+    const month = String(at.getMonth() + 1).padStart(2, '0')
+    const day = String(at.getDate()).padStart(2, '0')
+    days.push(`${at.getFullYear()}-${month}-${day}`)
+  }
+  return days
+}
+
+/** One cell of either chart. */
+function GrassCell({ level, title, size }: { level: number, title: string, size: number }): ReactNode {
+  return (
+    <div
+      title={title}
+      style={{
+        width: `${size}px`,
+        height: `${size}px`,
+        borderRadius: '2px',
+        background: `color-mix(in srgb, currentColor ${GRASS_SHADES[level] ?? '6%'}, transparent)`,
+      }}
+    />
+  )
+}
+
+/** The shared legend, so both charts are read the same way. */
+function GrassLegend(): ReactNode {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', ...styles.hint }}>
+      <span>Less</span>
+      {GRASS_SHADES.map((shade, level) => <GrassCell key={shade} level={level} size={10} title="" />)}
+      <span>More</span>
+    </div>
+  )
+}
+
+/**
+ * The Usage page.
+ *
+ * The record is the launcher's, kept from the same event stream the
+ * notifications come off, and it only holds what has happened since the feature
+ * shipped — there is no back-fill, because the only place the history exists is
+ * inside every session's durable log and walking all of them to draw a graph
+ * would tie this page to upstream's log format. The page says so rather than
+ * showing an empty year and letting it read as a bug.
+ * @returns the section content.
+ */
+function UsageSection(): ReactNode {
+  const [usage, setUsage] = useState<Usage | undefined>(undefined)
+  const [failed, setFailed] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    void call<Usage>('usage').then((next) => {
+      if (!live) return
+      if (next === undefined) setFailed(true)
+      else setUsage(next)
+    })
+    return () => { live = false }
+  }, [])
+
+  const days = useMemo(() => grassDays(new Date(), GRASS_WEEKS), [])
+
+  if (failed) {
+    return <div style={styles.notice}>Usage is unavailable — this window is not running inside the desktop app.</div>
+  }
+  if (usage === undefined) return null
+
+  const dayCuts = grassThresholds(days.map((key) => usage.daily[key] ?? 0))
+  const hourCuts = grassThresholds(usage.hourly)
+  const minutes = Math.round(usage.totals.activeMs / 60_000)
+  const running = minutes < 90 ? `${minutes} minutes` : `${Math.round(minutes / 6) / 10} hours`
+  const started = usage.since === 0 ? undefined : new Date(usage.since)
+
+  return (
+    <div style={styles.page}>
+      <section>
+        <div style={styles.groupTitle}>By day</div>
+        {started === undefined
+          ? <div style={styles.notice}>Nothing recorded yet. This counts turns from the moment it is installed — there is no history to fill in from before that.</div>
+          : (
+            <div style={{ ...styles.hint, paddingBottom: '10px' }}>
+              {usage.totals.turns} turns over {usage.totals.days} days, {running} running.
+              Recording since {started.toLocaleDateString()}.
+            </div>
+          )}
+        <div style={{ overflowX: 'auto', paddingBottom: '4px' }}>
+          <div
+            role="img"
+            aria-label={`Turns per day over the last ${GRASS_WEEKS} weeks`}
+            style={{
+              display: 'grid',
+              // Columns are weeks and rows are days, so the grid flows down
+              // each week before moving right — which is what makes it read as
+              // a calendar rather than a strip.
+              gridTemplateRows: 'repeat(7, 11px)',
+              gridAutoFlow: 'column',
+              gridAutoColumns: '11px',
+              gap: '3px',
+              width: 'max-content',
+            }}
+          >
+            {days.map((key) => {
+              const count = usage.daily[key] ?? 0
+              const sub = usage.dailySubagent[key] ?? 0
+              const detail = sub === 0 ? '' : ` (+${sub} subagent)`
+              return (
+                <GrassCell
+                  key={key}
+                  size={11}
+                  level={grassLevel(count, dayCuts)}
+                  title={`${key} — ${count} turns${detail}`}
+                />
+              )
+            })}
+          </div>
+        </div>
+        <div style={{ paddingTop: '10px' }}><GrassLegend /></div>
+      </section>
+
+      <section>
+        <div style={styles.groupTitle}>By hour of day</div>
+        <div style={{ ...styles.hint, paddingBottom: '10px' }}>
+          Every day in the record, folded onto one clock — the same buckets the
+          calendar above sums, read the other way.
+        </div>
+        <div style={{ overflowX: 'auto', paddingBottom: '4px' }}>
+          <div style={{ display: 'flex', gap: '3px', width: 'max-content' }}>
+            {usage.hourly.map((count, hour) => (
+              <div key={hour} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                <GrassCell
+                  size={16}
+                  level={grassLevel(count, hourCuts)}
+                  title={`${String(hour).padStart(2, '0')}:00 — ${count} turns`}
+                />
+                {hour % 3 === 0
+                  ? <span style={{ ...styles.hint, fontSize: '10px' }}>{hour}</span>
+                  : <span style={{ fontSize: '10px' }}>&nbsp;</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style={styles.groupTitle}>Record</div>
+        <Row
+          label="Reset usage"
+          hint={confirming
+            ? 'This cannot be undone; the counts are only kept here.'
+            : `Throws away every count and starts again. Subagent turns counted separately: ${usage.totals.subagentTurns}.`}
+        >
+          {confirming
+            ? (
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  style={styles.button}
+                  onClick={() => {
+                    setConfirming(false)
+                    void call<Usage>('usage-reset').then((next) => { if (next !== undefined) setUsage(next) })
+                  }}
+                >
+                  Reset
+                </button>
+                <button type="button" style={styles.button} onClick={() => { setConfirming(false) }}>Cancel</button>
+              </div>
+            )
+            : (
+              <button
+                type="button"
+                style={{ ...styles.button, opacity: usage.since === 0 ? 0.4 : 1, cursor: usage.since === 0 ? 'default' : 'pointer' }}
+                disabled={usage.since === 0}
+                onClick={() => { setConfirming(true) }}
+              >
+                Reset
+              </button>
+            )}
         </Row>
       </section>
     </div>
@@ -318,28 +895,43 @@ function DesktopSettingsSection(): ReactNode {
 /** Required services: the slot registry lives on the client runtime. */
 export const inject = ['slots']
 
+/** The component behind each registered section id. */
+const SECTIONS: Record<string, () => ReactNode> = {
+  'desktop': DesktopSettingsSection,
+  'desktop-shortcuts': ShortcutsSection,
+  'desktop-usage': UsageSection,
+}
+
 /**
- * Contribute the Desktop Settings page.
+ * Contribute the three Desktop pages.
  * @param ctx - client root context.
  */
 export function apply(ctx: {
   slots: { register: (options: object, component: () => ReactNode) => () => void }
   effect: (execute: () => () => void, label?: string) => unknown
 }): void {
-  ctx.slots.register(
-    { name: 'settings.section', id: 'desktop', order: 100, label: 'Desktop Settings', registrant: '@dsh-desktop/settings' },
-    DesktopSettingsSection,
-  )
+  // Driven off DESKTOP_SECTIONS rather than written out, because the nav
+  // heading is placed by counting that many rows back from the end. Registering
+  // a section the list does not know about would leave the heading one row too
+  // low, and nothing would say so.
+  for (const section of DESKTOP_SECTIONS) {
+    const component = SECTIONS[section.id]
+    if (component === undefined) continue
+    ctx.slots.register(
+      { name: 'settings.section', ...section, registrant: '@dsh-desktop/settings' },
+      component,
+    )
+  }
   // Through ctx.effect, so unloading this plugin takes the rule with it —
-  // otherwise the divider would outlive the entry it belongs to and point at
-  // whichever section happened to end up last.
+  // otherwise the heading would outlive the entries it names and sit above
+  // whichever sections happened to end up last.
   ctx.effect(() => {
     const style = document.createElement('style')
     style.dataset.plugin = '@dsh-desktop/settings'
-    style.textContent = navDividerCss
+    style.textContent = navGroupCss
     document.head.append(style)
     return () => {
       style.remove()
     }
-  }, 'desktop-settings-nav-divider')
+  }, 'desktop-settings-nav-group')
 }

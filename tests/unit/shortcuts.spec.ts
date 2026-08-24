@@ -51,22 +51,61 @@ describe('installShortcuts', () => {
     // Another app holding the chord is an environment fact, not a
     // misconfiguration: the tray still toggles the window.
     register.mockReturnValue(false)
-    const stop = installShortcuts(windowStub({ visible: false, focused: false }).win)
+    const handle = installShortcuts(windowStub({ visible: false, focused: false }).win)
+    expect(handle.isActive()).toBe(false)
     unregister.mockClear()
-    stop()
+    handle.stop()
     expect(unregister).not.toHaveBeenCalled()
   })
 
   it('registers nothing when disabled with an empty accelerator', () => {
     register.mockClear()
-    installShortcuts(windowStub({ visible: true, focused: true }).win, '')
+    const handle = installShortcuts(windowStub({ visible: true, focused: true }).win, '')
     expect(register).not.toHaveBeenCalled()
+    expect(handle.isActive()).toBe(false)
   })
 
   it('unregisters exactly what it registered', () => {
     register.mockReturnValue(true)
-    const stop = installShortcuts(windowStub({ visible: true, focused: true }).win)
-    stop()
+    const handle = installShortcuts(windowStub({ visible: true, focused: true }).win)
+    expect(handle.isActive()).toBe(true)
+    handle.stop()
     expect(unregister).toHaveBeenCalledWith(DEFAULT_TOGGLE_ACCELERATOR)
+  })
+
+  it('releases the old chord before claiming the new one', () => {
+    // Rebinding while still holding the old chord would leave the OS routing
+    // both here, with nothing left that knows to unregister the first.
+    register.mockReturnValue(true)
+    const handle = installShortcuts(windowStub({ visible: true, focused: true }).win)
+    unregister.mockClear()
+    register.mockClear()
+    expect(handle.rebind('CommandOrControl+Shift+K')).toBe(true)
+    expect(unregister).toHaveBeenCalledWith(DEFAULT_TOGGLE_ACCELERATOR)
+    expect(register.mock.calls[0]![0]).toBe('CommandOrControl+Shift+K')
+    handle.stop()
+    expect(unregister).toHaveBeenLastCalledWith('CommandOrControl+Shift+K')
+  })
+
+  it('rebinding to empty releases without registering', () => {
+    register.mockReturnValue(true)
+    const handle = installShortcuts(windowStub({ visible: true, focused: true }).win)
+    unregister.mockClear()
+    register.mockClear()
+    expect(handle.rebind('')).toBe(false)
+    expect(unregister).toHaveBeenCalledWith(DEFAULT_TOGGLE_ACCELERATOR)
+    expect(register).not.toHaveBeenCalled()
+    expect(handle.isActive()).toBe(false)
+  })
+
+  it('survives an accelerator Electron refuses to parse', () => {
+    // A malformed chord is a bad preference, not a reason to stop the app.
+    register.mockReturnValue(true)
+    const handle = installShortcuts(windowStub({ visible: true, focused: true }).win)
+    register.mockImplementation(() => { throw new Error('Invalid accelerator') })
+    expect(handle.rebind('NotAKey+')).toBe(false)
+    expect(handle.isActive()).toBe(false)
+    register.mockReset()
+    register.mockReturnValue(true)
   })
 })

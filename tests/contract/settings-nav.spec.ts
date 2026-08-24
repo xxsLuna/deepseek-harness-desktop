@@ -13,7 +13,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { LOCALS_OWNER, MATCHED_LOCALS, SCOPING_SLOT } from '../../packages/settings/src/nav-divider.js'
+import { LOCALS_OWNER, MATCHED_LOCALS, SCOPING_SLOT } from '../../packages/settings/src/nav-group.js'
 
 const root = join(import.meta.dirname, '..', '..')
 const harnessRoot = join(root, 'build', 'harness')

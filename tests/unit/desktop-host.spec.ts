@@ -42,7 +42,18 @@ function harness(restartSidecar: () => Promise<void>) {
     harnessVersion: 'test',
     updatable: false,
     titleBarMergeable: true,
-    checkForUpdates: () => {},
+    canPositionWindow: true,
+    toggleAcceleratorActive: () => true,
+    checkForUpdates: async () => ({ state: 'up-to-date' as const, message: 'test' }),
+    usage: () => ({
+      since: 0,
+      daily: {},
+      dailySubagent: {},
+      hourly: Array.from({ length: 24 }, () => 0),
+      hourlySubagent: Array.from({ length: 24 }, () => 0),
+      totals: { turns: 0, subagentTurns: 0, activeMs: 0, days: 0 },
+    }),
+    resetUsage: () => {},
     restartSidecar,
   })
 
