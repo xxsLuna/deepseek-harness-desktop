@@ -62,6 +62,14 @@ What the app checks before a plugin lands on disk:
 - an extension has no runtime `dependencies` — there is no package manager to install them with
 - once written, an extension actually resolves — otherwise it is removed again rather than left looking installed
 
+**Disabling is separate from removing.** A disabled plugin stays installed and
+stays on disk — coming back costs no download and keeps whatever it had
+configured. Neither kind needed a new mechanism for it: an extension leaves
+`dsh.profile.bundles` while remaining a dependency, which is a state the loader
+already understands, and a skills plugin is renamed dot-prefixed, which the
+skill walk already skips. The second one works on plugins the marketplace never
+installed, too — the contract there is the directory layout, not a record.
+
 Installed plugins live under `~/.dsh`, outside the app, so an app update never removes them. Extensions are composed when the session server starts, so installing one asks you to restart; if one ever stops the app from starting, the next launch disables all of them, opens anyway, and the tab names the ones it dropped.
 
 A plugin runs inside the harness process with the same access to your files and shell that the agent has. The catalog is curated for that reason, and adding a source of your own is you taking that judgement on yourself.

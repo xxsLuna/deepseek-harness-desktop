@@ -455,20 +455,39 @@ export function apply(ctx, config) {
     // a dsh plugin is code the Loader composed at boot, so it is live only if
     // it was there when this process started. A Claude plugin is data the
     // provider re-reads on every lookup, so it is live the moment it is on disk.
-    /** @type {{name: string, version: string, kind: string, active: boolean, managed: boolean}[]} */
-    const entries = names.map((pkg) => ({
+    // Enumerated from `dependencies`, NOT from the bundle list, because those
+    // two are exactly what tell an enabled plugin from a disabled one: a
+    // disabled plugin is still a dependency and still on disk, it has simply
+    // left `dsh.profile.bundles` so nothing composes it. Listing from the
+    // bundles would make disabling look identical to uninstalling, with no way
+    // back from the tab.
+    const composed = new Set(names)
+    /** @type {{name: string, version: string, kind: string, active: boolean, enabled: boolean, managed: boolean}[]} */
+    const entries = Object.keys(dependencies).map((pkg) => ({
       name: pkg,
       version: dependencies[pkg] ?? 'unknown',
       kind: 'dsh',
       active: bootedWith.has(pkg),
+      enabled: composed.has(pkg),
       managed: true,
     }))
     for (const row of parseClaude(readClaudeRecord()).entries) {
-      entries.push({ name: row.name, version: row.version, kind: 'claude', active: true, managed: true })
+      const off = row.disabled === true
+      entries.push({
+        name: row.name,
+        version: row.version,
+        kind: 'claude',
+        // A disabled Claude plugin publishes nothing, so it is not active. An
+        // enabled one is live the moment it is on disk — no restart involved.
+        active: !off,
+        enabled: !off,
+        managed: true,
+      })
     }
-    const onDisk = new Set(names)
-    const restartRequired = entries.some((e) => e.kind === 'dsh' && !e.active)
-      || [...bootedWith].some((pkg) => !onDisk.has(pkg))
+    // A dsh row differs from the running tree in either direction: enabled but
+    // not composed at boot, or composed at boot and since disabled or removed.
+    const restartRequired = entries.some((e) => e.kind === 'dsh' && e.enabled && !e.active)
+      || [...bootedWith].some((pkg) => !composed.has(pkg))
     // What each Claude plugin actually contributes, grouped by the row it
     // belongs to. A refusal is the interesting half: it names a skill the
     // plugin ships that this app will not publish, and why.
@@ -513,7 +532,7 @@ export function apply(ctx, config) {
         const listed = new Set(entries.filter((e) => e.kind === 'claude').map((e) => e.name))
         for (const plugin of view.plugins) {
           if (listed.has(plugin.name)) continue
-          entries.push({ name: plugin.name, version: plugin.version, kind: 'claude', active: true, managed: false })
+          entries.push({ name: plugin.name, version: plugin.version, kind: 'claude', active: true, enabled: true, managed: false })
         }
         skillErrors.push(...view.errors)
       } catch (error) {
@@ -657,6 +676,25 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Where a Claude plugin's tree sits, published and parked.
+   *
+   * Disabling renames it dot-prefixed rather than recording a flag the walk
+   * would have to honour. `@dsh-desktop/claude-plugins` already skips
+   * dot-prefixed directories at every level — it has to, because this package
+   * unpacks into one — so the layout already has a way to say "not this one",
+   * and using it keeps the two packages sharing a directory contract instead of
+   * gaining an import. It also means a plugin nobody installed through the
+   * marketplace can be disabled the same way, by renaming it.
+   * @param {string} source - the catalog id it was installed from.
+   * @param {string} name - the plugin name.
+   * @returns {{ live: string, parked: string }} both absolute paths.
+   */
+  function claudePaths(source, name) {
+    const live = join(home, ...installPath(source, name))
+    return { live, parked: join(dirname(live), '.' + name) }
+  }
+
+  /**
    * POST /market/remove — forget it, then delete it.
    * @param {Request} req - the request.
    * @param {Response} res - the response.
@@ -673,7 +711,12 @@ export function apply(ctx, config) {
     // where a tree nothing lists would be invisible but still published.
     const claude = parseClaude(readClaudeRecord()).entries.find((one) => one.name === wanted)
     if (claude !== undefined) {
-      removeTree(join(home, ...installPath(claude.source, claude.name)))
+      // Both spellings: a disabled plugin is parked under a dot-prefixed name,
+      // and removing it has to take that one too or the tree survives its own
+      // record and becomes unreachable from the tab.
+      const where = claudePaths(claude.source, claude.name)
+      removeTree(where.live)
+      removeTree(where.parked)
       writeClaudeRecord(forgetClaude(readClaudeRecord(), wanted))
       claudePlugins?.refresh()
       return json(res, 200, { ok: true, kind: 'claude', restartRequired: false })
@@ -689,6 +732,73 @@ export function apply(ctx, config) {
       removeTree(join(modulesDir, ...wanted.split('/')))
     }
     json(res, 200, { ok: true, kind: 'dsh', restartRequired: true })
+  }
+
+  /**
+   * POST /market/enabled — keep a plugin installed but stop composing it.
+   *
+   * The difference from removing it is the whole point: nothing is downloaded
+   * again to come back, and whatever the plugin wrote stays where it is. The
+   * two kinds reach it by different routes because they are published by
+   * different mechanisms, and both reuse a switch that already existed rather
+   * than inventing a disabled-list nobody else reads.
+   * @param {Request} req - the request.
+   * @param {Response} res - the response.
+   */
+  async function setEnabled(req, res) {
+    const body = await readJson(req)
+    if (body === undefined) return json(res, 400, { ok: false, message: 'unreadable request' })
+    const wanted = typeof body.name === 'string' ? body.name : undefined
+    if (wanted === undefined) return json(res, 400, { ok: false, message: 'no package named' })
+    if (typeof body.enabled !== 'boolean') {
+      return json(res, 400, { ok: false, message: 'enabled must be true or false' })
+    }
+    const enabled = body.enabled
+
+    const record = readClaudeRecord()
+    const claude = parseClaude(record).entries.find((one) => one.name === wanted)
+    if (claude !== undefined) {
+      const where = claudePaths(claude.source, claude.name)
+      const from = enabled ? where.parked : where.live
+      const to = enabled ? where.live : where.parked
+      if (existsSync(from)) {
+        // The destination can only exist if a previous attempt died between the
+        // two steps. Clearing it is safe because the tree being moved in is the
+        // one the record points at.
+        removeTree(to)
+        renameSync(from, to)
+      } else if (!existsSync(to)) {
+        return json(res, 404, { ok: false, message: `${wanted} is recorded but its files are missing` })
+      }
+      // Recorded after the move, so a rename that throws leaves the flag
+      // describing where the tree actually is rather than where it was meant
+      // to go.
+      writeClaudeRecord(recordClaude(record, { ...claude, disabled: !enabled }))
+      // Live either way: the provider walks the disk on every lookup, and the
+      // walk is what the rename changed.
+      claudePlugins?.refresh()
+      return json(res, 200, { ok: true, kind: 'claude', enabled, restartRequired: false })
+    }
+
+    const { manifest } = readInstalled()
+    const dependencies = /** @type {Record<string, string>} */ (
+      typeof manifest.dependencies === 'object' && manifest.dependencies !== null ? manifest.dependencies : {}
+    )
+    const version = dependencies[wanted]
+    if (version === undefined) {
+      return json(res, 404, { ok: false, message: `${wanted} is not installed` })
+    }
+    if (!isPluginVersion(version)) {
+      return json(res, 409, { ok: false, message: `${wanted} is recorded at ${version}, which cannot be written back` })
+    }
+    // `bundle: false` keeps the package a dependency and drops it from
+    // `dsh.profile.bundles`, which is exactly "installed but not composed" —
+    // upstream's own reconcile already understands that state, so disabling is
+    // a write of a shape the loader was built to read rather than a new one.
+    writeProfileManifest(profileDir, addInstalled(manifest, wanted, version, { bundle: enabled }))
+    // Both directions need a restart: the tree is composed at boot, so neither
+    // dropping a row nor adding one back changes what is running.
+    json(res, 200, { ok: true, kind: 'dsh', enabled, restartRequired: true })
   }
 
   /**
@@ -726,6 +836,7 @@ export function apply(ctx, config) {
     { path: '/market/installed', methods: ['GET'], handler: (/** @type {Request} */ _req, /** @type {Response} */ res) => installed(res) },
     { path: '/market/install', methods: ['POST'], handler: install },
     { path: '/market/remove', methods: ['POST'], handler: remove },
+    { path: '/market/enabled', methods: ['POST'], handler: setEnabled },
     { path: '/market/sources', methods: ['GET', 'POST'], handler: sources },
   ]
 

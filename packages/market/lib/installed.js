@@ -87,6 +87,9 @@ export const DEFAULT_KIND = 'plugin'
  * @property {string} source - the id of the catalog it came from.
  * @property {string} kind - what was installed; `plugin` unless stated.
  * @property {string} path - where it landed, relative to `$DSH_HOME`, POSIX.
+ * @property {boolean} [disabled] - present and true while the plugin is kept
+ * but not published. The directory is renamed dot-prefixed so the skill walk
+ * skips it; this flag is what lets the tab still list it and offer it back.
  */
 
 /**
