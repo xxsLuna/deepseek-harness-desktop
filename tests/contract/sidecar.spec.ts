@@ -47,6 +47,29 @@ interface SocketResponse {
 }
 
 /** One request over the socket; for SSE, resolves after the first data chunk. */
+/**
+ * Pull the client boot manifest out of a served index.html.
+ *
+ * The injection FORM is upstream's and it moved: through 0.1.0-rc.8 the
+ * manifest arrived as `window.__DSH_BOOT__ = {...}` written by a raw index
+ * tap, and 0.1.1-rc.1 replaced that with a structured `global` injection row,
+ * which renders as `globalThis["__DSH_BOOT__"] = {...}`. Both set the same
+ * property on a page, so nothing in the app had to change — but our carrier
+ * had to grow `renderIndex` to render those rows at all, and this is where a
+ * further change to the vocabulary shows up.
+ *
+ * The property NAME is still asserted directly, because that is the part the
+ * page and `runSmoke` in main.ts actually read.
+ * @param body - the served index.html.
+ * @returns the plugin entry ids the manifest lists.
+ */
+function bootEntryIds(body: string): string[] {
+  expect(body).toContain('__DSH_BOOT__')
+  const manifest = /globalThis\["__DSH_BOOT__"\] = (\{[\s\S]*?\})<\/script>/.exec(body)
+  expect(manifest, 'the boot manifest is no longer a structured `global` injection row').not.toBeNull()
+  return (JSON.parse(manifest![1]!) as { entries: { id: string }[] }).entries.map((entry) => entry.id)
+}
+
 function socketRequest(socketPath: string, options: {
   path: string
   method?: string
@@ -224,11 +247,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   it('serves the UI with the boot manifest and the desktop connection row', async () => {
     const res = await socketRequest(socketPath, { path: '/' })
     expect(res.status).toBe(200)
-    expect(res.body).toContain('window.__DSH_BOOT__')
-    const manifest = /window\.__DSH_BOOT__ = (\{.*?\})<\/script>/.exec(res.body)
-    expect(manifest).not.toBeNull()
-    const graph = JSON.parse(manifest![1]!) as { entries: { id: string }[] }
-    const ids = graph.entries.map((e) => e.id)
+    const ids = bootEntryIds(res.body)
     expect(ids).toContain('@dsh-desktop/connection')
     expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
     expect(ids).not.toContain('@deepseek-ai/dsh-client-hmr')
@@ -346,8 +365,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // a WebSocket carrier the app scheme cannot serve, or restore an OS chooser
     // this process cannot bring to the front.
     const graph = await socketRequest(socketPath, { path: '/' })
-    const manifest = /window\.__DSH_BOOT__ = (\{.*?\})<\/script>/.exec(graph.body)
-    const ids = (JSON.parse(manifest![1]!) as { entries: { id: string }[] }).entries.map((e) => e.id)
+    const ids = bootEntryIds(graph.body)
     expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
     expect(ids).toContain('@dsh-desktop/connection')
     // The picker must be ours, i.e. the native interaction served by the
