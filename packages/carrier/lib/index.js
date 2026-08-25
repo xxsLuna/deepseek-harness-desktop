@@ -13,10 +13,12 @@ import { chmodSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { renderIndexInjections } from '@deepseek-ai/dsh-host-webserver'
 
 /**
  * @typedef {import('@deepseek-ai/dsh-host-webserver').WebRoute} WebRoute
  * @typedef {import('@deepseek-ai/dsh-host-webserver').WebUpgradeRoute} WebUpgradeRoute
+ * @typedef {import('@deepseek-ai/dsh-host-webserver').IndexInjection} IndexInjection
  */
 
 /** @typedef {{ socketPath: string, token: string }} Config */
@@ -121,6 +123,44 @@ export class DesktopCarrier extends Service {
     return out
   }
 
+  /**
+   * Gather the structured injection table: one `webserver/index-inject` emit,
+   * every subscriber pushes its current rows.
+   *
+   * Fresh per call by contract, because subscribers read live state at emit
+   * time — `dsh-client-modules` publishes the module graph and
+   * `dsh-client-ui-theme` the theme preference, and both change while the app
+   * runs.
+   * @returns {IndexInjection[]} rows in subscriber activation order.
+   */
+  collectIndexInjections() {
+    /** @type {IndexInjection[]} */
+    const table = []
+    this.ctx.emit('webserver/index-inject', table)
+    return table
+  }
+
+  /**
+   * Render one index.html body: structured rows first, then the raw taps.
+   *
+   * This is what the SPA fallback owner calls for every index response, and it
+   * is the reason this class cannot simply stop at `applyIndexTaps`. Upstream
+   * added the structured layer in 0.1.1-rc.1; before that the fallback called
+   * `applyIndexTaps` directly. A provider standing in for the upstream
+   * `webServer` has to grow with that interface, and the cost of not doing so
+   * is not a missing feature — the call throws, and every page load answers
+   * with the carrier's error status instead of the app.
+   *
+   * The row renderer is imported from upstream rather than reimplemented.
+   * Escaping and placement are its rules, and a second copy of them here would
+   * be a second thing to keep in step.
+   * @param {string} html - raw index.html body.
+   * @returns {string} the transformed body.
+   */
+  renderIndex(html) {
+    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections()))
+  }
+
   /** Bind the socket; resolves once listening (rejection = FAILED fiber). */
   async [Service.init]() {
     const { socketPath, token } = this._config
@@ -158,13 +198,23 @@ export class DesktopCarrier extends Service {
 
     this._server = createServer((req, res) => {
       handle(req, res).catch((err) => {
-        this.ctx.logger.warn(err instanceof Error ? err : new Error(String(err)))
+        const error = err instanceof Error ? err : new Error(String(err))
+        // 500, not 400. A route handler that throws is this server's fault,
+        // and answering "bad request" sends whoever is debugging it looking at
+        // their own request. That cost real time once: upstream grew a method
+        // this provider did not have, every page load threw, and the only
+        // evidence was an empty 400 that read like a malformed URL.
+        //
+        // The message goes in the body for the same reason. Nothing here is
+        // reachable without the launcher's bearer token, so there is no
+        // untrusted reader to leak it to.
+        this.ctx.logger.error(error)
         if (res.headersSent) {
           res.destroy()
           return
         }
-        res.writeHead(400)
-        res.end()
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(`carrier: ${req.method ?? 'GET'} ${req.url ?? '/'} failed: ${error.message}`)
       })
     })
 
