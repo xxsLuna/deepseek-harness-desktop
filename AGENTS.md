@@ -471,6 +471,16 @@ It does **not** cover these, and each one fails with no error:
 - **Row ids patched by id** — warned and skipped upstream. See the check above.
 - **`DSH_TELEMETRY_DISABLED`** — fails open if `session-telemetry-otel` is
   renamed. A privacy switch.
+- **The `webServer` service surface** — the patch disables upstream's
+  `webserver` row and `@dsh-desktop/carrier` provides the service instead, so
+  upstream ADDING a method is a break that nothing at boot notices. 0.1.1-rc.1
+  added `renderIndex`/`collectIndexInjections` and moved the SPA fallback onto
+  the first; against a carrier without it every page load threw and the server
+  answered an empty error while the sidecar reported ready.
+  `tests/contract/carrier-surface.spec.ts` reads the method list out of
+  upstream's own declaration and compares it against the carrier's prototype,
+  so the next addition fails by name. Adding a method to the carrier without
+  adding it to `PROVIDER_SURFACE` there is the way to defeat it.
 - **Notification event vocabulary** — `src/notifications.ts` switches on upstream
   frame `type` strings and field names (`approval/requested`, `approvalId`,
   `host/session-status`). A rename kills toasts and the approval badge quietly,
