@@ -23,6 +23,7 @@
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const harnessRoot = join(import.meta.dirname, '..', '..', 'build', 'harness')
@@ -30,54 +31,67 @@ const modules = join(harnessRoot, 'node_modules')
 const require = createRequire(join(modules, 'x.js'))
 
 /**
- * Methods of upstream's own WebServer that a provider has to implement.
+ * Names on upstream's WebServer prototype that a provider does NOT have to
+ * mirror.
  *
- * Read off the class prototype rather than the declaration file, because the
- * declaration is what upstream INTENDS and the prototype is what its callers
- * actually reach for. `port` and `host` are accessors and land on the prototype
- * too, so they are included deliberately.
+ * An EXCLUSION list, deliberately, and the polarity is the whole point: a
+ * method upstream adds tomorrow defaults to "the carrier must provide this"
+ * rather than to being silently ignored. Anything added here needs a reason
+ * written next to it.
  */
-const PROVIDER_SURFACE: readonly string[] = [
-  'register', 'registerUpgrade', 'registerFallback',
-  'tapIndex', 'applyIndexTaps', 'collectIndexInjections', 'renderIndex',
-]
+const NOT_A_PROVIDER_CONCERN: ReadonlySet<string> = new Set([
+  'constructor',
+  // Upstream's internal route dispatch, declared `private`. Ours is `_match`;
+  // a provider is free to route however it likes so long as the public
+  // methods behave.
+  'match',
+])
+
+/** Load a module by absolute path, on a platform whose separators are not URL-safe. */
+async function importFile(path: string): Promise<Record<string, unknown>> {
+  return await import(pathToFileURL(path).href) as Record<string, unknown>
+}
 
 describe.skipIf(!existsSync(harnessRoot))('the webServer surface', () => {
-  it('is provided in full by the carrier', async () => {
-    const upstream = require(join(modules, '@deepseek-ai', 'dsh-host-webserver', 'package.json')) as { version: string }
-    const carrier = await import(
-      `file://${join(modules, '@dsh-desktop', 'carrier', 'lib', 'index.js').replaceAll('\\', '/')}`) as {
-        DesktopCarrier: new (...args: never[]) => unknown
-      }
-    const provided = carrier.DesktopCarrier.prototype as Record<string, unknown>
+  it('is provided in full by the carrier, method for method', async () => {
+    // Compared against upstream's RUNTIME prototype rather than its declaration
+    // file. Two reasons, and the first is not a preference: `prune-payload`
+    // strips every `.d.ts` from the shipped tree, and CI prunes before running
+    // this suite, so a test that reads the declaration passes locally and fails
+    // on the tree the installer actually contains. The second is that the
+    // prototype is what upstream's callers reach for; the declaration is what
+    // upstream intends.
+    const upstreamPath = join(modules, '@deepseek-ai', 'dsh-host-webserver', 'lib', 'index.js')
+    const version = (require(join(modules, '@deepseek-ai', 'dsh-host-webserver', 'package.json')) as { version: string }).version
+    const upstream = (await importFile(upstreamPath)).WebServer as { prototype: object }
+    const carrier = ((await importFile(join(modules, '@dsh-desktop', 'carrier', 'lib', 'index.js')))
+      .DesktopCarrier as { prototype: object })
 
-    for (const method of PROVIDER_SURFACE) {
-      expect(typeof provided[method], `@dsh-desktop/carrier is missing ${method}(), which upstream ${upstream.version} callers use`)
-        .toBe('function')
+    const required = Object.getOwnPropertyNames(upstream.prototype)
+      .filter((name) => !NOT_A_PROVIDER_CONCERN.has(name))
+    // Sanity: if this ever comes back near-empty the comparison is vacuous.
+    expect(required.length).toBeGreaterThan(5)
+
+    for (const name of required) {
+      const theirs = Object.getOwnPropertyDescriptor(upstream.prototype, name)
+      const ours = Object.getOwnPropertyDescriptor(carrier.prototype, name)
+      expect(ours, `@dsh-desktop/carrier is missing ${name}, which upstream ${version} has`).toBeDefined()
+      // An accessor upstream exposes has to stay an accessor here: `port` and
+      // `host` are read as properties by upstream callers, not called.
+      if (theirs?.get !== undefined) {
+        expect(typeof ours?.get, `${name} must be an accessor on the carrier too`).toBe('function')
+      } else {
+        expect(typeof ours?.value, `${name} must be a method on the carrier`).toBe('function')
+      }
     }
   })
 
-  it('names every method upstream declares, so a new one cannot slip in', () => {
-    // The list above is ours; this is the check that it is still complete.
-    // Upstream's declaration file is the source: anything public on it that a
-    // provider must satisfy has to appear in PROVIDER_SURFACE, or the previous
-    // assertion is only testing the methods we already thought of.
-    const declaration = join(modules, '@deepseek-ai', 'dsh-host-webserver', 'lib', 'types', 'index.d.ts')
-    expect(existsSync(declaration), 'upstream moved its webServer declaration').toBe(true)
-    const source = require('node:fs').readFileSync(declaration, 'utf8') as string
-
-    // Method signatures at one level of indentation inside the class body,
-    // excluding the private ones and the Service.init symbol.
-    // `constructor` is how the class is built, not part of the surface a
-    // provider satisfies — ours extends cordis's Service and takes its own
-    // config. `[Service.init]()` and `private match;` are excluded by the
-    // pattern itself.
-    const declared = [...source.matchAll(/^ {4}([a-z][A-Za-z]*)\(/gm)]
-      .map((match) => match[1] as string)
-      .filter((name) => name !== 'constructor')
-    const missing = declared.filter((name) => !PROVIDER_SURFACE.includes(name))
-    expect(missing, `upstream declares webServer method(s) the carrier does not implement: ${missing.join(', ')}`)
-      .toEqual([])
+  it('implements the service init symbol cordis calls to bind the socket', async () => {
+    const carrier = ((await importFile(join(modules, '@dsh-desktop', 'carrier', 'lib', 'index.js')))
+      .DesktopCarrier as { prototype: object })
+    const init = Object.getOwnPropertySymbols(carrier.prototype)
+      .find((symbol) => symbol.description === 'cordis.init')
+    expect(init, 'the carrier no longer implements [Service.init]').toBeDefined()
   })
 
   it('renders structured rows before the raw taps, in that order', async () => {
@@ -85,10 +99,9 @@ describe.skipIf(!existsSync(harnessRoot))('the webServer surface', () => {
     // a row produced only works if rows render first. Asserted against the
     // carrier's own renderIndex with a stub context, so this holds without
     // booting the harness.
-    const carrier = await import(
-      `file://${join(modules, '@dsh-desktop', 'carrier', 'lib', 'index.js').replaceAll('\\', '/')}`) as {
-        DesktopCarrier: { prototype: Record<string, (...args: never[]) => unknown> }
-      }
+    const carrier = (await importFile(join(modules, '@dsh-desktop', 'carrier', 'lib', 'index.js'))) as {
+      DesktopCarrier: { prototype: Record<string, (...args: never[]) => unknown> }
+    }
     const seen: string[] = []
     const self = {
       ctx: {
