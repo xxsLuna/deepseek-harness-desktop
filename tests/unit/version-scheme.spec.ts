@@ -11,6 +11,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+// electron-updater's own semver, so the channel this reads is the one
+// GitHubProvider reads when it decides whether to offer a tag.
+import { prerelease } from 'semver'
 import { isNewerVersion } from '../../src/update-gate.js'
 
 /** The version this working tree would ship, straight from the manifest. */
@@ -41,7 +44,7 @@ const PRE_SCHEME = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3', '0.1.0-rc.7-1'
  * has to keep exactly one release behind. Adding the current version used to
  * fail the reachability check, since nothing is newer than itself.
  */
-const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1']
+const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0']
 
 /** `0.1.0-desktop-v<ours>.<upstream rc>.<our build>` */
 const version = (ours: number, upstream: number, build: number): string =>
@@ -49,10 +52,20 @@ const version = (ours: number, upstream: number, build: number): string =>
 
 describe('the shipping version', () => {
   it('is the shape the scheme describes', () => {
-    // 0.1.0 is upstream's own version and stays put — the desktop build is
-    // tracked entirely inside the pre-release part, so the number in front
-    // still says which harness this is.
-    expect(shipping).toMatch(/^0\.1\.0-desktop-v\d+\.\d+\.\d+$/)
+    // The number in front is upstream's own, so it MOVES when upstream's does
+    // — it is never ours to invent, and it is not frozen. This read `0.1.0`
+    // literally while upstream stayed there, which held until upstream shipped
+    // 0.1.1.
+    //
+    // Moving it is not cosmetic. The second pre-release field is upstream's rc
+    // number, and 0.1.1 restarted that count at 1: keeping `0.1.0` in front
+    // would have made `0.1.0-desktop-v0.2.0` compare OLDER than the shipped
+    // `0.1.0-desktop-v0.8.1` (2 < 8) and reached nobody. The leading number is
+    // what carries the ordering across an upstream minor bump.
+    expect(shipping).toMatch(/^\d+\.\d+\.\d+-desktop-v\d+\.\d+\.\d+$/)
+    // The channel is the first pre-release identifier and must not drift:
+    // electron-updater offers a tag only to installs on the same channel.
+    expect(prerelease(shipping)?.[0]).toBe('desktop-v0')
   })
 
   it('is reachable from every earlier release published under this scheme', () => {
@@ -70,12 +83,26 @@ describe('the shipping version', () => {
     expect(PUBLISHED, `add '${shipping}' to PUBLISHED when its release is published`).toContain(shipping)
   })
 
-  it('is not reachable from the pre-scheme releases, by design', () => {
-    // Asserted rather than merely documented: if this ever starts passing, the
-    // scheme has drifted back into the rc line and the ordering guarantees
-    // below no longer describe what ships.
+  it('is fenced from the pre-scheme releases by the CHANNEL, not by the comparator', () => {
+    // This assertion used to read "not reachable", and it held for an
+    // incidental reason: while the leading number stayed 0.1.0, `desktop-v0`
+    // sorted below `rc` and the comparator said no. Upstream's move to 0.1.1
+    // ends that — 0.1.1 beats 0.1.0 before the pre-release part is even read.
+    //
+    // What actually strands those installs is the channel, which is the first
+    // pre-release identifier: electron-updater's GitHubProvider selects a tag
+    // only when its channel equals the running build's, so an `rc` install
+    // never sees a `desktop-v0` tag however semver ranks it. That was always
+    // the real fence; the comparator agreeing was a coincidence of the
+    // numbers, and pinning a coincidence is how a test starts lying.
+    //
+    // The remaining effect is on the macOS notify path, which is the only
+    // thing isNewerVersion drives: an unsigned macOS build still on an `rc`
+    // release is now TOLD a newer version exists. That is true, and pointing
+    // it at the releases page is better than silence.
     for (const old of PRE_SCHEME) {
-      expect(isNewerVersion(shipping, old), `${shipping} vs ${old}`).toBe(false)
+      expect(prerelease(old)?.[0], `${old} is not on the retired rc channel`).toBe('rc')
+      expect(prerelease(shipping)?.[0]).not.toBe(prerelease(old)?.[0])
     }
   })
 })
