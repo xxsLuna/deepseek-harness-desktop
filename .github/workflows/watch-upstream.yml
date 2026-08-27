@@ -70,7 +70,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LATEST: ${{ steps.versions.outputs.latest }}
           PR_BODY: |
-            Automated bump: `harness.json` and `package.json` now pin the latest published harness.
+            `package.json` carries the release version `scripts/release-version.mjs` derives from the pin — upstream's core and rc number, with the scheme number carried across unchanged. That number is electron-updater's channel, so moving it strands the installed base for a release and stays a migration someone announces by hand. The new version is recorded in `PUBLISHED` as well, so the next bump is compared against it.
 
             The build workflow on this PR re-runs the sidecar contract suite and five-target packaging against the new version. Green checks mean the coupling contracts held; a red check names the exact seam that changed.
         run: |
@@ -81,22 +81,25 @@ jobs:
           git config user.name "Luna"
           git config user.email "xxs.main@gmail.com"
           git switch -c "$BRANCH"
-          node -e '
-            const fs = require("fs")
-            const latest = process.env.LATEST
-            const pin = JSON.parse(fs.readFileSync("harness.json", "utf8"))
-            pin.harness = latest
-            fs.writeFileSync("harness.json", JSON.stringify(pin, null, 2) + "\n")
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"))
-            pkg.version = latest
-            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n")
-          '
-          git add harness.json package.json
+          # Writes all three files the cut touches. This used to write upstream's
+          # bare version into package.json, which the scheme rejects — so the PR
+          # arrived red on version-scheme.spec.ts every time and waited on the
+          # same two hand edits before its checks said anything about the
+          # harness. Deriving instead needs no dependency, which is why there is
+          # no install step above. stdout is the release version, nothing else.
+          RELEASE=$(node scripts/release-version.mjs "$LATEST")
+          git add harness.json package.json tests/unit/version-scheme.spec.ts
           git commit -m "Track upstream @deepseek-ai/dsh $LATEST"
           git push -u origin "$BRANCH"
           gh label create upstream-bump --color 0E8A16 --description "Automated harness version bump" 2>/dev/null || true
+          # Built as a file so the body can keep its backticks without fighting
+          # shell quoting for them.
+          {
+            printf 'Automated bump: pinned `%s`, shipping as `%s`.\n\n' "$LATEST" "$RELEASE"
+            printf '%s\n' "$PR_BODY"
+          } > "$RUNNER_TEMP/pr-body.md"
           gh pr create \
             --base dev \
             --title "Track upstream @deepseek-ai/dsh $LATEST" \
             --label upstream-bump \
-            --body "$PR_BODY"
+            --body-file "$RUNNER_TEMP/pr-body.md"
