@@ -38,11 +38,11 @@ const PRE_SCHEME = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3', '0.1.0-rc.7-1'
 /**
  * Releases published under the current scheme, newest last.
  *
- * Append a version when its release is published — not at the next bump. The
- * assertions read the shipping version from package.json and skip its own entry,
- * so this stays a plain record of what is out there rather than a list someone
- * has to keep exactly one release behind. Adding the current version used to
- * fail the reachability check, since nothing is newer than itself.
+ * The upstream bump appends to this in the same commit that writes the version
+ * (`scripts/release-version.mjs`), so the list never lags a release behind. That
+ * is only possible because the assertions read the shipping version from
+ * package.json and skip its own entry — adding the current version used to fail
+ * the reachability check, since nothing is newer than itself.
  */
 const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0']
 
@@ -75,12 +75,12 @@ describe('the shipping version', () => {
     }
   })
 
-  it('is listed in PUBLISHED once its release is out', () => {
+  it('is listed in PUBLISHED', () => {
     // The list is the guard for the NEXT bump, and it is only useful if cutting
-    // a release actually appends to it. Asserting it here means a bump that
-    // forgets fails a test rather than silently shipping a version the next one
-    // is never compared against.
-    expect(PUBLISHED, `add '${shipping}' to PUBLISHED when its release is published`).toContain(shipping)
+    // a release actually appends to it. The automated bump does. Asserting it
+    // here is what still catches a cut made by hand — and an automated one whose
+    // rewrite of that line matched nothing and moved on.
+    expect(PUBLISHED, `add '${shipping}' to PUBLISHED; scripts/release-version.mjs does this for an automated bump`).toContain(shipping)
   })
 
   it('is fenced from the pre-scheme releases by the CHANNEL, not by the comparator', () => {
