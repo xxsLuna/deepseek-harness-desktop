@@ -227,9 +227,19 @@ ordered pair over a wide sweep.
 
 Rules that follow:
 
-- **The automated bump PR writes the bare upstream version** into `package.json`.
-  That is not a version this scheme accepts. Correct it by hand; the unit suite
-  fails on the shape if you forget.
+- **The automated bump PR derives the release version** rather than copying
+  upstream's. `scripts/release-version.mjs`, run from `watch-upstream.yml`,
+  takes upstream's core and rc number, carries the scheme number across
+  unchanged, and puts the build counter back to `0` — then records the result in
+  `PUBLISHED`. So the bump PR arrives green instead of red on the two edits that
+  used to be left for a human. It carries no dependency on purpose: the watch
+  job has no install step, and `semver` is a devDependency.
+- **Deriving is not the same as deciding.** The script refuses rather than
+  guesses when upstream publishes a shape the scheme cannot express (a stable
+  release, with no rc number to put in that field), and when the version it
+  derives would not outrank what ships. Both fail the watch job by name. A
+  release cut by hand still owes all three edits, and the unit suite fails on
+  each of them separately.
 - **Only the root `package.json` carries the release version.** electron-builder
   reads it; everything at runtime goes through `app.getVersion()` or
   `harness.json`. The `packages/*` manifests are not maintained and drift.
