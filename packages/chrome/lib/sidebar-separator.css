@@ -1,0 +1,85 @@
+
+/*
+ * macOS only, and only while the sidebar is collapsed: keep the column's fill
+ * out of the band.
+ *
+ * The platform floats its traffic lights over the band's leading edge, at
+ * x=14 through x=66. Expanded, the sidebar is 280px and they sit well inside
+ * it — nothing to correct, and this rule does not apply. Collapsed, it is a
+ * 56px rail, so the boundary between the sidebar's fill and the content runs
+ * straight up between the yellow light and the green one.
+ *
+ * The visible boundary is the two FILLS meeting, not the 1px separator drawn
+ * over it: removing the hairline alone leaves the edge exactly as it was
+ * (measured, after trying it). So the column is covered, over the band, with
+ * the colour the band is painted where nothing of the sidebar's reaches —
+ * `--dsh-band-fill`, hit-tested and republished on every theme change by the
+ * page script. Nothing is faked and no colour is stated here.
+ *
+ * Painted as a background layer rather than a mask: a mask applies to the
+ * element's CONTENT as well, and the rail's first icon sits close enough to
+ * the band to come out visibly faded. A background layer paints above the
+ * column's own fill and below everything in it.
+ *
+ * The cover fades out a band-height BELOW the band rather than stopping at its
+ * edge: a hard stop trades the vertical boundary for a horizontal one, and the
+ * eye catches that just as readily.
+ *
+ * Layer one is the separator itself, moved off the border so it can start
+ * below the band with the fill. Its colour is derived, never stated:
+ * `currentColor` is the column's own text colour, so the hairline tracks both
+ * themes as the border it replaces did, and 6% is that border's own alpha.
+ * `background-origin` is load-bearing — the default padding-box would land it
+ * a pixel inside the border box the transparent border still reserves.
+ *
+ * `data-dsh-rail-under-controls` is published by the page script from the same
+ * measurement that parks the navigation buttons: the sidebar's trailing edge
+ * against the `lead` the platform's controls occupy. It cannot be baked,
+ * because it is the collapse state rather than a platform decision.
+ *
+ * Fullscreen collapses --dsh-title-band to zero, which is correct here without
+ * a rule of its own: no band, no traffic lights, and the fill runs to the top
+ * again.
+ */
+:root[data-dsh-rail-under-controls] [class*="_sidebarCol"] {
+  border-right-color: transparent !important;
+  background-image:
+    linear-gradient(
+      to bottom,
+      transparent var(--dsh-title-band),
+      color-mix(in srgb, currentColor 6%, transparent) var(--dsh-title-band)
+    ),
+    linear-gradient(
+      to bottom,
+      var(--dsh-band-fill, transparent) var(--dsh-title-band),
+      transparent calc(var(--dsh-title-band) * 2)
+    ) !important;
+  background-origin: border-box, border-box !important;
+  background-repeat: no-repeat, no-repeat !important;
+  background-position: right top, left top !important;
+  background-size: 1px 100%, 100% 100% !important;
+}
+
+/*
+ * The column's own background stops being visible at the band edge: the rail
+ * paints its fill from there down, over it. So the fade continues on that
+ * child, in its own coordinates — solid where it meets the band, gone a
+ * band-height later, which lines the two layers up into one ramp.
+ *
+ * Matched by upstream's own local, not by position: `_railIn` is the class the
+ * sidebar carries exactly while it is drawn as a rail, so it names the state
+ * this rule is for and matches the one element that paints the fill. A
+ * structural path would have been a silent failure on any wrapper upstream
+ * adds; this one is asserted in tests/contract/sidecar.spec.ts, so a rename
+ * fails by name.
+ */
+:root[data-dsh-rail-under-controls] [class*="_sidebarCol"] [class*="_railIn"] {
+  background-image: linear-gradient(
+    to bottom,
+    var(--dsh-band-fill, transparent),
+    transparent var(--dsh-title-band)
+  ) !important;
+  background-repeat: no-repeat !important;
+  background-position: left top !important;
+  background-size: 100% 100% !important;
+}

@@ -96,6 +96,12 @@
       // otherwise land at x=62, inside macOS's traffic lights.
       const floor = controls.getBoundingClientRect().right
       root.style.setProperty('--dsh-title-nav-x', `${String(Math.round(Math.max(edge, floor)))}px`)
+      // The same comparison answers a second question the stylesheet asks:
+      // whether the platform's own controls overhang the sidebar. They do only
+      // when it is collapsed to its rail, and only then does its fill need to
+      // stay out of the band — expanded, the controls sit well inside it and
+      // the column is left exactly as upstream draws it.
+      root.toggleAttribute('data-dsh-rail-under-controls', edge < floor)
     }
 
     // The sidebar resizing IS the collapse, so one observer covers the rail
@@ -133,10 +139,21 @@
     const y = Math.min(Math.max(height / 2, 1), height - 1)
     for (const el of document.elementsFromPoint(Math.max(window.innerWidth - 20, 1), y)) {
       if (el.id === 'dsh-drag-strip' || el.closest('#dsh-drag-strip') !== null) continue
+      // Never the document's own canvas. Before the UI has painted anything
+      // these are all that is under the band, and their colour is the browser
+      // default rather than the app's — read at startup it gave white in a dark
+      // window. Refusing them returns null, which leaves the colour unpublished
+      // and the stylesheet on its `transparent` fallback until the UI is up.
+      if (el === document.documentElement || el === document.body) continue
       const parts = getComputedStyle(el).backgroundColor.match(/[\d.]+/g)
       if (parts === null || parts.length < 3) continue
       // See-through: whatever is behind it is what shows, so keep looking.
-      if (parts.length > 3 && Number(parts[3]) < 0.5) continue
+      // Fully opaque, not merely mostly: a modal scrim is rgba(0,0,0,0.5) and
+      // covers the whole window, and `< 0.5` let it through — so opening
+      // Settings, which is where the theme is changed, published black as the
+      // band's colour for as long as the dialog stood. A tint over the surface
+      // is not the surface.
+      if (parts.length > 3 && Number(parts[3]) < 1) continue
       return parts.map(Number)
     }
     return null
@@ -153,18 +170,41 @@
     const paint = bandPaint()
     if (paint === null) return
     const [r, g, b] = paint
+    // The same reading answers the stylesheet's question too: what the band is
+    // painted where nothing of the sidebar's covers it. A collapsed sidebar's
+    // own fill is lighter, and its edge would run up between the traffic
+    // lights, so the sheet fades this colour over the column's top. Published
+    // from here because this is where the painted colour is already known, and
+    // it is re-read on every theme and resize change below.
+    root.style.setProperty('--dsh-band-fill', `rgb(${String(r)}, ${String(g)}, ${String(b)})`)
     // Rec. 601 luma is enough to pick between two glyph colours.
     const next = (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.5 ? 'light' : 'dark'
     if (next === scheme) return
     scheme = next
     ask('scheme', { scheme: next })
   }
-  publishScheme()
+  /**
+   * Read once now, then again once the change has settled.
+   *
+   * A theme swap is not atomic: sampled on the mutation itself, the point under
+   * the band can still be mid-change, and one such reading was black. That was
+   * harmless while the sample only chose between two glyph colours — a wrong
+   * one is replaced by the next reading — but `--dsh-band-fill` is painted, so
+   * a transient would stick until something else moved. The frame covers a
+   * visible window; the timer covers a hidden one, where frames do not come.
+   */
+  const publishSchemeSettled = () => {
+    publishScheme()
+    requestAnimationFrame(publishScheme)
+    setTimeout(publishScheme, 300)
+  }
+  publishSchemeSettled()
+
   // The theme changes from the UI's own settings and, on "system", from the OS;
   // the element under the band changes when the window is resized.
-  new MutationObserver(publishScheme).observe(root, { attributes: true })
-  new MutationObserver(publishScheme).observe(document.body, { attributes: true })
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', publishScheme)
+  new MutationObserver(publishSchemeSettled).observe(root, { attributes: true })
+  new MutationObserver(publishSchemeSettled).observe(document.body, { attributes: true })
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', publishSchemeSettled)
   addEventListener('resize', publishScheme)
 
   // Only a platform that actually draws a Window Controls Overlay reports

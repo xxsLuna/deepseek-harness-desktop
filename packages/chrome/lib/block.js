@@ -66,7 +66,12 @@ export function chromeBlock(band) {
     // out on a load.
     + `--dsh-title-menu-display:${menuButton ? 'inline-flex' : 'none'}`
     + '}'
-  return `<style data-dsh-desktop-chrome>${root}${readAsset('desktop-chrome.css')}</style>`
+  // Only a platform that floats its own window controls over the band reports
+  // a `lead`, and only there does the sidebar's separator run up between them
+  // — so the corrective sheet ships with that platform's band and nowhere
+  // else, leaving every other border upstream's.
+  const separator = lead > 0 ? readAsset('sidebar-separator.css') : ''
+  return `<style data-dsh-desktop-chrome>${root}${readAsset('desktop-chrome.css')}${separator}</style>`
     + `<script data-dsh-desktop-chrome>${readAsset('desktop-chrome.js')}</script>`
 }
 
