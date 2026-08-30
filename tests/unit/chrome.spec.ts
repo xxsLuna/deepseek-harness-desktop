@@ -60,6 +60,45 @@ describe('injectDesktopChrome', () => {
     expect(mac).toContain('--dsh-title-menu-display:none')
   })
 
+  it('keeps the sidebar fill out of the band only where the controls overhang it', () => {
+    // macOS puts the traffic lights at x=14..66 over the band. Collapsed, the
+    // sidebar is a 56px rail, so the boundary between its fill and the content
+    // runs up between the yellow light and the green one; expanded, they sit
+    // well inside it and the column must be left as upstream draws it.
+    const mac: string = chromeBlock({ height: 38, lead: 78, menuButton: false })
+    expect(mac).toContain('[data-dsh-rail-under-controls]')
+    // A background layer, never a mask: a mask takes the column's CONTENT with
+    // it and the rail's first icon comes out faded.
+    expect(mac).toContain('background-image')
+    expect(mac).not.toContain('mask-image')
+    // The cover is the colour the band is actually painted, hit-tested by the
+    // script rather than stated here, so it follows the theme.
+    expect(mac).toContain('var(--dsh-band-fill')
+    expect(mac).toContain('--dsh-band-fill\', `rgb(')
+    // Fading out a band below the band, not stopping at its edge: a hard stop
+    // only trades the vertical boundary for a horizontal one.
+    expect(mac).toContain('calc(var(--dsh-title-band) * 2)')
+    // The collapse state is measured, not baked — it is not a platform fact —
+    // so the script has to publish what the sheet keys off.
+    expect(mac).toContain('data-dsh-rail-under-controls')
+    // The default padding-box would land the hairline a pixel inside the
+    // border box the transparent border still reserves.
+    expect(mac).toContain('background-origin: border-box')
+    // A theme swap is not atomic, and a colour that is painted cannot latch a
+    // mid-change reading the way a glyph choice could: the sample is repeated
+    // once the change has settled.
+    expect(mac).toContain('requestAnimationFrame(publishScheme)')
+    expect(mac).toContain('setTimeout(publishScheme, 300)')
+    // Only a fully opaque surface counts: the modal scrim is rgba(0,0,0,0.5)
+    // and covers the sample point, and it stands exactly while the theme is
+    // being changed.
+    expect(mac).toContain('Number(parts[3]) < 1')
+
+    // Windows draws its caption buttons on the trailing edge and reports no
+    // lead, so nothing overhangs the sidebar and the sheet never ships.
+    expect(chromeBlock(WINDOWS_BAND)).not.toContain('[data-dsh-rail-under-controls]')
+  })
+
   it('emits a length, never NaN, for a field it cannot use', () => {
     // A `NaNpx` takes its whole declaration with it, so the band would inset
     // by nothing while still claiming to exist.

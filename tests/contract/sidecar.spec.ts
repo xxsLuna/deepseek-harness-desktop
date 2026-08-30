@@ -307,6 +307,18 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     }
   })
 
+  it('still emits the rail local the collapsed band cover paints over', async () => {
+    // On macOS the traffic lights overhang a collapsed sidebar, so the band
+    // cover has to reach the element that actually paints the rail's fill —
+    // the column's own background is hidden behind it. That element is matched
+    // as [class*='_railIn'], upstream's class for the sidebar drawn as a rail.
+    // A rename leaves the cover painting the top 38px only, which puts the
+    // horizontal edge back under the lights with nothing failing.
+    const res = await socketRequest(socketPath, { path: '/plugins/@deepseek-ai/dsh-client-ui-sidebar/client.js' })
+    expect(res.status).toBe(200)
+    expect(res.body, "upstream no longer emits '_railIn'").toContain('_railIn')
+  })
+
   it('exposes the launcher-only picker channel, which rejects an unknown pick id', async () => {
     // The picker replaces the upstream native backend, whose OS chooser cannot
     // be fronted from this background sidecar.
