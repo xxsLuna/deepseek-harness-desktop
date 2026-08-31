@@ -3,9 +3,10 @@ dist/
 build/
 out/
 spike/
-packages/connection/lib/client.js
-packages/settings/lib/client.js
-packages/market/lib/client.js
+# Every client bundle build-client.mjs generates. A glob, not a line per
+# package: the per-package list did not cover a new one, and the artifact
+# landed in a commit before anyone noticed.
+packages/*/lib/client.js
 *.log
 .DS_Store
 dev-overrides.css
