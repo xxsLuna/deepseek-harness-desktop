@@ -530,6 +530,56 @@ It does **not** cover these, and each one fails with no error:
   bump could change any of them and the tests would keep passing against our own
   arithmetic. `DSH_MAGNET_TRACE=1` prints every decision, which is how they were
   found.
+- **`$DSH_HOME` is shared, and upstream migrates what it finds there in place.**
+  `~/.dsh` belongs to the installed app, every checkout, and the `dsh` CLI
+  alike. 0.1.1 rewrites `.credentials.yaml` from the pre-release flat layout to
+  `version: 1` + `refs:` on first read — values unchanged, log line only. The
+  migration is one-way, so a single dev run on a newer pin bricks the installed
+  build: 0.1.0-rc.8 wants every top-level key to be a credential ref with a
+  string value, throws a `TypeError` on the `version` number, and one failed
+  entry rejects the whole plugin tree. The launcher then restarts the sidecar
+  every ~2.6s forever, the window shows a white page or a hanging spinner, and
+  the reason goes to a stdout a packaged GUI app cannot print. Six days before
+  anyone connected the two.
+
+  Two halves, both now closed. `launchDshHome` gives a dev run `~/.dsh-dev`
+  unless `DSH_HOME` says otherwise (`tests/unit/dsh-home.spec.ts`), so this
+  repo stops being a cause — though nothing stops the `dsh` CLI, another
+  checkout, or the next format change. And the *silence* is fixed rather than
+  the trigger: `SidecarLog` writes sidecar output to
+  `userData/logs/sidecar.log` (tray → Open Logs Folder), `restart-policy`
+  budgets the restarts and the page-load retries, and running out of budget
+  serves `failure-page` — the error, the log path, and the tail — instead of a
+  blank window. Crash recovery now reloads the page too, which is the half of
+  `Sidecar.restart`'s contract only `market/restart` was keeping.
+
+  What a green build still does not prove here: the budgets are unit-tested
+  against their own arithmetic, not against a real collapse. Both were verified
+  once by hand, by writing `version: 2` into `~/.dsh-dev/.credentials.yaml` and
+  watching the log — and that is how the first retry budget was caught doing
+  nothing, because `did-finish-load` on the failure page reset its counter. If
+  you touch either policy, re-run that: plant the file, launch with
+  `--user-data-dir`, and read the log.
+- **A CJS dependency's named exports, under the loader that actually runs.**
+  `electron-updater` defines `autoUpdater` as a lazy getter on `module.exports`.
+  cjs-module-lexer cannot see a getter, so Node's native ESM interop never
+  surfaces it as a named export — but the `.d.ts` declares it, so
+  `const { autoUpdater } = await import('electron-updater')` compiles clean and
+  binds `undefined`. That line shipped from the commit that added
+  `src/updater.ts`, which means auto-update **never worked in any release**:
+  every four-hourly check and every "Check now" died on `Cannot set properties
+  of undefined (setting 'autoDownload')`. An app that cannot update itself also
+  cannot be moved off a bad state format, which is how it compounded with the
+  `$DSH_HOME` entry above.
+
+  The trap worth remembering is the test, not the bug. Vitest loads CJS through
+  Vite's interop, which DOES expose the getter as a named export — so the
+  obvious unit test passes on a loader that does not have the defect, printing
+  green over it. `tests/contract/updater-interop.spec.ts` spawns the real
+  binary instead, the way `native-tools.spec.ts` does, and
+  `tests/unit/updater-interop.spec.ts` guards the source form. Verified by hand
+  in a real Electron app: `import()` throws the user's exact message,
+  `require()` sets the property.
 - **`ELECTRON_RUN_AS_NODE` inheritance** — set once on the sidecar and relied on
   by every descendant that re-executes `process.execPath`. The day upstream
   passes an explicit env to such a spawn, the child boots a GUI Electron instead

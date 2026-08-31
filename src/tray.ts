@@ -59,6 +59,15 @@ export function installTray(win: BrowserWindow, checkForUpdates?: () => void): T
       label: 'Open Data Folder',
       click: () => void shell.openPath(resolveDshHome()),
     },
+    {
+      // The harness home and the launcher's own logs are different folders,
+      // so "Open Data Folder" cannot reach this one. It earns a seat because
+      // it is the only way a user gets at a boot failure's reason: the sidecar
+      // writes its diagnosis to stdout, and a packaged GUI app has no console
+      // behind that.
+      label: 'Open Logs Folder',
+      click: () => void shell.openPath(join(app.getPath('userData'), 'logs')),
+    },
     ...(checkForUpdates === undefined ? [] : [{ label: 'Check for Updates…', click: checkForUpdates }]),
     { type: 'separator' as const },
     { role: 'quit' },

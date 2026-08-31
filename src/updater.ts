@@ -78,11 +78,26 @@ let reportManual: ((outcome: ManualOutcome) => void) | undefined
 
 /**
  * Load electron-updater and attach its listeners, at most once per process.
+ *
+ * `require`, not `await import`. electron-updater is CJS and defines
+ * `autoUpdater` as a lazy getter on `module.exports`; cjs-module-lexer cannot
+ * see a getter, so Node's ESM interop never surfaces it as a named export and
+ * `const { autoUpdater } = await import('electron-updater')` binds undefined.
+ * TypeScript disagrees — the .d.ts declares the export, so the destructure
+ * compiles clean and fails only at runtime, one line later, with `Cannot set
+ * properties of undefined (setting 'autoDownload')`.
+ *
+ * That is what EVERY update check this app ever made returned, scheduled and
+ * manual alike, from the commit that added this file onwards. The app could
+ * not update itself, which is its own bug and was also the reason an installed
+ * build could sit far enough behind the checkout for their `$DSH_HOME` layouts
+ * to diverge. Pinned in tests/unit/updater-interop.spec.ts, because nothing
+ * about the broken form looks broken.
  * @returns the configured singleton.
  */
 async function autoUpdaterOnce(): Promise<AutoUpdater> {
   wiring ??= (async () => {
-    const { autoUpdater } = await import('electron-updater')
+    const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = true
     autoUpdater.on('error', (error) => {
