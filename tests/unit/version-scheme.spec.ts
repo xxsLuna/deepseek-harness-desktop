@@ -44,7 +44,7 @@ const PRE_SCHEME = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3', '0.1.0-rc.7-1'
  * package.json and skip its own entry — adding the current version used to fail
  * the reachability check, since nothing is newer than itself.
  */
-const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0', '0.1.1-desktop-v0.2.1']
+const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0', '0.1.1-desktop-v0.2.1', '0.1.1-desktop-v0.2.2']
 
 /** `0.1.0-desktop-v<ours>.<upstream rc>.<our build>` */
 const version = (ours: number, upstream: number, build: number): string =>
