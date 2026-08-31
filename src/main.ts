@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { launchDshHome } from './dsh-home.js'
 import { SidecarLog } from './sidecar-log.js'
+import { teeConsole } from './console-log.js'
 import { failureResponse, type FailureReport } from './failure-page.js'
 import { reloadDelayMs, shouldRestart } from './restart-policy.js'
 import { createSidecarAddress } from './socket-path.js'
@@ -143,6 +144,10 @@ async function run(): Promise<void> {
   // Opened before the sidecar so its very first line is captured. In a
   // packaged app this file is the ONLY place sidecar output survives.
   const logs = new SidecarLog(join(app.getPath('userData'), 'logs'))
+  // Everything the launcher warns or errors about lands in the same file from
+  // here on, including the modules that never knew about it. Installed right
+  // after the log so it covers the rest of startup.
+  teeConsole(console, (line) => logs.write(line))
 
   /**
    * Set once the launcher has stopped trying. Read per request below rather
@@ -179,8 +184,9 @@ async function run(): Promise<void> {
     // whether the app is up — resolves before the boot fails. Two collapses,
     // two reports, and the last one is the one on screen.
     if (failure !== undefined) return failure
-    console.error(`[sidecar] ${summary}: ${detail}`)
-    logs.write(`launcher: ${summary}: ${detail}`)
+    // One call, not two: the console tee writes this to the log, and the tail
+    // below has to contain it — so it is emitted before the report is built.
+    console.error(`launcher: ${summary}: ${detail}`)
     const report = { summary, detail, logPath: logs.path, tail: logs.tail() }
     failure = report
     // The page is only served on the next request, so ask for one.
@@ -223,8 +229,7 @@ async function run(): Promise<void> {
         reportFailure('The harness keeps exiting during startup, so the launcher stopped restarting it.', detail)
         return
       }
-      console.error(`[sidecar] ${detail}; restarting`)
-      logs.write(`launcher: ${detail}; restarting`)
+      console.error(`launcher: ${detail}; restarting`)
       // restart(), not start(): with the crash handler and the marketplace's
       // market/restart both able to bring the harness back, this is the only
       // way the two share one coalesced restart instead of racing two
@@ -430,7 +435,9 @@ async function run(): Promise<void> {
     if (!isMainFrame || errorCode === -3) return
     loadFailures.push(Date.now())
     const delay = reloadDelayMs(loadFailures, Date.now())
-    logs.write(
+    // console, not logs.write: the tee carries it to the log either way, and a
+    // dev run gets to see it in the terminal too.
+    console.warn(
       `launcher: page load failed (${String(errorCode)} ${description})`
       + (delay === undefined ? '; giving up' : `; retrying in ${String(delay)}ms`),
     )

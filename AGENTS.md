@@ -547,7 +547,12 @@ It does **not** cover these, and each one fails with no error:
   repo stops being a cause — though nothing stops the `dsh` CLI, another
   checkout, or the next format change. And the *silence* is fixed rather than
   the trigger: `SidecarLog` writes sidecar output to
-  `userData/logs/sidecar.log` (tray → Open Logs Folder), `restart-policy`
+  `userData/logs/sidecar.log` (tray → Open Logs Folder) and `teeConsole` sends
+  the launcher's own `console.warn`/`error` to the same file — a tee rather than
+  a rewrite, because those calls live in eight modules and the next one written
+  should be covered too. `console.log` is deliberately left out of the tee: the
+  sidecar's lines already reach the log through `Sidecar`'s `onLog`, so teeing
+  it would double every one of them. `restart-policy`
   budgets the restarts and the page-load retries, and running out of budget
   serves `failure-page` — the error, the log path, and the tail — instead of a
   blank window. Crash recovery now reloads the page too, which is the half of
