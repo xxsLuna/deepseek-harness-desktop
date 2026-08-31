@@ -6,12 +6,24 @@
  *     sidecar answers; requests queue instead of failing)
  *  4. window + sidecar in parallel; show on ready-to-show
  * Shutdown tears the sidecar down before the app exits.
+ *
+ * Every failure along the way has to end up on screen. A harness that cannot
+ * boot used to reach the user as a white window or a spinner that never
+ * resolved, because the launcher restarted the sidecar forever and its only
+ * account of why went to a stdout a packaged GUI app cannot print. So: the
+ * output goes to a file (SidecarLog), the restarts are budgeted
+ * (restart-policy), and running out of budget serves the reason instead of the
+ * app (failure-page).
  */
 import { app, BrowserWindow, crashReporter, protocol, screen } from 'electron'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { launchDshHome } from './dsh-home.js'
+import { SidecarLog } from './sidecar-log.js'
+import { failureResponse, type FailureReport } from './failure-page.js'
+import { reloadDelayMs, shouldRestart } from './restart-policy.js'
 import { createSidecarAddress } from './socket-path.js'
 import { createSocketProxy, isDesktopHostPath } from './socket-proxy.js'
 import { Sidecar, type SidecarPaths } from './sidecar.js'
@@ -70,6 +82,11 @@ const APP_USER_MODEL_ID = 'com.github.xxsluna.deepseek-harness-desktop'
 if (process.platform === 'win32') {
   app.setAppUserModelId(app.isPackaged ? APP_USER_MODEL_ID : `${APP_USER_MODEL_ID}.dev`)
 }
+// Before anything resolves the home: the sidecar inherits this, and the tray's
+// "Open Data Folder" and the settings diagnostics read it per click. See
+// launchDshHome for what a shared home costs when the pins differ.
+const devHome = launchDshHome(app.isPackaged, process.env, homedir())
+if (devHome !== undefined) process.env.DSH_HOME = devHome
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'dsh',
@@ -123,24 +140,111 @@ async function run(): Promise<void> {
   const settings = new DesktopSettingsStore()
   const band = titleBand(settings.get().mergedTitleBar)
 
+  // Opened before the sidecar so its very first line is captured. In a
+  // packaged app this file is the ONLY place sidecar output survives.
+  const logs = new SidecarLog(join(app.getPath('userData'), 'logs'))
+
+  /**
+   * Set once the launcher has stopped trying. Read per request below rather
+   * than captured, because it is assigned long after the protocol handler is
+   * installed — that is the whole point: a crash loop that outlives its budget
+   * has to be able to change what the page gets.
+   */
+  let failure: FailureReport | undefined
+
+  /**
+   * The socket proxy, once a sidecar has answered. Built from `address`, which
+   * `Sidecar.restart` keeps stable across restarts, so one instance serves for
+   * the life of the app however many times the harness comes and goes.
+   */
+  let proxy: ((request: Request) => Promise<Response>) | undefined
+
+  /** Reload the window, if there still is one. */
+  const reloadWindow = (): void => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win === undefined || win.isDestroyed()) return
+    win.webContents.reload()
+  }
+
+  /** Give up on the harness and put the reason on screen. */
+  const reportFailure = (summary: string, detail: string): FailureReport => {
+    // One collapse reports once, however many callers reach here for it — a
+    // coalesced restart rejects one per waiter, and the initial start rejects
+    // separately from the recovery it triggered.
+    //
+    // A second report still gets through when the sidecar came back in
+    // between, because `connected` cleared this. That is not a duplicate: it
+    // happens when the harness binds its socket and only then dies, so
+    // `Sidecar.start`'s probe — which asks whether the socket answers, not
+    // whether the app is up — resolves before the boot fails. Two collapses,
+    // two reports, and the last one is the one on screen.
+    if (failure !== undefined) return failure
+    console.error(`[sidecar] ${summary}: ${detail}`)
+    logs.write(`launcher: ${summary}: ${detail}`)
+    const report = { summary, detail, logPath: logs.path, tail: logs.tail() }
+    failure = report
+    // The page is only served on the next request, so ask for one.
+    reloadWindow()
+    return report
+  }
+
+  /**
+   * A sidecar is answering: serve it, and drop any failure the last one left
+   * behind. Clearing `failure` is what makes a recovered crash actually
+   * recover — without it the app was up and the window kept showing why it
+   * had been down.
+   */
+  const connected = (): void => {
+    proxy ??= createSocketProxy(address)
+    failure = undefined
+  }
+
+  /** Unexpected exit timestamps, for the crash-loop budget. */
+  const exits: number[] = []
+
   const sidecar = new Sidecar({
     ...paths,
     address,
     titleBand: band,
     path: resolveSidecarPath(process.env, process.platform),
     cwd: homedir(),
-    onLog: (line) => console.log(`[sidecar] ${line}`),
+    onLog: (line) => {
+      console.log(`[sidecar] ${line}`)
+      logs.write(line)
+    },
     onUnexpectedExit: (code) => {
-      console.error(`[sidecar] exited unexpectedly (code ${String(code)}); restarting`)
+      const detail = `sidecar exited unexpectedly (code ${String(code)})`
+      exits.push(Date.now())
+      // A boot that fails on its own state fails identically every time, so
+      // without this the launcher respawns forever and the window shows a
+      // white page or a spinner with no reason anywhere. Measured at ~2.6s per
+      // cycle against a `.credentials.yaml` a newer pin had migrated.
+      if (!shouldRestart(exits, Date.now())) {
+        reportFailure('The harness keeps exiting during startup, so the launcher stopped restarting it.', detail)
+        return
+      }
+      console.error(`[sidecar] ${detail}; restarting`)
+      logs.write(`launcher: ${detail}; restarting`)
       // restart(), not start(): with the crash handler and the marketplace's
       // market/restart both able to bring the harness back, this is the only
       // way the two share one coalesced restart instead of racing two
       // processes onto one $DSH_HOME. stop() is a no-op here — the process is
       // already gone — so the recovery itself behaves as it always did.
-      void sidecar.restart().catch((error: unknown) => {
-        console.error('[sidecar] restart failed:', error)
-        app.exit(1)
-      })
+      void sidecar.restart().then(
+        // What `Sidecar.restart` documents as the caller's half: the served
+        // index.html bakes window.__DSH_BOOT__ in, so a page that lived across
+        // the gap holds URLs for a process that no longer exists and every
+        // fetch it makes fails. market/restart already did this; crash
+        // recovery did not, which is why a blip left the window permanently
+        // showing "Failed to load plugins".
+        () => {
+          connected()
+          reloadWindow()
+        },
+        (error: unknown) => {
+          reportFailure('The harness crashed and could not be restarted.', String(error))
+        },
+      )
     },
   })
 
@@ -169,17 +273,15 @@ async function run(): Promise<void> {
   })
 
   // Requests queue on this gate until the sidecar answers; a startup failure
-  // resolves the gate to an error page instead of a dead window.
-  const sidecarReady = sidecar.start().then(
-    () => createSocketProxy(address),
-    (error: unknown) => {
-      console.error('[sidecar] startup failed:', error)
-      return async () => new Response(
-        `<h1>DeepSeek Harness failed to start</h1><pre>${String(error)}</pre>`,
-        { status: 503, headers: { 'content-type': 'text/html' } },
-      )
-    },
-  )
+  // leaves `proxy` unset and `failure` reported, which the handler below reads.
+  //
+  // The proxy is a variable rather than this promise's value because recovery
+  // has to be able to replace it. A gate that resolved to a failure-page
+  // handler kept serving that page after a later restart succeeded — the app
+  // was up, and the window said it was down, forever.
+  const sidecarReady = sidecar.start().then(connected, (error: unknown) => {
+    reportFailure('The harness did not start.', String(error))
+  })
   // The launcher's own routes are answered here, ahead of the proxy: they are
   // launcher business, and they must work while the sidecar gate is still
   // pending rather than queue behind it. `updater` is assigned below, after
@@ -217,7 +319,22 @@ async function run(): Promise<void> {
   protocol.handle('dsh', async (request) => {
     const pathname = decodeURIComponent(new URL(request.url).pathname)
     if (isDesktopHostPath(pathname)) return await desktopHost(request, pathname)
-    return await (await sidecarReady)(request)
+    await sidecarReady
+    // Both read per request, not captured at the gate: the sidecar can be lost
+    // long after this resolved, and can come back afterwards. Every fetch the
+    // page makes has to be answered with the current truth rather than left
+    // hanging on a socket nobody is listening on — that hang is exactly what a
+    // user sees as an endless spinner.
+    if (failure !== undefined) return failureResponse(failure)
+    if (proxy === undefined) {
+      return failureResponse({
+        summary: 'The harness is not running.',
+        detail: 'The sidecar never answered its socket.',
+        logPath: logs.path,
+        tail: logs.tail(),
+      })
+    }
+    return await proxy(request)
   })
 
   installMenu()
@@ -301,6 +418,32 @@ async function run(): Promise<void> {
     const { installDevTuning } = await import('./dev-tuning.js')
     installDevTuning(win, fileURLToPath(new URL('..', import.meta.url)))
   }
+
+  // A failed load leaves the window blank for the rest of the app's life:
+  // nothing else retries, and the renderer has no reason to try again on its
+  // own. Bounded by reloadDelayMs so a sidecar that is genuinely gone becomes
+  // a visible window rather than an endless reload.
+  const loadFailures: number[] = []
+  win.webContents.on('did-fail-load', (_event, errorCode, description, _url, isMainFrame) => {
+    // ERR_ABORTED (-3) is what a navigation the app itself replaced reports,
+    // and a subframe failure is the page's own business.
+    if (!isMainFrame || errorCode === -3) return
+    loadFailures.push(Date.now())
+    const delay = reloadDelayMs(loadFailures, Date.now())
+    logs.write(
+      `launcher: page load failed (${String(errorCode)} ${description})`
+      + (delay === undefined ? '; giving up' : `; retrying in ${String(delay)}ms`),
+    )
+    if (delay === undefined) {
+      // Better a blank window the user can act on — the View menu still
+      // reloads — than an app that looks like it never launched.
+      if (!win.isDestroyed() && !win.isVisible()) win.show()
+      return
+    }
+    setTimeout(() => {
+      if (!win.isDestroyed()) win.webContents.reload()
+    }, delay)
+  })
 
   win.once('ready-to-show', () => win.show())
   await win.loadURL('dsh://app/')
