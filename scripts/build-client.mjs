@@ -38,6 +38,14 @@ const BUNDLES = [
     entry: 'client.tsx',
     external: ['react', 'react-dom', 'react/jsx-runtime', '@deepseek-ai/*'],
   },
+  {
+    // No React and no upstream imports: it reads the DOM and calls one method
+    // on the injected `layout` service, so there is nothing to keep external.
+    dir: 'layout-memory',
+    id: '@dsh-desktop/layout-memory',
+    entry: 'client.ts',
+    external: [],
+  },
 ]
 
 for (const bundle of BUNDLES) {

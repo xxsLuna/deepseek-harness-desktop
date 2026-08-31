@@ -14,6 +14,7 @@
     "@dsh-desktop/claude-plugins": "*",
     "@dsh-desktop/chrome": "*",
     "@dsh-desktop/connection": "*",
+    "@dsh-desktop/layout-memory": "*",
     "@dsh-desktop/market": "*",
     "@dsh-desktop/picker": "*",
     "@dsh-desktop/settings": "*"

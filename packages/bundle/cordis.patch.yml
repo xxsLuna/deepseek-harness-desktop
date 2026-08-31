@@ -90,6 +90,14 @@
     - id: desktop-market
       name: '@dsh-desktop/market'
 
+    # Remembers whether the sidebar was collapsed. Its own row rather than part
+    # of desktop-chrome: that one owns the title band the LAUNCHER freed, and
+    # this owns a page-layout preference upstream simply does not persist —
+    # different concern, and the band's config is the launcher's while this
+    # plugin carries none.
+    - id: desktop-layout-memory
+      name: '@dsh-desktop/layout-memory'
+
     # directoryPicker with the `native` interaction, delegated over the carrier
     # socket to the launcher's window-owned Electron dialog. Replaces the
     # disabled auto-chooser row above.
