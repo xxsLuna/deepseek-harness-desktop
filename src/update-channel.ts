@@ -131,6 +131,37 @@ export function resolveUpdateChannel(
   return `${PREFIX[setting]}${scheme}`
 }
 
+/** `<link .../releases/tag/<tag>/>` in a GitHub releases.atom feed. */
+const ATOM_TAG = /releases\/tag\/([^"'/\s]+)/g
+
+/**
+ * The newest tag on one channel, out of a GitHub `releases.atom` feed.
+ *
+ * This exists because the unsigned-macOS path cannot use electron-updater and
+ * so has no channel logic of its own. It reads
+ * `releases/latest/download/latest-mac.yml`, and `releases/latest` is GitHub's
+ * own idea of latest — whichever release was published most recently, on ANY
+ * channel. With one channel that was the same answer; the moment a second one
+ * publishes, a stable macOS user is shown an alpha release in a modal dialog
+ * by a code path that never consults a channel at all.
+ *
+ * Mirrors what `GitHubProvider` does for every other platform: walk the feed,
+ * which is newest-first, and take the first entry whose channel matches.
+ * @param atom - the feed body.
+ * @param channel - the identifier to match, e.g. `desktop-v0`.
+ * @returns the tag, or undefined when the channel has no release yet.
+ */
+export function newestTagOnChannel(atom: string, channel: string): string | undefined {
+  for (const match of atom.matchAll(ATOM_TAG)) {
+    const tag = match[1]
+    if (tag === undefined) continue
+    // Tags are the version with a `v` in front; the channel lives in the
+    // version, so the prefix comes off before it can be read.
+    if (channelOf(tag.startsWith('v') ? tag.slice(1) : tag) === channel) return tag
+  }
+  return undefined
+}
+
 /**
  * Whether switching to `target` from `runningVersion` moves away from stability.
  *
