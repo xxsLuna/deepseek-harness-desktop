@@ -33,7 +33,6 @@ interface DesktopSettings {
   toggleAccelerator: string
 }
 
-/** Mirrors DesktopSettingsView in src/settings-host.ts. */
 /** One of the three channels a user can pick. Mirrors src/update-channel.ts. */
 type ChannelChoice = 'stable' | 'develop' | 'alpha'
 
@@ -50,6 +49,7 @@ interface ChannelView {
   downgrades: readonly ChannelChoice[]
 }
 
+/** Mirrors DesktopSettingsView in src/settings-host.ts. */
 interface View {
   settings: DesktopSettings
   version: string
@@ -215,23 +215,6 @@ const styles = {
     cursor: 'pointer',
     flexShrink: 0,
   },
-  // Same frame as button, and colour-free like everything else here: the app
-  // ships a light theme and a dark one, so the control inherits whichever the
-  // page is painting rather than picking a background of its own. The one
-  // addition is an explicit colour on the options, which some platforms render
-  // in a native popup that does not inherit the page's.
-  select: {
-    appearance: 'none',
-    border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
-    borderRadius: '8px',
-    background: 'transparent',
-    color: 'inherit',
-    font: 'inherit',
-    fontSize: '12px',
-    padding: '7px 10px',
-    cursor: 'pointer',
-    flexShrink: 0,
-  },
 } as const satisfies Record<string, React.CSSProperties>
 
 /**
@@ -263,7 +246,7 @@ function Row({ label, hint, nested, children }: {
   )
 }
 
-/** A two-state segmented control — the shape the app uses for Appearance. */
+/** A segmented control — the shape this page uses for every small enum. */
 function Segmented<T extends string>({ value, options, disabled, onSelect }: {
   value: T
   options: readonly { value: T, label: string }[]
@@ -508,11 +491,22 @@ function DesktopSettingsSection(): ReactNode {
             label="Release channel"
             hint={CHANNEL_HINT[view.channel.effective]}
           >
-            <select
-              style={styles.select}
+            {/*
+              Segmented, not a <select>. The native popup is drawn by the
+              platform and does not inherit the page: in dark mode it came up
+              white while the option text stayed light, which made the last
+              entry unreadable. Everything here is currentColor at varying
+              opacity, so it follows whichever theme the app is painting — the
+              same reason the rest of this page is built that way.
+            */}
+            <Segmented
               value={view.channel.effective}
-              onChange={(event) => {
-                const updateChannel = event.target.value as ChannelChoice
+              options={[
+                { value: 'stable', label: 'Stable' },
+                { value: 'develop', label: 'Develop' },
+                { value: 'alpha', label: 'Alpha' },
+              ]}
+              onSelect={(updateChannel) => {
                 // Confirm only the direction that cannot be promised. Moving
                 // toward stability is an ordinary upgrade; moving away is a
                 // semver downgrade whose way back this app has never tested,
@@ -521,11 +515,7 @@ function DesktopSettingsSection(): ReactNode {
                   && !window.confirm(DOWNGRADE_WARNING[updateChannel])) return
                 patch({ updateChannel })
               }}
-            >
-              <option value="stable">Stable</option>
-              <option value="develop">Develop</option>
-              <option value="alpha">Alpha</option>
-            </select>
+            />
           </Row>
         )}
         <Row
