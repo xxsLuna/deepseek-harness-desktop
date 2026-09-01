@@ -8,6 +8,7 @@
 import { app, dialog, shell, type BrowserWindow } from 'electron'
 import { createRequire } from 'node:module'
 import { isNewerVersion, updateMode } from './update-gate.js'
+import { resolveUpdateChannel, type UpdateChannel } from './update-channel.js'
 
 const require = createRequire(import.meta.url)
 
@@ -77,6 +78,16 @@ let wiring: Promise<AutoUpdater> | undefined
 let reportManual: ((outcome: ManualOutcome) => void) | undefined
 
 /**
+ * How the channel preference is read, injected by {@link startUpdater}.
+ *
+ * A function rather than a value, and module-level rather than a parameter,
+ * because the singleton above is memoised per process while the preference
+ * changes under it. The default keeps a launcher that never calls
+ * `startUpdater` — the tests — following the build's own channel.
+ */
+let readChannel: () => UpdateChannel = () => 'auto'
+
+/**
  * Load electron-updater and attach its listeners, at most once per process.
  *
  * `require`, not `await import`. electron-updater is CJS and defines
@@ -108,13 +119,28 @@ async function autoUpdaterOnce(): Promise<AutoUpdater> {
     autoUpdater.on('update-not-available', () => reportManual?.('up-to-date'))
     return autoUpdater
   })()
+  let updater: AutoUpdater
   try {
-    return await wiring
+    updater = await wiring
   } catch (error) {
     // A failed import must not poison every later check with a cached rejection.
     wiring = undefined
     throw error
   }
+  // Assigned per call rather than inside the memoised wiring: the preference
+  // changes while the app runs, and a channel read once at startup would leave
+  // the switch doing nothing until a restart with no sign of why.
+  //
+  // Assigning it also sets `allowDowngrade` as a side effect
+  // (AppUpdater.js:33-44), which is what makes a switch AWAY from stable
+  // reachable at all — `desktop-alpha0` sorts below `desktop-v0`.
+  //
+  // Left alone for an off-scheme version — a dev build reports Electron's own —
+  // so the updater derives what it can instead of being pointed at a channel
+  // nobody publishes to, which would report "up to date" forever.
+  const channel = resolveUpdateChannel(readChannel(), app.getVersion())
+  if (channel !== undefined) updater.channel = channel
+  return updater
 }
 
 /**
@@ -127,7 +153,11 @@ async function autoUpdaterOnce(): Promise<AutoUpdater> {
 export function startUpdater(
   enabled: () => boolean = () => true,
   win?: BrowserWindow,
+  channel: () => UpdateChannel = () => 'auto',
 ): { stop: () => void, checkNow: () => Promise<UpdateCheckResult> } {
+  // Read per check, like `enabled`: both are preferences the user changes while
+  // the app is running, and neither may be captured.
+  readChannel = channel
   // Parented, every dialog below is a sheet. A parentless showMessageBox on
   // macOS runs a modal loop that blocks the main thread outright: no window
   // load, no sidecar output, nothing until someone clicks it (which is a hang

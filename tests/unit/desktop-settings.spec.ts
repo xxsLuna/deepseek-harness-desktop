@@ -20,6 +20,10 @@ describe('parseDesktopSettings', () => {
     // notifySubagentTurns is the one exception, and it is off deliberately: a
     // subagent finishing raised a toast that read as "your turn is done" while
     // the agent kept working, so the shipped behaviour was the bug.
+    // updateChannel is 'auto' rather than 'stable' for the same reason: 'auto'
+    // follows whichever channel the build was cut on, so shipping this setting
+    // changes nothing for anyone. 'stable' would move every non-stable install
+    // onto stable at its first launch, which is the failure it exists to avoid.
     expect(DEFAULT_DESKTOP_SETTINGS).toEqual({
       closeAction: 'tray',
       notifyApprovals: true,
@@ -28,6 +32,7 @@ describe('parseDesktopSettings', () => {
       notifySubagentTurns: false,
       mergedTitleBar: true,
       autoUpdate: true,
+      updateChannel: 'auto',
       snapToEdges: true,
       toggleAccelerator: 'CommandOrControl+Alt+D',
     })
@@ -101,6 +106,49 @@ describe('mergeDesktopSettings', () => {
   it('ignores a body that is not an object at all', () => {
     for (const patch of [undefined, null, 'quit', 7, []]) {
       expect(mergeDesktopSettings(patch, stored), String(patch)).toEqual(stored)
+    }
+  })
+})
+
+describe('parseDesktopSettings: updateChannel', () => {
+  const parse = (record: Record<string, unknown>): string =>
+    parseDesktopSettings(JSON.stringify(record)).updateChannel
+
+  it('keeps each channel it understands', () => {
+    for (const channel of ['auto', 'stable', 'develop', 'alpha']) {
+      expect(parse({ updateChannel: channel }), channel).toBe(channel)
+    }
+  })
+
+  it('falls back to auto, never to stable', () => {
+    // The distinction is the whole safety of the field: 'auto' defers to the
+    // channel the build was cut on, 'stable' overrides it. Falling back to
+    // 'stable' would move a develop or alpha install onto stable the first
+    // time its settings file was unreadable.
+    for (const value of [undefined, '', 'STABLE', 'nightly', 3, null, {}]) {
+      expect(parse({ updateChannel: value }), String(value)).toBe('auto')
+    }
+  })
+
+  it('survives a file with nothing else in it', () => {
+    expect(parse({})).toBe('auto')
+  })
+})
+
+describe('mergeDesktopSettings: updateChannel', () => {
+  const onDevelop = { ...DEFAULT_DESKTOP_SETTINGS, updateChannel: 'develop' as const }
+
+  it('applies a channel the user chose', () => {
+    expect(mergeDesktopSettings({ updateChannel: 'alpha' }, onDevelop).updateChannel).toBe('alpha')
+    expect(mergeDesktopSettings({ updateChannel: 'auto' }, onDevelop).updateChannel).toBe('auto')
+  })
+
+  it('leaves the stored channel alone when the patch is unusable', () => {
+    // Not 'auto' — that is parse's fallback for an unreadable FILE. A rejected
+    // patch field must not move a preference the user never touched, and here
+    // that would silently switch someone off the channel they chose.
+    for (const value of ['nightly', 3, null, undefined]) {
+      expect(mergeDesktopSettings({ updateChannel: value }, onDevelop).updateChannel, String(value)).toBe('develop')
     }
   })
 })
