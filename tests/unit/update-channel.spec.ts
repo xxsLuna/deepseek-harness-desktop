@@ -137,3 +137,35 @@ describe('isDowngradeSwitch', () => {
     expect(isDowngradeSwitch('alpha', '43.4.0')).toBe(false)
   })
 })
+
+describe('the identifiers as release.yml matches them', () => {
+  const identifiers = CHOOSABLE_CHANNELS.map((c) => resolveUpdateChannel(c, STABLE) ?? '')
+
+  it('are not substrings of one another', () => {
+    // release.yml routes a tag to its branch with shell globs — `*-desktop-v*`,
+    // `*-desktop-dev*`, `*-desktop-alpha*`. If one identifier contained
+    // another, the first arm would swallow the wrong tags and a develop cut
+    // would be gated against main. Nothing about the resulting release would
+    // look wrong; it would simply carry the wrong branch's pin.
+    for (const a of identifiers) {
+      for (const b of identifiers) {
+        if (a === b) continue
+        expect(a.includes(b), `${a} contains ${b}`).toBe(false)
+      }
+    }
+  })
+
+  it('are matched by the glob release.yml uses, and only that one', () => {
+    const arms: Record<string, string> = {
+      'desktop-v': 'stable',
+      'desktop-dev': 'develop',
+      'desktop-alpha': 'alpha',
+    }
+    for (const channel of CHOOSABLE_CHANNELS) {
+      // The tag as it is pushed: `v` + the release version.
+      const tag = `v0.1.1-${resolveUpdateChannel(channel, STABLE) ?? ''}.2.3`
+      const matched = Object.entries(arms).filter(([glob]) => tag.includes(glob))
+      expect(matched.map(([, c]) => c), tag).toEqual([channel])
+    }
+  })
+})

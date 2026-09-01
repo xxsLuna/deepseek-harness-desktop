@@ -27,21 +27,69 @@ interface DesktopSettings {
   notifySubagentTurns: boolean
   mergedTitleBar: boolean
   autoUpdate: boolean
+  /** `'auto'` follows whichever channel this build was cut on. */
+  updateChannel: 'auto' | ChannelChoice
   snapToEdges: boolean
   toggleAccelerator: string
 }
 
 /** Mirrors DesktopSettingsView in src/settings-host.ts. */
+/** One of the three channels a user can pick. Mirrors src/update-channel.ts. */
+type ChannelChoice = 'stable' | 'develop' | 'alpha'
+
+/**
+ * Mirrors UpdateChannelView in src/settings-host.ts.
+ *
+ * Resolved by the launcher, not recomputed here: the channel rules have three
+ * consumers and a copy in the browser would be a second one to keep in step,
+ * with drift showing up as a page that names a channel the install is not on.
+ */
+interface ChannelView {
+  resolved: string | undefined
+  effective: ChannelChoice | undefined
+  downgrades: readonly ChannelChoice[]
+}
+
 interface View {
   settings: DesktopSettings
   version: string
   harnessVersion: string
   updates: 'auto' | 'notify-only' | 'disabled'
+  channel: ChannelView
   pendingRestart: readonly string[]
   titleBarMergeable: boolean
   canPositionWindow: boolean
   defaultToggleAccelerator: string
   toggleAcceleratorActive: boolean
+}
+
+/** What each channel carries, in the terms a user picking one cares about. */
+const CHANNEL_HINT: Record<ChannelChoice, string> = {
+  stable: 'Releases that have been left to settle. This is the one to be on.',
+  develop: 'The newest release candidate of the harness, built sooner and tried less.',
+  alpha: 'Upstream’s alpha harness — not called ready by the people who wrote it.',
+}
+
+/**
+ * Shown before a switch that moves away from stability.
+ *
+ * Two separate costs, and both are real rather than boilerplate. The way back
+ * is a semver downgrade that nothing in this app has tested, so it may need a
+ * manual download. And every channel shares one `~/.dsh`, which the harness
+ * migrates in place and one way — a newer harness has already left an older
+ * install unable to boot for six days, and moving to a less stable channel is
+ * how you would do that to yourself on purpose.
+ */
+const DOWNGRADE_WARNING: Record<ChannelChoice, string> = {
+  stable: '',
+  develop:
+    'Switch to Develop?\n\n'
+    + 'These builds are cut sooner and tried less. Returning to Stable may need a manual download.\n\n'
+    + 'Develop and Stable share one data folder, and the harness upgrades what it finds there in a way older versions cannot read back.',
+  alpha:
+    'Switch to Alpha?\n\n'
+    + 'Alpha builds carry a harness upstream has not called ready. Returning to Stable may need a manual download.\n\n'
+    + 'Alpha and Stable share one data folder, and the harness upgrades what it finds there in a way older versions cannot read back — an installed app has already been left unable to start this way. If that happens, the reason is in the tray’s Open Logs Folder.',
 }
 
 /** Mirrors UpdateCheckResult in src/updater.ts. */
@@ -164,6 +212,23 @@ const styles = {
     font: 'inherit',
     fontSize: '12px',
     padding: '7px 14px',
+    cursor: 'pointer',
+    flexShrink: 0,
+  },
+  // Same frame as button, and colour-free like everything else here: the app
+  // ships a light theme and a dark one, so the control inherits whichever the
+  // page is painting rather than picking a background of its own. The one
+  // addition is an explicit colour on the options, which some platforms render
+  // in a native popup that does not inherit the page's.
+  select: {
+    appearance: 'none',
+    border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
+    borderRadius: '8px',
+    background: 'transparent',
+    color: 'inherit',
+    font: 'inherit',
+    fontSize: '12px',
+    padding: '7px 10px',
     cursor: 'pointer',
     flexShrink: 0,
   },
@@ -438,6 +503,31 @@ function DesktopSettingsSection(): ReactNode {
         >
           <Switch checked={settings.autoUpdate} disabled={updates === 'disabled'} onToggle={(autoUpdate) => { patch({ autoUpdate }) }} />
         </Row>
+        {view.channel.effective !== undefined && (
+          <Row
+            label="Release channel"
+            hint={CHANNEL_HINT[view.channel.effective]}
+          >
+            <select
+              style={styles.select}
+              value={view.channel.effective}
+              onChange={(event) => {
+                const updateChannel = event.target.value as ChannelChoice
+                // Confirm only the direction that cannot be promised. Moving
+                // toward stability is an ordinary upgrade; moving away is a
+                // semver downgrade whose way back this app has never tested,
+                // and a user is owed that sentence before they commit.
+                if (view.channel.downgrades.includes(updateChannel)
+                  && !window.confirm(DOWNGRADE_WARNING[updateChannel])) return
+                patch({ updateChannel })
+              }}
+            >
+              <option value="stable">Stable</option>
+              <option value="develop">Develop</option>
+              <option value="alpha">Alpha</option>
+            </select>
+          </Row>
+        )}
         <Row
           label="Version"
           hint={checked === undefined ? `Harness ${view.harnessVersion}` : checked.message}
