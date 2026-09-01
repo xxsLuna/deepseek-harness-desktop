@@ -8,12 +8,25 @@
 import { app, dialog, shell, type BrowserWindow } from 'electron'
 import { createRequire } from 'node:module'
 import { isNewerVersion, updateMode } from './update-gate.js'
-import { resolveUpdateChannel, type UpdateChannel } from './update-channel.js'
+import {
+  channelOf,
+  newestTagOnChannel,
+  resolveUpdateChannel,
+  type UpdateChannel,
+} from './update-channel.js'
 
 const require = createRequire(import.meta.url)
 
 const RELEASES_URL = 'https://github.com/xxsLuna/deepseek-harness-desktop/releases/latest'
-const FEED_MAC_YML = 'https://github.com/xxsLuna/deepseek-harness-desktop/releases/latest/download/latest-mac.yml'
+const RELEASES_BASE = 'https://github.com/xxsLuna/deepseek-harness-desktop/releases'
+/**
+ * The channel-blind feed, kept as the fallback for a build whose version this
+ * scheme does not describe — a dev run. With one channel it was also correct;
+ * `macFeedForChannel` is what makes it correct with more than one.
+ */
+const FEED_MAC_YML = `${RELEASES_BASE}/latest/download/latest-mac.yml`
+/** Newest-first list of every release, the way GitHubProvider reads it. */
+const RELEASES_ATOM = 'https://github.com/xxsLuna/deepseek-harness-desktop/releases.atom'
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 
 /** How long a manual check waits for electron-updater to answer. */
@@ -35,6 +48,27 @@ export function macUpdatesSigned(): boolean {
     return manifest.desktop?.macUpdatesSigned === true
   } catch {
     return false
+  }
+}
+
+/**
+ * The mac feed URL for one channel, or undefined when that channel has no
+ * release yet.
+ *
+ * A network read, so it is separated from the pure tag-picking in
+ * `newestTagOnChannel`. An unreachable feed returns undefined and the caller
+ * simply tries again next interval — an update check must never be fatal.
+ * @param channel - the resolved channel identifier.
+ * @returns the `latest-mac.yml` URL for that channel's newest release.
+ */
+async function macFeedForChannel(channel: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(RELEASES_ATOM, { redirect: 'follow' })
+    if (!response.ok) return undefined
+    const tag = newestTagOnChannel(await response.text(), channel)
+    return tag === undefined ? undefined : `${RELEASES_BASE}/download/${tag}/latest-mac.yml`
+  } catch {
+    return undefined
   }
 }
 
@@ -189,11 +223,28 @@ export function startUpdater(
 
   const checkNotifyOnly = async (manual = false): Promise<void> => {
     try {
-      const response = await fetch(FEED_MAC_YML, { redirect: 'follow' })
+      const running = app.getVersion()
+      const target = resolveUpdateChannel(readChannel(), running)
+      // Resolve the tag on OUR channel rather than reading
+      // `releases/latest/...`, which is GitHub's own newest release on any
+      // channel. Without this the one platform that cannot use
+      // electron-updater is also the one platform with no channel logic, and a
+      // stable macOS user gets an alpha release offered in a modal dialog.
+      const feed = target === undefined
+        ? FEED_MAC_YML
+        : await macFeedForChannel(target)
+      if (feed === undefined) return
+      const response = await fetch(feed, { redirect: 'follow' })
       if (!response.ok) return
       const text = await response.text()
       const version = /^version:\s*(.+)$/m.exec(text)?.[1]
-      if (version === undefined || !isNewerVersion(version, app.getVersion())) return
+      if (version === undefined) return
+      // Within a channel, "newer" is the question. Across one — the user just
+      // switched — it is the wrong question: the channels are deliberately
+      // ordered against each other, so the newest release on the channel they
+      // chose IS the move, however it sorts against what they are running.
+      const switching = target !== undefined && target !== channelOf(running)
+      if (!switching && !isNewerVersion(version, running)) return
       if (notified && !manual) return
       notified = true
       const { response: button } = await ask({

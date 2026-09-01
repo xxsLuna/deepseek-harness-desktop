@@ -12,6 +12,7 @@ import {
   channelOf,
   CHOOSABLE_CHANNELS,
   isDowngradeSwitch,
+  newestTagOnChannel,
   resolveUpdateChannel,
   schemeNumberOf,
 } from '../../src/update-channel.js'
@@ -167,5 +168,47 @@ describe('the identifiers as release.yml matches them', () => {
       const matched = Object.entries(arms).filter(([glob]) => tag.includes(glob))
       expect(matched.map(([, c]) => c), tag).toEqual([channel])
     }
+  })
+})
+
+describe('newestTagOnChannel', () => {
+  /** A releases.atom body, newest first, as GitHub serves it. */
+  const atom = (...tags: string[]): string => tags
+    .map((tag) => `<entry><link rel="alternate" type="text/html" href="https://github.com/o/r/releases/tag/${tag}"/></entry>`)
+    .join('\n')
+
+  const FEED = atom(
+    'v0.1.2-desktop-alpha0.3.0',
+    'v0.1.1-desktop-v0.2.3',
+    'v0.1.1-desktop-dev0.2.0',
+    'v0.1.1-desktop-v0.2.2',
+  )
+
+  it('takes the newest entry on the channel asked for', () => {
+    expect(newestTagOnChannel(FEED, 'desktop-v0')).toBe('v0.1.1-desktop-v0.2.3')
+    expect(newestTagOnChannel(FEED, 'desktop-dev0')).toBe('v0.1.1-desktop-dev0.2.0')
+    expect(newestTagOnChannel(FEED, 'desktop-alpha0')).toBe('v0.1.2-desktop-alpha0.3.0')
+  })
+
+  it('does not hand a stable install the newest release overall', () => {
+    // The whole bug this closes: `releases/latest` is GitHub's newest on ANY
+    // channel, so with an alpha published most recently a stable macOS user
+    // was shown it in a modal dialog by a path that never read a channel.
+    expect(newestTagOnChannel(FEED, 'desktop-v0')).not.toBe('v0.1.2-desktop-alpha0.3.0')
+  })
+
+  it('says nothing for a channel with no release yet', () => {
+    // The state every new channel starts in. Undefined means "no feed to
+    // read", and the caller simply does not notify.
+    expect(newestTagOnChannel(atom('v0.1.1-desktop-v0.2.3'), 'desktop-alpha0')).toBeUndefined()
+    expect(newestTagOnChannel('', 'desktop-v0')).toBeUndefined()
+  })
+
+  it('ignores tags from the retired pre-scheme line', () => {
+    expect(newestTagOnChannel(atom('v0.1.0-rc.7-1'), 'desktop-v0')).toBeUndefined()
+  })
+
+  it('reads the tag whether or not it carries the v prefix', () => {
+    expect(newestTagOnChannel(atom('0.1.1-desktop-v0.2.3'), 'desktop-v0')).toBe('0.1.1-desktop-v0.2.3')
   })
 })
