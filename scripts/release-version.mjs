@@ -162,7 +162,12 @@ export function appendPublished(source, version, channel = 'v') {
   }
   const [line, entries] = matches[0]
   if (entries.includes(`'${version}'`)) return source
-  return source.replace(line, `const ${name}: readonly string[] = [${entries}, '${version}']`)
+  // An empty list is not a special case to be tidy about — `[${entries}, ...]`
+  // with nothing in `entries` writes `[, 'x']`, which is an elision, so the
+  // array silently gains an `undefined` first element. Every channel but
+  // stable starts empty, so this is the FIRST append each of them takes.
+  const next = entries.trim() === '' ? `'${version}'` : `${entries}, '${version}'`
+  return source.replace(line, `const ${name}: readonly string[] = [${next}]`)
 }
 
 /**
