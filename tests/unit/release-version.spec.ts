@@ -24,14 +24,32 @@ const pinned = (JSON.parse(read('harness.json')) as { harness: string }).harness
 const shipping = (JSON.parse(read('package.json')) as { version: string }).version
 const schemeSpec = read('tests', 'unit', 'version-scheme.spec.ts')
 
+/**
+ * The channel this working tree ships, as release-version.mjs spells it.
+ *
+ * Read rather than assumed. Each channel is cut from its own branch and each
+ * branch carries its own version, so a test that hardcoded `v` would fail on
+ * `dev` and `alpha` for a reason unrelated to what it is checking.
+ * @returns `v`, `dev` or `alpha`.
+ */
+function shippingChannel(): string {
+  return /-desktop-(v|dev|alpha)\d+\./.exec(shipping)?.[1] ?? 'v'
+}
+
 describe('the shipping version against the pin it was cut for', () => {
   it('carries upstream core and rc number unchanged', () => {
     // Both fields are upstream's, so a shipping version that disagrees with
     // harness.json means one of the two moved alone. Only the build counter is
     // this shell's to choose, which is why it is not compared here.
-    const [, core, rc] = /^(\d+\.\d+\.\d+)-rc\.(\d+)$/.exec(pinned) ?? []
+    //
+    // The channel is read off the shipping version rather than assumed to be
+    // `v`: which channel this working tree ships is now a property of the
+    // BRANCH, and asserting stable here would fail every develop and alpha
+    // branch for a reason that has nothing to do with the pin.
+    const [, core, pre] = /^(\d+\.\d+\.\d+)-(?:alpha|beta|rc)\.(\d+)$/.exec(pinned) ?? []
     expect(core, `harness.json pins '${pinned}', which is not the shape upstream publishes`).toBeDefined()
-    expect(shipping).toMatch(new RegExp(`^${core!.replace(/\./g, '\\.')}-desktop-v\\d+\\.${rc!}\\.\\d+$`))
+    const channel = shippingChannel()
+    expect(shipping).toMatch(new RegExp(`^${core!.replace(/\./g, '\\.')}-desktop-${channel}\\d+\\.${pre!}\\.\\d+$`))
   })
 })
 
@@ -130,7 +148,10 @@ describe('appendPublished', () => {
   })
 
   it('leaves the file alone when the version is already recorded', () => {
-    expect(appendPublished(schemeSpec, shipping)).toBe(schemeSpec)
+    // Into its OWN channel's list: the shipping version is recorded in the list
+    // for the channel this branch cuts, and asking about `PUBLISHED` from a
+    // develop branch would append rather than find it.
+    expect(appendPublished(schemeSpec, shipping, shippingChannel())).toBe(schemeSpec)
   })
 
   it('refuses a file whose PUBLISHED array is not the one line it expects', () => {
@@ -139,5 +160,36 @@ describe('appendPublished', () => {
     // assertion to close.
     expect(() => appendPublished('const PUBLISHED = []', 'x')).toThrow(/found 0/)
     expect(() => appendPublished(`${schemeSpec}\n${schemeSpec}`, 'x')).toThrow(/found 2/)
+  })
+})
+
+describe('appendPublished: the empty list', () => {
+  const emptyList = (name: string): string =>
+    `const ${name}: readonly string[] = []`
+
+  it('writes the first entry without a leading hole', () => {
+    // `[${entries}, 'x']` with nothing in entries produces `[, 'x']`, which is
+    // an elision: the array silently gains an undefined first element and the
+    // spec that reads it fails somewhere else entirely. Every channel but
+    // stable starts empty, so this is the FIRST append each of them takes —
+    // and it is how the develop channel's first cut was caught.
+    const next = appendPublished(emptyList('PUBLISHED_DEV'), '0.1.1-desktop-dev0.2.0', 'dev')
+    expect(next).toContain("= ['0.1.1-desktop-dev0.2.0']")
+    expect(next).not.toContain('[,')
+  })
+
+  it('keeps appending normally once the list has one', () => {
+    const once = appendPublished(emptyList('PUBLISHED_DEV'), '0.1.1-desktop-dev0.2.0', 'dev')
+    const twice = appendPublished(once, '0.1.1-desktop-dev0.3.0', 'dev')
+    expect(twice).toContain("= ['0.1.1-desktop-dev0.2.0', '0.1.1-desktop-dev0.3.0']")
+  })
+
+  it('writes into the list for the channel it was given', () => {
+    // Filing a version under the wrong channel compares it against versions it
+    // is not ordered against, and the failure reads as a scheme bug.
+    const source = `${emptyList('PUBLISHED_DEV')}\n${emptyList('PUBLISHED_ALPHA')}`
+    const next = appendPublished(source, '0.1.2-desktop-alpha0.3.0', 'alpha')
+    expect(next).toContain("PUBLISHED_ALPHA: readonly string[] = ['0.1.2-desktop-alpha0.3.0']")
+    expect(next).toContain("PUBLISHED_DEV: readonly string[] = []")
   })
 })
