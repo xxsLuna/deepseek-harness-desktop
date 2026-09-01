@@ -291,8 +291,23 @@ channel's version in `package.json` and its own entry in the matching
 The realignment problem itself has not gone away — GitHub replays commits onto
 `main` with new SHAs and leaves `dev` pointing at the originals, so `dev` ends up
 with commits that are not ancestors of `main` while the trees are otherwise
-identical, and the next `dev -> main` PR re-applies the same changes. Rebase
-`dev` onto `main` and keep its own version cut on top, rather than resetting.
+identical, and the next `dev -> main` PR re-applies the same changes.
+
+**Do not rebase `dev` to fix that.** This paragraph said to, one release ago,
+and it was wrong the moment the develop channel had a release: a tag points into
+`dev`'s history, and rebasing gives that commit a new SHA and orphans the one
+`v0.1.1-desktop-dev0.2.0` names. The released tag must stay an ancestor of the
+branch it was cut from — that is the invariant `verify-tag-on-channel-branch`
+checks at push time, and the only thing tying a published release to a branch
+afterwards.
+
+Cherry-pick onto the channel branch instead, or merge, keeping its own version
+cut. Both preserve the tag's ancestry; a rebase cannot. Check it afterwards
+rather than assuming:
+
+```sh
+git merge-base --is-ancestor v<version> origin/<branch>
+```
 
 **A fix on one branch does not reach the others.** Nothing enforces
 forward-merging, and this bit on day one: the first develop cut found a real
