@@ -391,7 +391,10 @@ async function run(): Promise<void> {
     win.hide()
   })
 
-  updater = startUpdater(() => settings.get().autoUpdate, win)
+  // Both preferences are read per check rather than captured: the user changes
+  // them while the app runs, and a captured channel would leave the switch
+  // doing nothing until a restart.
+  updater = startUpdater(() => settings.get().autoUpdate, win, () => settings.get().updateChannel)
   app.on('before-quit', () => updater?.stop())
 
   // The tray is unconditional: it is how a hidden window comes back, and with

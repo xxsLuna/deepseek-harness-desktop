@@ -12,9 +12,19 @@
  * Parsing is pure and total: a hand-edited or half-written file must not stop
  * the app from starting, so every field falls back to its default alone.
  */
+import type { UpdateChannel } from './update-channel.js'
 
 /** What closing the window does. */
 export type CloseAction = 'tray' | 'quit'
+
+/**
+ * Whether a value is a channel this build understands.
+ * @param value - the raw field from a stored settings file.
+ * @returns true when it is one of the four known values.
+ */
+function isUpdateChannel(value: unknown): value is UpdateChannel {
+  return value === 'auto' || value === 'stable' || value === 'develop' || value === 'alpha'
+}
 
 export interface DesktopSettings {
   /**
@@ -46,6 +56,16 @@ export interface DesktopSettings {
   readonly mergedTitleBar: boolean
   /** Check GitHub Releases for a newer version in the background. */
   readonly autoUpdate: boolean
+
+  /**
+   * Which release channel this install follows.
+   *
+   * `'auto'` is the stored state before anyone chooses, and resolves to the
+   * channel the running build was cut on. A literal `'stable'` default would
+   * silently move every non-stable install onto stable at its first launch
+   * after this shipped, which is the failure the setting exists to avoid.
+   */
+  readonly updateChannel: UpdateChannel
   /** Snap the window flush to a screen edge when dragged near one. */
   readonly snapToEdges: boolean
   /**
@@ -75,12 +95,16 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   notifySubagentTurns: false,
   mergedTitleBar: true,
   autoUpdate: true,
+  updateChannel: 'auto',
   snapToEdges: true,
   toggleAccelerator: 'CommandOrControl+Alt+D',
 }
 
 /** The fields that are plain on/off switches. */
-type BooleanField = Exclude<keyof DesktopSettings, 'closeAction' | 'toggleAccelerator'>
+type BooleanField = Exclude<
+  keyof DesktopSettings,
+  'closeAction' | 'toggleAccelerator' | 'updateChannel'
+>
 
 /** Those fields, enumerable — the write path walks them. */
 const BOOLEAN_FIELDS: readonly BooleanField[] = [
@@ -124,6 +148,11 @@ export function parseDesktopSettings(raw: string | undefined): DesktopSettings {
     notifySubagentTurns: flag('notifySubagentTurns'),
     mergedTitleBar: flag('mergedTitleBar'),
     autoUpdate: flag('autoUpdate'),
+    // Falls back to 'auto' rather than 'stable' for an unreadable value, for
+    // the reason on the field: 'auto' defers to the build, 'stable' overrides it.
+    updateChannel: isUpdateChannel(record.updateChannel)
+      ? record.updateChannel
+      : DEFAULT_DESKTOP_SETTINGS.updateChannel,
     snapToEdges: flag('snapToEdges'),
     toggleAccelerator: isAccelerator(record.toggleAccelerator)
       ? record.toggleAccelerator
@@ -160,5 +189,9 @@ export function mergeDesktopSettings(patch: unknown, current: DesktopSettings): 
   }
   if (record.closeAction === 'tray' || record.closeAction === 'quit') next.closeAction = record.closeAction
   if (isAccelerator(record.toggleAccelerator)) next.toggleAccelerator = record.toggleAccelerator
+  // Unlike parse, an unusable value leaves the STORED channel alone rather than
+  // falling back to 'auto': a rejected patch field must not move a preference
+  // the user never touched, which is the rule the whole function is built on.
+  if (isUpdateChannel(record.updateChannel)) next.updateChannel = record.updateChannel
   return next
 }

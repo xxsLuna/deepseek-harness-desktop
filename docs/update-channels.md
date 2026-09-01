@@ -348,9 +348,29 @@ It matters the moment anything sorts the two lists together, which is why
 
 These are decisions, not research. Each one changes what gets built.
 
-- **Do the pins actually differ?** The whole shape above follows from "yes" —
-  see "What the channels actually differ by". If the answer is no, this is a
-  much smaller feature and does not deliver an early look at upstream's alpha.
+### Settled
+
+- **The pins differ.** Each channel carries the upstream stage it is named
+  after, per "What the channels actually differ by". Everything else in this
+  document assumes it.
+- **Alpha shares `$DSH_HOME`.** An alpha install and a stable install on one
+  machine use the same `~/.dsh`, so an alpha user keeps their sessions and
+  plugins — which is the point of trying it on real work rather than an empty
+  profile.
+
+  **The cost, stated plainly because it has already been paid once.** Upstream
+  migrates the state it finds there in place, and the migrations are one way:
+  0.1.1 rewrote `.credentials.yaml` into a layout 0.1.0-rc.8 rejects outright,
+  and the installed build spent six days unable to boot. Running alpha on a
+  machine that also runs stable is a way to do that on purpose.
+
+  What is different now is that it no longer happens in silence: a boot failure
+  writes its reason to `userData/logs/sidecar.log`, the restarts are budgeted
+  rather than endless, and the window shows the error instead of a white page.
+  The recovery is still manual, and the alpha setting has to say so.
+
+### Still open
+
 - **Three branches, or fewer?** `alpha` and `dev` could be one branch carrying
   whichever pin is newest, with the channel decided at tag time. Cheaper, and it
   gives up the ability to have an alpha build and an rc build in the field
@@ -358,11 +378,6 @@ These are decisions, not research. Each one changes what gets built.
 - **How do shell fixes reach every channel?** Nothing proposed here enforces
   forward-merging, and an alpha branch that misses the updater repair ships an
   app that cannot update itself, on the channel whose users most need it to.
-- **Does alpha share `$DSH_HOME`?** Upstream migrates state in place and the
-  migrations are one-way, so an alpha install and a stable install on one
-  machine can brick the stable one. `launchDshHome` already solves exactly this
-  for dev checkouts; extending it by channel is a small change and a real
-  behaviour split (an alpha install would not see your sessions).
 - **Does develop or alpha auto-download?** `autoDownload` and
   `autoInstallOnAppQuit` are both on today (`src/updater.ts`). Leaving them on
   means a user on those channels gets every cut on quit, with no chance to skip
