@@ -256,8 +256,24 @@ Rules that follow:
 
 ## Cutting a release
 
-Releases come from `main` only; `release.yml` refuses a tag whose commit is not
-on `main`.
+Each channel is cut from its own branch, and `release.yml` refuses a tag that is
+not on the branch its channel names:
+
+| channel | identifier | branch | cut with |
+| --- | --- | --- | --- |
+| Stable | `desktop-v` | `main` | `release-version.mjs <upstream> v` |
+| Develop | `desktop-dev` | `dev` | `release-version.mjs <upstream> dev` |
+| Alpha | `desktop-alpha` | `alpha` | `release-version.mjs <upstream> alpha` |
+
+`docs/update-channels.md` is the design; the alpha branch does not exist yet
+because upstream's alpha harness does not build against this shell.
+
+**The version cut is not the script's job when only the build counter moves.**
+`release-version.mjs` derives a version for an UPSTREAM bump and resets the
+build counter, so a new build of the same pin is cut by hand — edit
+`package.json` and `package-lock.json`, then record it with that script's own
+`appendPublished(source, version, channel)` so it lands in the right channel's
+list. Both places, because the lockfile carries the root version too.
 
 ```sh
 gh pr merge <n> --rebase                  # rebase, not squash — see Attribution
@@ -266,10 +282,24 @@ git tag -a v<version> origin/main -F <message-file>
 git push origin refs/tags/v<version>      # triggers the 5-target release build
 ```
 
-**Realign `dev` after every `--rebase` merge.** GitHub replays the commits onto
+**`dev` can no longer just be reset to `main`.** It used to be: both branches
+carried the same version, so realigning after a `--rebase` merge was a
+fast-forward. Since `0.1.1-desktop-dev0.2.0` each branch carries its OWN
+channel's version in `package.json` and its own entry in the matching
+`PUBLISHED_*` list, so the two diverge there permanently and by design.
+
+The realignment problem itself has not gone away — GitHub replays commits onto
 `main` with new SHAs and leaves `dev` pointing at the originals, so `dev` ends up
-with commits that are not ancestors of `main` while the trees are identical. The
-next `dev -> main` PR then re-applies the same changes. Reset `dev` to `main`.
+with commits that are not ancestors of `main` while the trees are otherwise
+identical, and the next `dev -> main` PR re-applies the same changes. Rebase
+`dev` onto `main` and keep its own version cut on top, rather than resetting.
+
+**A fix on one branch does not reach the others.** Nothing enforces
+forward-merging, and this bit on day one: the first develop cut found a real
+bug in `appendPublished` (an empty list produced `[, 'x']`, an elision) that
+`main` still carried. Cherry-pick such a fix to every branch, or the channel
+whose users most need it ships without it. This is the open question the channel
+design names and does not answer.
 
 **Publish the draft promptly — do not sit on it.** The tag appears in
 `releases.atom` the moment it is pushed, while the assets stay draft-private.

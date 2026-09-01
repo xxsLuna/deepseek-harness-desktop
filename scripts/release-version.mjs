@@ -57,9 +57,6 @@ const STAGE_FOR_CHANNEL = { v: ['rc'], dev: ['rc'], alpha: ['alpha'] }
 /** The channel identifiers this script accepts, as the CLI spells them. */
 const CHANNELS = Object.keys(STAGE_FOR_CHANNEL)
 
-/** The one line `appendPublished` rewrites, matched whole so a reformat cannot half-apply. */
-const PUBLISHED_LINE = /^const PUBLISHED: readonly string\[\] = \[(.*)\]$/gm
-
 /** Every ordered field of a release version, most significant first. */
 const fields = (match) => match.slice(1).map(Number)
 
