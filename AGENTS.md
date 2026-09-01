@@ -314,6 +314,13 @@ in the field were `rc.*`, a different channel, so the walk resolved `rc.7-1` and
 they quietly reported themselves up to date. Do not read that one quiet release
 as evidence the hazard is imaginary. Verify the feed, write the notes, publish.
 
+**With more than one channel that distinction stops being a footnote.** A
+develop draft left sitting breaks update checks for develop installs and nobody
+else; a stable one breaks them for everybody on stable. The blast radius is per
+channel now, which makes a develop draft cheaper to sit on and a stable draft
+exactly as expensive as it always was. That is not permission — it is the same
+failure with a smaller audience.
+
 ### Count the drafts before you publish one
 
 **Still count them, even though the race is fixed.** A `draft` job now creates the
@@ -357,14 +364,39 @@ curl -sSL https://github.com/xxsLuna/deepseek-harness-desktop/releases/download/
 # version: must match package.json exactly
 ```
 
-**Publish as Latest — never tick "Set as a pre-release".** The macOS path fetches
-`releases/latest/download/latest-mac.yml` (`src/updater.ts`), so it reads whatever
-GitHub currently calls Latest rather than this release's own feed. Leave an older
-release as Latest and every mac client on the new version is offered the **older**
-one, because `isNewerVersion('0.1.0-rc.7-1', '0.1.0-desktop-v0.8.0')` is `true` —
-`rc` outranks `desktop-v0`. electron-publish creates the draft
-`prerelease: false`, so the default is already right; this is about not changing
-it. Confirm after publishing:
+**The Latest badge belongs to STABLE, and only stable.** This used to read
+"publish as Latest" without qualification, which was right while one channel
+existed and is wrong now — a develop or alpha release marked Latest moves that
+badge off stable.
+
+Why it matters is `src/updater.ts`. The macOS path fetches
+`releases/latest/download/latest-mac.yml`, i.e. whatever GitHub currently calls
+Latest rather than this release's own feed. That path now resolves its tag by
+channel through `releases.atom`, so a current build is safe either way — but an
+install still on an older build has the channel-blind version, and it would read
+a develop release as the newest stable one. The badge is what protects installs
+that cannot protect themselves.
+
+So, per channel:
+
+```sh
+gh release edit v<version> --draft=false --prerelease=false --latest         # stable
+gh release edit v<version> --draft=false --prerelease=false --latest=false   # develop, alpha
+```
+
+**Never tick "Set as a pre-release" on any of them.** That is a different flag
+from the badge and it is not the channel mechanism: `GitHubProvider` selects on
+the version's channel identifier, not on GitHub's prerelease bit, and
+electron-updater's `allowPrerelease` is already permanently true because every
+version this app ships has a pre-release part. Setting it changes nothing useful
+and hides the release from `releases/latest` resolution in a second, redundant
+way.
+
+The older hazard this paragraph recorded still stands for stable: leave an
+*older* release as Latest and every mac client on the new version is offered the
+older one, because `isNewerVersion('0.1.0-rc.7-1', '0.1.0-desktop-v0.8.0')` is
+`true` — `rc` outranks `desktop-v0`. Confirm after publishing that Latest still
+resolves to the newest STABLE tag, not to whatever went out most recently:
 
 ```sh
 curl -s -o /dev/null -w '%{redirect_url}\n' https://github.com/xxsLuna/deepseek-harness-desktop/releases/latest
