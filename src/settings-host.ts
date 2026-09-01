@@ -23,12 +23,41 @@ import {
   type DesktopSettings,
 } from './desktop-settings.js'
 import { type UpdateMode } from './update-gate.js'
+import {
+  channelKindOf,
+  CHOOSABLE_CHANNELS,
+  isDowngradeSwitch,
+  resolveUpdateChannel,
+  type UpdateChannel,
+} from './update-channel.js'
 import { DEFAULT_TOGGLE_ACCELERATOR } from './shortcuts.js'
 
 /** Fields the launcher can only honour at startup. */
 const RESTART_REQUIRED: readonly (keyof DesktopSettings)[] = ['mergedTitleBar']
 
 /** What the settings section renders, beyond the settings themselves. */
+/** What the settings page needs to describe and change the release channel. */
+export interface UpdateChannelView {
+  /**
+   * The channel this install actually follows, as electron-updater sees it.
+   * Undefined for an off-scheme version — a dev build — where no channel is set
+   * and the page has nothing true to say about one.
+   */
+  resolved: string | undefined
+  /**
+   * Which of the three the install is on, whether it was chosen or inherited.
+   * This is what the radio shows as selected, so a user who never chose still
+   * sees where they are.
+   */
+  effective: Exclude<UpdateChannel, 'auto'> | undefined
+  /**
+   * Choices that move away from stability from here. Those are semver
+   * downgrades: the updater permits them, but the way back is not something
+   * this app has tested, and the page has to say so before someone commits.
+   */
+  downgrades: readonly Exclude<UpdateChannel, 'auto'>[]
+}
+
 export interface DesktopSettingsView {
   settings: DesktopSettings
   /** App and bundled-harness versions, for the update row. */
@@ -40,6 +69,15 @@ export interface DesktopSettingsView {
    * "updatable" flag told unsigned macOS builds they install updates.
    */
   updates: UpdateMode
+  /**
+   * Channel state, resolved here rather than in the page.
+   *
+   * The page mirrors this file's shapes but never its rules, and channel
+   * resolution is a rule with three consumers — a second copy in the browser
+   * would be a second thing to keep in step, and the symptom of drift is an
+   * install quietly following a channel the settings page says it is not on.
+   */
+  channel: UpdateChannelView
   /** Fields changed since launch that only a restart will apply. */
   pendingRestart: readonly string[]
   /** Whether this platform merges the title bar at all (Linux does not). */
@@ -157,12 +195,36 @@ export interface DesktopSettingsViewInput {
  * @param input - the store plus the launch facts the section shows.
  * @returns the view.
  */
+/**
+ * Resolve the channel state the page renders.
+ *
+ * Pure and exported so the rule is testable without Electron, per the
+ * convention in CLAUDE.md — and because every part of it is invisible when
+ * wrong. A wrong `effective` shows the user a channel they are not on; a wrong
+ * `downgrades` either warns about a switch that is safe or stays quiet about
+ * one that strands them.
+ * @param setting - the stored preference.
+ * @param runningVersion - `app.getVersion()`.
+ * @returns what the settings page needs to describe the channel.
+ */
+export function updateChannelView(
+  setting: UpdateChannel,
+  runningVersion: string,
+): UpdateChannelView {
+  return {
+    resolved: resolveUpdateChannel(setting, runningVersion),
+    effective: setting === 'auto' ? channelKindOf(runningVersion) : setting,
+    downgrades: CHOOSABLE_CHANNELS.filter((c) => isDowngradeSwitch(c, runningVersion)),
+  }
+}
+
 export function desktopSettingsView(input: DesktopSettingsViewInput): DesktopSettingsView {
   return {
     settings: input.store.get(),
     version: app.getVersion(),
     harnessVersion: input.harnessVersion,
     updates: input.updates,
+    channel: updateChannelView(input.store.get().updateChannel, app.getVersion()),
     pendingRestart: input.store.pendingRestart(),
     titleBarMergeable: input.titleBarMergeable,
     canPositionWindow: input.canPositionWindow,

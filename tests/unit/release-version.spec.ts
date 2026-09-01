@@ -76,13 +76,13 @@ describe('deriveReleaseVersion', () => {
   })
 
   it('refuses a stable upstream release, rather than inventing an rc number', () => {
-    expect(() => deriveReleaseVersion('0.2.0', '0.1.1-desktop-v0.2.0')).toThrow(/cannot read an rc number/)
+    expect(() => deriveReleaseVersion('0.2.0', '0.1.1-desktop-v0.2.0')).toThrow(/cannot read a pre-release number/)
   })
 
   it('refuses a shipping version that carries no scheme number', () => {
     // The state this whole change removes: the bare upstream version sitting in
     // package.json, with nothing to carry across.
-    expect(() => deriveReleaseVersion('0.1.1-rc.3', '0.1.1-rc.2')).toThrow(/is not '<x\.y\.z>-desktop-v/)
+    expect(() => deriveReleaseVersion('0.1.1-rc.3', '0.1.1-rc.2')).toThrow(/is not '<x\.y\.z>-desktop-<channel>/)
   })
 
   it('refuses to derive a version that does not outrank what ships', () => {

@@ -11,25 +11,38 @@ permissions:
   contents: write
 
 jobs:
-  # Releases come from main. A tag can point at any commit, so the branch
-  # protection on main does not cover this by itself — check it here.
-  verify-tag-on-main:
+  # Each channel is cut from one branch. A tag can point at any commit, so the
+  # branch protection does not cover this by itself — check it here.
+  #
+  # Per channel rather than bypassed for the new ones: the channel is the first
+  # pre-release identifier, and a tag cut on the wrong branch would publish
+  # normally, be offered only to that channel, and carry whatever upstream pin
+  # that branch happens to hold. Nothing downstream would notice.
+  verify-tag-on-channel-branch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Refuse a tag that is not on main
+      - name: Refuse a tag that is not on the branch its channel is cut from
         run: |
-          git fetch --quiet origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main; release from main only"
+          case "$GITHUB_REF_NAME" in
+            *-desktop-v*)     BRANCH=main ;;
+            *-desktop-dev*)   BRANCH=dev ;;
+            *-desktop-alpha*) BRANCH=alpha ;;
+            *)
+              echo "::error::$GITHUB_REF_NAME names no known channel; expected desktop-v, desktop-dev or desktop-alpha"
+              exit 1 ;;
+          esac
+          git fetch --quiet origin "$BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$BRANCH"; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on $BRANCH; cut that channel from $BRANCH only"
             exit 1
           fi
-          echo "$GITHUB_REF_NAME is on main"
+          echo "$GITHUB_REF_NAME is on $BRANCH"
 
   release:
-    needs: verify-tag-on-main
+    needs: verify-tag-on-channel-branch
     uses: ./.github/workflows/build.yml
     with:
       publish: true

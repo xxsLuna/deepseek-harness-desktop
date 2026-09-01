@@ -25,11 +25,37 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-/** `<upstream core>-desktop-v<scheme>.<upstream rc>.<this shell's build>` */
-const SHIPPING = /^(\d+)\.(\d+)\.(\d+)-desktop-v(\d+)\.(\d+)\.(\d+)$/
+/**
+ * `<upstream core>-desktop-<channel><scheme>.<upstream pre-release>.<build>`
+ *
+ * The fifth field used to be "upstream's rc number" and is now "upstream's
+ * pre-release number", whatever stage produced it — that is what lets an alpha
+ * pin be expressed at all.
+ */
+const SHIPPING = /^(\d+)\.(\d+)\.(\d+)-desktop-(v|dev|alpha)(\d+)\.(\d+)\.(\d+)$/
 
-/** Upstream's own shape. Every version pinned so far has been an `rc`. */
-const UPSTREAM = /^(\d+)\.(\d+)\.(\d+)-rc\.(\d+)$/
+/**
+ * Upstream's own shape, and the stage it names.
+ *
+ * `rc` was the only one for as long as the scheme had nowhere to put anything
+ * else. `alpha` is admitted now because a channel exists that carries it;
+ * `beta` is matched so the refusal below can name it rather than reporting an
+ * unreadable version.
+ */
+const UPSTREAM = /^(\d+)\.(\d+)\.(\d+)-(alpha|beta|rc)\.(\d+)$/
+
+/**
+ * Which upstream stage each channel is allowed to carry.
+ *
+ * Checked rather than assumed, because nothing downstream would catch the
+ * mistake: a `desktop-v` version derived from an alpha pin is a release that
+ * says stable, is offered to every stable install, and carries a harness
+ * upstream has not called ready.
+ */
+const STAGE_FOR_CHANNEL = { v: ['rc'], dev: ['rc'], alpha: ['alpha'] }
+
+/** The channel identifiers this script accepts, as the CLI spells them. */
+const CHANNELS = Object.keys(STAGE_FOR_CHANNEL)
 
 /** The one line `appendPublished` rewrites, matched whole so a reformat cannot half-apply. */
 const PUBLISHED_LINE = /^const PUBLISHED: readonly string\[\] = \[(.*)\]$/gm
@@ -62,27 +88,59 @@ const outranks = (a, b) => {
  * outrank `shipping` — a version nobody can reach is the failure this scheme
  * exists to prevent, and it is silent at every stage after this one.
  */
-export function deriveReleaseVersion(upstream, shipping) {
+export function deriveReleaseVersion(upstream, shipping, channel = 'v') {
+  if (!CHANNELS.includes(channel)) {
+    throw new Error(`release-version: unknown channel '${channel}'; expected one of ${CHANNELS.join(', ')}`)
+  }
   const from = UPSTREAM.exec(upstream)
   if (from === null) {
-    // A stable upstream release carries no rc number and the scheme has no
-    // field to put one in. Guessing would pick an ordering, and on the scheme
-    // number a channel, on its own — so this stops and asks instead.
-    throw new Error(`release-version: cannot read an rc number out of upstream '${upstream}'; the scheme needs one, so cut this release by hand`)
+    // A stable upstream release carries no pre-release number and the scheme
+    // has no field to put one in. Guessing would pick an ordering, and on the
+    // scheme number a channel, on its own — so this stops and asks instead.
+    throw new Error(`release-version: cannot read a pre-release number out of upstream '${upstream}'; the scheme needs one, so cut this release by hand`)
+  }
+  const stage = from[4]
+  // Checked, not assumed. Nothing downstream would notice a `desktop-v` version
+  // carrying an alpha harness — it would simply be offered to every stable
+  // install as an ordinary update.
+  if (!STAGE_FOR_CHANNEL[channel].includes(stage)) {
+    throw new Error(
+      `release-version: upstream '${upstream}' is a ${stage} release and the ${channel} channel carries `
+      + `${STAGE_FOR_CHANNEL[channel].join(' or ')}; a release must not say one stage and ship another`,
+    )
   }
   const current = SHIPPING.exec(shipping)
   if (current === null) {
-    throw new Error(`release-version: '${shipping}' is not '<x.y.z>-desktop-v<scheme>.<rc>.<build>', so there is no scheme number to carry across`)
+    throw new Error(`release-version: '${shipping}' is not '<x.y.z>-desktop-<channel><scheme>.<pre-release>.<build>', so there is no scheme number to carry across`)
   }
-  const [major, minor, patch, rc] = fields(from)
-  const scheme = fields(current)[3]
-  // The build counter belongs to one harness version, so a new upstream rc
-  // starts it over. Ordering is safe either way: the rc field outranks it.
-  const derived = `${major}.${minor}.${patch}-desktop-v${scheme}.${rc}.0`
-  if (!outranks(fields(SHIPPING.exec(derived)), fields(current))) {
-    throw new Error(`release-version: ${derived} does not outrank ${shipping}; upstream ${upstream} does not lead what this ships`)
+  const [major, minor, patch] = fields(from)
+  const preRelease = Number(from[5])
+  // Fields 5 and 6 of SHIPPING (scheme, pre-release) — index 4 and 5 of the
+  // numeric list, because the channel at index 3 is text and drops out.
+  const scheme = Number(current[5])
+  // The build counter belongs to one harness version, so a new upstream
+  // pre-release starts it over. Ordering is safe either way: the pre-release
+  // field outranks it.
+  const derived = `${major}.${minor}.${patch}-desktop-${channel}${scheme}.${preRelease}.0`
+  // Only meaningful within one channel. Across channels the comparison is not
+  // just wrong but backwards — `desktop-alpha0` sorts below `desktop-v0` by
+  // design — so an alpha cut is never asked to outrank what stable ships.
+  if (current[4] === channel && !outranks(shippingFields(derived), shippingFields(shipping))) {
+    throw new Error(`release-version: ${derived} does not outrank ${shipping}; upstream ${upstream} does not lead what this channel ships`)
   }
   return derived
+}
+
+/**
+ * The ordered numeric fields of a shipping version, channel text excluded.
+ * @param version - a version matching {@link SHIPPING}.
+ * @returns core, scheme, pre-release and build as numbers.
+ */
+function shippingFields(version) {
+  const match = SHIPPING.exec(version)
+  /* v8 ignore next -- callers match first */
+  if (match === null) throw new Error(`release-version: '${version}' is off-scheme`)
+  return [match[1], match[2], match[3], match[5], match[6], match[7]].map(Number)
 }
 
 /**
@@ -95,14 +153,33 @@ export function deriveReleaseVersion(upstream, shipping) {
  * next one is never compared against, which is the hole the assertion in that
  * spec was added to close — so this fails loudly and names the seam instead.
  */
-export function appendPublished(source, version) {
-  const matches = [...source.matchAll(PUBLISHED_LINE)]
+export function appendPublished(source, version, channel = 'v') {
+  const name = publishedName(channel)
+  const pattern = new RegExp(`^const ${name}: readonly string\\[\\] = \\[(.*)\\]$`, 'gm')
+  const matches = [...source.matchAll(pattern)]
   if (matches.length !== 1) {
-    throw new Error(`release-version: expected exactly one PUBLISHED array line in version-scheme.spec.ts, found ${matches.length}`)
+    throw new Error(`release-version: expected exactly one ${name} array line in version-scheme.spec.ts, found ${matches.length}`)
   }
   const [line, entries] = matches[0]
   if (entries.includes(`'${version}'`)) return source
-  return source.replace(line, `const PUBLISHED: readonly string[] = [${entries}, '${version}']`)
+  return source.replace(line, `const ${name}: readonly string[] = [${entries}, '${version}']`)
+}
+
+/**
+ * The list a channel's releases are recorded in.
+ *
+ * One list per channel, because the assertion those lists carry is that the
+ * shipping version outranks every entry — and that is false across channels by
+ * design, since `desktop-alpha0` sorts below `desktop-v0`. Merging them would
+ * turn a correct release into a failing test.
+ * @param channel - `v`, `dev` or `alpha`.
+ * @returns the constant name in version-scheme.spec.ts.
+ */
+function publishedName(channel) {
+  if (!CHANNELS.includes(channel)) {
+    throw new Error(`release-version: unknown channel '${channel}'; expected one of ${CHANNELS.join(', ')}`)
+  }
+  return channel === 'v' ? 'PUBLISHED' : `PUBLISHED_${channel.toUpperCase()}`
 }
 
 // The `C:\...` caveat from prune-payload.mjs applies here too: comparing raw
@@ -111,10 +188,13 @@ const invokedDirectly = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (invokedDirectly) {
-  const [upstream] = process.argv.slice(2)
+  const [upstream, channelArg] = process.argv.slice(2)
   if (upstream === undefined) {
-    throw new Error('usage: node scripts/release-version.mjs <upstream-version>')
+    throw new Error(`usage: node scripts/release-version.mjs <upstream-version> [${CHANNELS.join('|')}]`)
   }
+  // Defaults to the stable channel so the existing bump job keeps working
+  // unchanged; the other two name themselves.
+  const channel = channelArg ?? 'v'
   const root = dirname(dirname(fileURLToPath(import.meta.url)))
   const pinPath = join(root, 'harness.json')
   const pkgPath = join(root, 'package.json')
@@ -123,8 +203,8 @@ if (invokedDirectly) {
   // Derived before anything is written, so an upstream shape the scheme cannot
   // express fails the job with the tree untouched.
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-  const release = deriveReleaseVersion(upstream, pkg.version)
-  const spec = appendPublished(readFileSync(specPath, 'utf8'), release)
+  const release = deriveReleaseVersion(upstream, pkg.version, channel)
+  const spec = appendPublished(readFileSync(specPath, 'utf8'), release, channel)
 
   const pin = JSON.parse(readFileSync(pinPath, 'utf8'))
   pin.harness = upstream
@@ -135,6 +215,6 @@ if (invokedDirectly) {
 
   // stdout is the release version and nothing else, so the workflow can read it
   // with `$(...)`. Anything for a human goes to stderr.
-  console.error(`harness.json → ${upstream}; package.json → ${release}; recorded in PUBLISHED`)
+  console.error(`harness.json → ${upstream}; package.json → ${release}; recorded in ${publishedName(channel)}`)
   console.log(release)
 }

@@ -46,6 +46,29 @@ const PRE_SCHEME = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3', '0.1.0-rc.7-1'
  */
 const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0', '0.1.1-desktop-v0.2.1', '0.1.1-desktop-v0.2.2', '0.1.1-desktop-v0.2.3']
 
+/**
+ * The same, per channel, and separate on purpose.
+ *
+ * The reachability assertion below requires the shipping version to outrank
+ * every entry, and that is FALSE across channels by design: `desktop-alpha0`
+ * sorts below `desktop-v0`, so a correct stable release does not outrank a
+ * correct alpha one and never should. Merging these lists would turn a correct
+ * release into a failing test, and the fix someone would reach for is deleting
+ * the assertion that catches an unreachable version.
+ *
+ * `scripts/release-version.mjs` writes into whichever list matches the channel
+ * it was given.
+ */
+const PUBLISHED_DEV: readonly string[] = []
+const PUBLISHED_ALPHA: readonly string[] = []
+
+/** Every channel's list, by the identifier its versions carry. */
+const PUBLISHED_BY_CHANNEL: Record<string, readonly string[]> = {
+  'desktop-v0': PUBLISHED,
+  'desktop-dev0': PUBLISHED_DEV,
+  'desktop-alpha0': PUBLISHED_ALPHA,
+}
+
 /** `0.1.0-desktop-v<ours>.<upstream rc>.<our build>` */
 const version = (ours: number, upstream: number, build: number): string =>
   `0.1.0-desktop-v${ours}.${upstream}.${build}`
@@ -62,14 +85,19 @@ describe('the shipping version', () => {
     // would have made `0.1.0-desktop-v0.2.0` compare OLDER than the shipped
     // `0.1.0-desktop-v0.8.1` (2 < 8) and reached nobody. The leading number is
     // what carries the ordering across an upstream minor bump.
-    expect(shipping).toMatch(/^\d+\.\d+\.\d+-desktop-v\d+\.\d+\.\d+$/)
+    expect(shipping).toMatch(/^\d+\.\d+\.\d+-desktop-(?:v|dev|alpha)\d+\.\d+\.\d+$/)
     // The channel is the first pre-release identifier and must not drift:
-    // electron-updater offers a tag only to installs on the same channel.
-    expect(prerelease(shipping)?.[0]).toBe('desktop-v0')
+    // electron-updater offers a tag only to installs on the same channel. It
+    // may now be any of the three, but it must be one this repo publishes to —
+    // a typo here is a build that reports itself up to date forever.
+    expect(Object.keys(PUBLISHED_BY_CHANNEL)).toContain(prerelease(shipping)?.[0])
   })
 
-  it('is reachable from every earlier release published under this scheme', () => {
-    const earlier = PUBLISHED.filter((published) => published !== shipping)
+  it('is reachable from every earlier release on ITS OWN channel', () => {
+    // Its own, not all of them: across channels the comparison is backwards by
+    // design, and asserting it would fail a correct release.
+    const own = PUBLISHED_BY_CHANNEL[String(prerelease(shipping)?.[0])] ?? []
+    const earlier = own.filter((published) => published !== shipping)
     for (const published of earlier) {
       expect(isNewerVersion(shipping, published), `${shipping} must be newer than ${published}`).toBe(true)
     }
@@ -80,7 +108,20 @@ describe('the shipping version', () => {
     // a release actually appends to it. The automated bump does. Asserting it
     // here is what still catches a cut made by hand — and an automated one whose
     // rewrite of that line matched nothing and moved on.
-    expect(PUBLISHED, `add '${shipping}' to PUBLISHED; scripts/release-version.mjs does this for an automated bump`).toContain(shipping)
+    const channel = String(prerelease(shipping)?.[0])
+    const own = PUBLISHED_BY_CHANNEL[channel] ?? []
+    expect(own, `add '${shipping}' to the ${channel} list; scripts/release-version.mjs does this for an automated bump`).toContain(shipping)
+  })
+
+  it('records each channel only in its own list', () => {
+    // A version filed under the wrong channel would be compared against
+    // versions it is not ordered against, and the failure would look like a
+    // scheme bug rather than a filing mistake.
+    for (const [channel, list] of Object.entries(PUBLISHED_BY_CHANNEL)) {
+      for (const published of list) {
+        expect(prerelease(published)?.[0], published).toBe(channel)
+      }
+    }
   })
 
   it('is fenced from the pre-scheme releases by the CHANNEL, not by the comparator', () => {
