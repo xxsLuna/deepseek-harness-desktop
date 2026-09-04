@@ -194,6 +194,35 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### 0.1.2 breaks three seams, and the rc breaks the same three as the alpha
+
+Measured on 2026-09-04 against staged `0.1.2-alpha.5`, and each one confirmed in
+a `0.1.2-rc.1` install too. Recorded per seam because "0.1.2 does not work" is
+the kind of note that gets re-derived from scratch every time someone tries the
+bump — and because two of the three would have been read as flakes.
+
+- **`@deepseek-ai/dsh-host-apiproxy` is gone.** Its last publish is `0.1.1-rc.2`,
+  the version pinned here, and it is absent from both 0.1.2 closures.
+  `packages/connection/src/client.ts` imports `AbstractApiClient` from its
+  `/client` and `RpcId`/`serverResponseSchema` from its `/api`, so `npm run
+  build` dies in esbuild before anything boots. Find where those three moved;
+  they are contracts this package implements, not code to reimplement.
+- **The sidecar does not start.** `healProfilesModuleFallback` in `dsh-app-boot`
+  reaches `readModuleFallbackManifest` with an undefined path and throws
+  `ERR_INVALID_ARG_TYPE`, from our `prepareProfile`
+  (`packages/bundle/lib/boot.js`). Profile module-fallback healing is new in the
+  0.1.2 line; the boot sequence around it needs re-reading rather than patching
+  at the call site.
+- **The prune leaves 12 `typescript-too-old.d.ts` files.** One per `lexical` and
+  `@lexical/*` package, and `pruned-payload.spec.ts` catches them. That name is
+  not a `.d.ts` a wildcard export drags in by accident — check what those
+  packages' `exports` maps say before widening `NEVER_RUNTIME`.
+
+The bump PR arrives red on all three, which is the contract suite doing its job:
+each failure names its seam instead of reaching a user. Do not take a 0.1.2 pin
+to any channel until they are fixed — including develop, whose watch row will
+propose `0.1.2-rc.1` every morning until it is.
+
 ---
 
 ## Versioning
