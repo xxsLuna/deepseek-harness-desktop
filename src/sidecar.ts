@@ -5,8 +5,10 @@
  * single-instance lock in main guarantees at most one per machine user.
  */
 import { spawn, type SpawnOptions } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { join } from 'node:path'
+import { payloadVerdict } from './payload.js'
 import type { SidecarAddress } from './socket-path.js'
 import type { TitleBand } from './window.js'
 
@@ -53,13 +55,14 @@ export interface SidecarOptions extends SidecarPaths {
   /** Called when the process exits without stop() being requested. */
   readonly onUnexpectedExit: (code: number | null) => void
   /**
-   * The two steps that touch the outside world, injected only by the unit
-   * tests — production passes neither. The alternative is leaving the
+   * The three steps that touch the outside world, injected only by the unit
+   * tests — production passes none. The alternative is leaving the
    * start/stop/restart rules untested, and the `stopping` flag below has
    * already shown what that costs.
    */
   readonly spawn?: SidecarSpawn
   readonly probe?: (address: SidecarAddress) => Promise<boolean>
+  readonly exists?: (path: string) => boolean
 }
 
 /** One GET / probe over the socket; resolves true on any HTTP answer. */
@@ -115,6 +118,11 @@ export class Sidecar {
     // A fresh process is not the one that was stopped, so it gets crash
     // recovery back.
     this.stopping = false
+    // Before the spawn, so a payload that is not there says so instead of
+    // letting Node answer with MODULE_NOT_FOUND for a file the user never
+    // touched. See src/payload.ts for what made that worth a preflight.
+    const payload = payloadVerdict(harnessRoot, this.options.exists ?? existsSync)
+    if (!payload.ok) throw new Error(payload.summary)
     // process.execPath is this app's own Electron binary, and
     // ELECTRON_RUN_AS_NODE below makes it behave as plain node. It replaces the
     // second stock Node binary this used to ship beside the harness — 89MB for
