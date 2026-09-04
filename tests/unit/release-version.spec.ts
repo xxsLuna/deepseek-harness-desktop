@@ -128,10 +128,19 @@ describe('deriveReleaseVersion', () => {
     // The upstreams are built off the live pin rather than written down, so this
     // keeps testing the real next bump instead of colliding with the shipping
     // version the last one wrote.
-    const [, core, rc] = /^(\d+\.\d+\.\d+)-rc\.(\d+)$/.exec(pinned) ?? []
+    //
+    // Stage and channel come off the branch for the same reason. Written against
+    // `rc` and `desktop-v` this passed everywhere until an alpha branch existed,
+    // and then threw `undefined-rc.NaN` — the pin no longer matched an rc-only
+    // regex, so the version handed to the derivation was assembled out of two
+    // undefineds. Its siblings were fixed for assuming stable; this one was
+    // missed because nothing yet pinned a stage other than rc.
+    const [, core, stage, number] = /^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$/.exec(pinned) ?? []
+    expect(core, `harness.json pins '${pinned}', which is not the shape upstream publishes`).toBeDefined()
+    const channel = shippingChannel()
     for (const ahead of [1, 2, 8]) {
-      const derived = deriveReleaseVersion(`${core!}-rc.${Number(rc!) + ahead}`, shipping)
-      expect(derived).toMatch(/^\d+\.\d+\.\d+-desktop-v\d+\.\d+\.\d+$/)
+      const derived = deriveReleaseVersion(`${core!}-${stage!}.${Number(number!) + ahead}`, shipping, channel)
+      expect(derived).toMatch(new RegExp(`^\\d+\\.\\d+\\.\\d+-desktop-${channel}\\d+\\.\\d+\\.\\d+$`))
       expect(gt(derived, shipping), `${derived} !> ${shipping}`).toBe(true)
     }
   })
