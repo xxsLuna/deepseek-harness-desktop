@@ -70,6 +70,16 @@ jobs:
         id: versions
         if: steps.branch.outputs.exists == 'yes'
         run: |
+          # Read from the CHECKED-OUT branch, not from the branch this workflow
+          # file came from: a scheduled run uses main's YAML but the base
+          # branch's scripts. So a change to the watch has to reach every base
+          # branch in the matrix before it can run there — the "shell fixes have
+          # to reach three branches" problem, now with teeth. Say which branch
+          # is missing it rather than dying on a module resolution error.
+          if [ ! -f scripts/upstream-bump.mjs ]; then
+            echo "::error::${{ matrix.base }} has no scripts/upstream-bump.mjs; carry the watch change onto that branch before it can watch anything"
+            exit 1
+          fi
           PINNED=$(node -p "require('./harness.json').harness")
           # A dist-tag the package has never published makes `npm view` exit
           # non-zero. That is a channel with nothing to watch, not a failure.

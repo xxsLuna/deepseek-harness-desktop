@@ -285,6 +285,14 @@ against this shell — a note rather than a result, since nothing pins it and
 `watch-upstream.yml` asks the API for the branch, says it is absent and stops; a
 channel nobody has opened is a normal state, not a failing job.
 
+**A change to the watch has to reach every branch it watches.** A scheduled run
+uses the workflow file from `main` — GitHub reads it from the default branch —
+but `actions/checkout` then puts the BASE branch on disk, so
+`scripts/upstream-bump.mjs` and `scripts/release-version.mjs` are the base
+branch's copies. Land a watch change on `main` alone and the `dev` row dies on
+module resolution. The step checks for the script first and names the branch
+that is missing it.
+
 Opening it is two steps and neither is the watch's. Create the branch, then seed
 its `harness.json` with a real `alpha` pin — a branch forked from `main` or `dev`
 carries an `rc` pin, and `bumpVerdict` refuses to measure an `alpha` dist-tag
