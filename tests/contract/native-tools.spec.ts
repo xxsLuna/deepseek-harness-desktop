@@ -270,5 +270,103 @@ describe.skipIf(!existsSync(harnessRoot) || !existsSync(electronBinary))('native
       )
     }
   })
+
+  it('needs removeTree to stop at a junction, because rmSync walks through it', () => {
+    // The second divergence, and the expensive one:
+    //
+    //   stock Node 22.23   rmSync(junction, { recursive, force })  -> unlinks the link
+    //   Electron 24.18     rmSync(junction, { recursive, force })  -> empties the TARGET
+    //
+    // Node 24's native rm treats a Windows junction as a directory and
+    // descends. That is not a theoretical hazard here: a locally developed
+    // plugin is installed into the profile as a junction to its source, the
+    // source's node_modules is a junction into the profile, and the profile's
+    // node_modules is a junction farm pointing into this very staged tree. So
+    // `POST /market/remove` on one plugin reached the app's own packages and
+    // emptied 271 of them, including the sidecar's entry module — after which
+    // the app could not start, with an error naming a file nobody had touched.
+    //
+    // Asserted here because it is a fact about THIS binary: the unit tests
+    // pass either way on a stock Node 22 dev machine, which is exactly how the
+    // hazard survived being written down. One-sided like the check above — an
+    // Electron bump that stops following junctions must not fail this, but
+    // removeTree refusing to follow one is not allowed to regress.
+    const removeTree = pathToFileURL(
+      join(root, 'packages', 'market', 'lib', 'remove-tree.js'),
+    ).href
+    const result = probe(`
+      import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+      import { tmpdir } from 'node:os'
+      import { join } from 'node:path'
+      import { removeTree } from ${JSON.stringify(removeTree)}
+
+      // A link standing in for the install entry, pointing at a populated tree
+      // standing in for everything reachable behind it.
+      const make = () => {
+        const root = mkdtempSync(join(tmpdir(), 'dsh-link-probe-'))
+        const target = join(root, 'target', 'lib')
+        mkdirSync(target, { recursive: true })
+        writeFileSync(join(target, 'boot.js'), 'x')
+        const link = join(root, 'opencode-usage-plugin')
+        symlinkSync(join(root, 'target'), link, process.platform === 'win32' ? 'junction' : 'dir')
+        return { root, link, victim: join(target, 'boot.js') }
+      }
+
+      // What plain rmSync does on this binary, recorded either way.
+      const plain = make()
+      let plainFollowed = null
+      try {
+        const { rmSync } = await import('node:fs')
+        rmSync(plain.link, { recursive: true, force: true })
+        plainFollowed = !existsSync(plain.victim)
+      } catch (error) {
+        plainFollowed = 'threw:' + (error.code ?? 'unknown')
+      }
+
+      // What removeTree does. This one is not allowed to reach the target.
+      const ours = make()
+      let oursCode = 'ok'
+      try {
+        removeTree(ours.link)
+      } catch (error) {
+        oursCode = error.code ?? 'unknown'
+      }
+
+      console.log(JSON.stringify({
+        plainFollowed,
+        oursCode,
+        // readdir, not existsSync: existsSync follows the link, so it answers
+        // false for a link that is still there but now dangling.
+        oursLinkGone: !readdirSync(ours.root).includes('opencode-usage-plugin'),
+        oursTargetIntact: existsSync(ours.victim),
+        node: process.versions.node,
+        platform: process.platform,
+      }))
+    `) as {
+      plainFollowed: boolean | string,
+      oursCode: string,
+      oursLinkGone: boolean,
+      oursTargetIntact: boolean,
+      node: string,
+      platform: string,
+    }
+
+    expect(result.oursCode, 'removeTree could not remove a junction on the runtime this app ships').toBe('ok')
+    expect(result.oursLinkGone, 'removeTree left the install entry behind').toBe(true)
+    expect(
+      result.oursTargetIntact,
+      'removeTree followed a junction out of the tree it was given. On this runtime that reaches '
+      + "the profile's link farm and empties the app's own staged harness, which is unrecoverable "
+      + 'without a reinstall',
+    ).toBe(true)
+
+    // Not an assertion, a record, same as above.
+    if (result.platform === 'win32' && result.plainFollowed === false) {
+      console.log(
+        `note: Electron's Node ${result.node} no longer descends into a junction with plain rmSync; `
+        + 'remove-tree.js is still correct but its rationale needs revisiting',
+      )
+    }
+  })
 }, 60_000)
 
