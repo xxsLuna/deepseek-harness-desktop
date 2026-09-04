@@ -7,6 +7,10 @@ import { execFileSync } from 'node:child_process'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { nodePinVerdict } from './node-pin.mjs'
+// The market's link-safe delete, reused rather than reimplemented: the reason
+// it exists is a platform fact about the pinned Node, and this script deletes
+// a junction on every run. One implementation means one place to fix.
+import { removeTree } from '../packages/market/lib/remove-tree.js'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const pin = JSON.parse(readFileSync(join(root, 'harness.json'), 'utf8'))
@@ -102,8 +106,13 @@ if (existsSync(packagesDir)) {
     // missing link. Recreated each run: a stale absolute link (moved repo,
     // container mount) reads as absent to existsSync yet still blocks
     // symlinkSync. Gitignored, and excluded from the copy below.
+    //
+    // removeTree, not rmSync: this link is a junction INTO the staged tree, and
+    // on the pinned Node (24) a recursive rmSync descends into a junction and
+    // empties the target. A plain delete here therefore wipes
+    // build/harness/node_modules — once per package, on every build.
     const link = join(sourceDir, 'node_modules')
-    rmSync(link, { recursive: true, force: true })
+    removeTree(link)
     symlinkSync(join(stageDir, 'node_modules'), link, 'junction')
 
     rmSync(dest, { recursive: true, force: true })
