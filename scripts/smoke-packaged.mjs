@@ -1,10 +1,14 @@
 // Run the packaged app's built-in smoke (DSH_DESKTOP_SMOKE=1) against a
 // throwaway DSH_HOME and assert ALL-PASS. Locates the unpacked build in out/.
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// Link-safe delete, for the same reason the market needs one: a $DSH_HOME the
+// app has booted holds a profile whose node_modules is a junction farm into
+// the harness tree — here, the tree inside the build we are smoking.
+import { removeTree } from '../packages/market/lib/remove-tree.js'
 
 // Derive the names from the manifest, never spell them here: a productName
 // change would otherwise leave this gate looking for a bundle that no longer
@@ -48,7 +52,11 @@ const timer = setTimeout(() => {
 
 child.on('exit', (code) => {
   clearTimeout(timer)
-  rmSync(home, { recursive: true, force: true })
+  // Not rmSync: on the pinned Node a recursive delete descends into a junction
+  // and empties the target, so cleaning this home would empty out/win-unpacked
+  // the moment the profile holds a resolution link — a passing smoke that
+  // destroys the build it just passed.
+  removeTree(home)
   const pass = code === 0 && output.includes('SUMMARY ALL-PASS')
   if (!pass && output.trim() === '') {
     // The single-instance lock makes a second copy quit before it prints
