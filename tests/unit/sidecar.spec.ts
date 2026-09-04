@@ -34,6 +34,8 @@ interface HarnessOptions {
   readonly probe?: () => Promise<boolean>
   /** Runs on every spawn, to arrange what the new process does. */
   readonly onSpawn?: (child: FakeChild) => void
+  /** Payload probe; the default says the staged tree is intact. */
+  readonly exists?: (path: string) => boolean
 }
 
 /** A Sidecar wired to stub processes and a stub readiness probe. */
@@ -63,6 +65,10 @@ function harness(options: HarnessOptions = {}) {
     // The real probe HEADs the socket. Answering at once keeps start() out of
     // its 250ms poll sleep, so the passing tests below are instant.
     probe: options.probe ?? (async () => true),
+    // harnessRoot above is a fixture, not a tree on disk, so the payload
+    // preflight has to be told the files are there. Overridden by the one test
+    // that checks what happens when they are not.
+    exists: options.exists ?? (() => true),
   })
 
   return { sidecar, children, launches, exits, logs }
@@ -111,6 +117,17 @@ describe('Sidecar.start', () => {
     await expect(h.sidecar.start()).rejects.toThrow('exited during startup')
     // A death during startup is still a crash, so it is reported too.
     expect(h.exits).toEqual([3])
+  })
+
+  it('says the payload is missing instead of spawning into MODULE_NOT_FOUND', async () => {
+    // What a tree emptied through a junction looks like from here. Before the
+    // preflight this spawned, Node reported MODULE_NOT_FOUND for a path inside
+    // the app's own installation, and the error on screen pointed at the build
+    // rather than at the deletion that had caused it.
+    const h = harness({ exists: () => false })
+    await expect(h.sidecar.start()).rejects.toThrow('harness files are missing')
+    // And it did not waste a spawn, or a restart cycle, finding that out.
+    expect(h.launches).toEqual([])
   })
 })
 

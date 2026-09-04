@@ -93,8 +93,8 @@ binary (Node major against the pin, NAPI level, `node:sqlite`, worker threads,
 whole tree on it, so a bad bump fails by name instead of at a user's first
 terminal.
 
-Two divergences found the hard way, both invisible until something real ran on
-the shipped binary. Neither is hypothetical and both are now pinned:
+Three divergences found the hard way, all invisible until something real ran on
+the shipped binary. None is hypothetical and all are now pinned:
 
 - **`rmSync` will not delete a read-only file.** Stock Node 22 does; Electron
   43's Node 24.18 raises `EPERM`. Node 24 moved `rmSync` to a native binding and
@@ -102,6 +102,30 @@ the shipped binary. Neither is hypothetical and both are now pinned:
   read-only attribute. Git writes its object store read-only, so this broke
   every install from a git source. `packages/market/lib/remove-tree.js` is the
   answer, and every tree deletion in that package goes through it.
+- **`rmSync` descends into a junction.** Stock Node 22 removes the link;
+  Electron 43's Node 24.18 walks through it and empties the target, leaving the
+  target *directory* in place. That is not a corner case here, because links
+  are how plugins are installed and how the profile resolves: a locally
+  developed plugin is a junction to its source, the source's `node_modules` is
+  a junction into the profile, and the profile's `node_modules` is a farm of
+  junctions into the staged harness that **`healProfilesModuleFallback`
+  rebuilds on every boot** — it is what puts the app's packages on an installed
+  plugin's resolution walk, so it exists on every machine with a profile and
+  cannot be tidied away. Removing one plugin therefore reached
+  the app's own tree and emptied 271 packages — `@dsh-desktop/bundle` among
+  them — and the app could not start again, with a `MODULE_NOT_FOUND` naming a
+  file nobody had touched. `removeTree` now walks the tree itself and removes a
+  link *as a link* on every platform, so the safety does not depend on which
+  Node is underneath. **A `node_modules` whose packages exist but are empty is
+  this bug**; `scripts/stage-harness.mjs` deletes a junction on every run and
+  uses the same helper for the same reason. The launcher also preflights the
+  staged tree before every spawn (`src/payload.ts`), because the symptom was a
+  `MODULE_NOT_FOUND` naming a file inside the app's own installation — a
+  message about the build, for a problem that was a delete. Note what made this
+  expensive: the
+  unit tests pass either way on a stock Node 22 dev machine, so only
+  `tests/contract/native-tools.spec.ts` — which runs against the real binary —
+  can hold it.
 - **The plugin loader's baseUrl-aware import is off.** `cordis-plugin-loader`
   resolves a row against `ctx.baseUrl` — the desktop profile, and the whole
   reason we boot from one — only when it can reach Node's internal ESM loader,
