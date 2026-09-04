@@ -278,12 +278,15 @@ not on the branch its channel names:
 | Develop | `desktop-dev` | `dev` | `release-version.mjs <upstream> dev` |
 | Alpha | `desktop-alpha` | `alpha` | `release-version.mjs <upstream> alpha` |
 
-`docs/update-channels.md` is the design. **The `alpha` branch does not exist
-yet.** The reason recorded here was that upstream's alpha harness does not build
-against this shell — a note rather than a result, since nothing pins it and
-`0.1.2-alpha.5` installs cleanly on its own. The alpha row of
-`watch-upstream.yml` asks the API for the branch, says it is absent and stops; a
-channel nobody has opened is a normal state, not a failing job.
+`docs/update-channels.md` is the design. **The `alpha` branch exists as of
+`0.1.2-alpha.5`.** The reason previously recorded for having no such branch —
+that upstream's alpha harness does not build against this shell — was a note
+rather than a result, and nothing pinned it.
+
+The alpha row of `watch-upstream.yml` still tolerates its absence: it asks the
+API for the branch, reports a notice and stops. Keep that. A channel that has
+been closed again is a normal state, and the alternative is a job that fails
+every night to say so.
 
 **A change to the watch has to reach every branch it watches.** A scheduled run
 uses the workflow file from `main` — GitHub reads it from the default branch —
@@ -293,12 +296,13 @@ branch's copies. Land a watch change on `main` alone and the `dev` row dies on
 module resolution. The step checks for the script first and names the branch
 that is missing it.
 
-Opening it is two steps and neither is the watch's. Create the branch, then seed
-its `harness.json` with a real `alpha` pin — a branch forked from `main` or `dev`
+**A channel branch is seeded, not just forked.** Cut from `main` or `dev` it
 carries an `rc` pin, and `bumpVerdict` refuses to measure an `alpha` dist-tag
-against it rather than pick a direction out of the semver. After that the watch
-keeps it current, and the first bump PR's five-target build is what actually
-answers whether that harness works here.
+against one rather than pick a direction out of the semver — so the branch would
+sit there looking open and never bump. Seeding is a hand cut and owes what a hand
+cut owes: `release-version.mjs <upstream> alpha` for the three files, plus
+`package-lock.json`, which carries the root version too. After that the watch
+keeps it current.
 
 **The version cut is not the script's job when only the build counter moves.**
 `release-version.mjs` derives a version for an UPSTREAM bump and resets the
