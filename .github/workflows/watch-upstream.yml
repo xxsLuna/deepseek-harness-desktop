@@ -1,6 +1,11 @@
-# Daily upstream watch: when @deepseek-ai/dsh publishes a new version, open a
-# PR bumping harness.json and package.json. The PR's build workflow re-runs
-# the contract suite and five-target packaging, so a green PR is releasable.
+# Daily upstream watch, one row per channel. When the dist-tag a channel follows
+# names a version ahead of that channel's pin, open a PR bumping harness.json
+# and package.json on that channel's branch. The PR's build workflow re-runs the
+# contract suite and five-target packaging, so a green PR is releasable.
+#
+# Stable has no row on purpose. `main` moves when someone promotes a pin they
+# have decided to stand behind, which is the entire meaning of that channel
+# (docs/update-channels.md, "The upstream watcher becomes per-channel").
 name: watch-upstream
 
 on:
@@ -15,68 +20,103 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-24.04
+    strategy:
+      # One channel's watch must not decide another's. Before channels existed
+      # a failure here cost a day; now it would cost a day on every channel at
+      # once, and the alpha row is the one most likely to fail first.
+      fail-fast: false
+      matrix:
+        include:
+          # Develop follows npm `latest` — upstream's newest rc.
+          - channel: dev
+            dist_tag: latest
+            base: dev
+          # Alpha follows npm `alpha`. The branch does not exist yet, so this
+          # row skips itself rather than failing; see the step below.
+          - channel: alpha
+            dist_tag: alpha
+            base: alpha
     steps:
-      # Branch the bump off dev and open the pull request against it: every
-      # change reaches main the same way, and a bump cut from main would carry
-      # an unrelated diff once dev is ahead.
+      # The alpha branch is a decision nobody has taken yet (AGENTS.md, "Cutting
+      # a release"), and a matrix row for a branch that is not there would fail
+      # `actions/checkout` daily. A missing branch is a channel that is not open,
+      # which is a normal state and not an error — so say so and stop.
+      - name: Find the channel's branch
+        id: branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/branches/${{ matrix.base }}" --silent >/dev/null 2>&1; then
+            echo "exists=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::no '${{ matrix.base }}' branch, so the ${{ matrix.channel }} channel has nowhere to bump"
+          fi
+
+      # Each channel's pin lives on its own branch and they diverge permanently
+      # by design, so the pin this compares must be read from the branch the PR
+      # will target — never from main.
       - uses: actions/checkout@v4
+        if: steps.branch.outputs.exists == 'yes'
         with:
-          ref: dev
+          ref: ${{ matrix.base }}
 
       - uses: actions/setup-node@v4
+        if: steps.branch.outputs.exists == 'yes'
         with:
           node-version: 24
 
-      - name: Compare pinned and published versions
+      - name: Compare the channel's pin against its dist-tag
         id: versions
+        if: steps.branch.outputs.exists == 'yes'
         run: |
+          # Read from the CHECKED-OUT branch, not from the branch this workflow
+          # file came from: a scheduled run uses main's YAML but the base
+          # branch's scripts. So a change to the watch has to reach every base
+          # branch in the matrix before it can run there — the "shell fixes have
+          # to reach three branches" problem, now with teeth. Say which branch
+          # is missing it rather than dying on a module resolution error.
+          if [ ! -f scripts/upstream-bump.mjs ]; then
+            echo "::error::${{ matrix.base }} has no scripts/upstream-bump.mjs; carry the watch change onto that branch before it can watch anything"
+            exit 1
+          fi
           PINNED=$(node -p "require('./harness.json').harness")
-          LATEST=$(npm view @deepseek-ai/dsh version)
-          # Ahead, not merely different. The pin can legitimately sit ABOVE the
-          # `latest` tag — upstream publishes to `next` first, and a release cut
-          # from a `next` version leaves the pin ahead until `latest` catches up.
-          # Gating on inequality made the watch open a PR walking that pin back
-          # down, every day, until it was closed by hand.
-          AHEAD=$(node -e "
-            const parts = (v) => {
-              const [core, pre = ''] = v.replace(/^v/, '').split(/-(.*)/s)
-              return { core: core.split('.').map(Number), pre: pre === '' ? [] : pre.split('.') }
-            }
-            const a = parts(process.argv[1]), b = parts(process.argv[2])
-            let ahead = null
-            for (let i = 0; i < 3; i += 1) if (a.core[i] !== b.core[i]) { ahead = a.core[i] > b.core[i]; break }
-            if (ahead === null) {
-              if (a.pre.length === 0 || b.pre.length === 0) ahead = b.pre.length > 0
-              else for (let i = 0; ahead === null; i += 1) {
-                const l = a.pre[i], r = b.pre[i]
-                if (l === undefined && r === undefined) { ahead = false; break }
-                if (l === undefined) { ahead = false; break }
-                if (r === undefined) { ahead = true; break }
-                if (l === r) continue
-                const ln = /^\d+\$/.test(l), rn = /^\d+\$/.test(r)
-                ahead = ln !== rn ? rn : ln ? Number(l) > Number(r) : l > r
-              }
-            }
-            console.log(ahead ? 'yes' : 'no')
-          " "$LATEST" "$PINNED")
-          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
-          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
-          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
-          echo "pinned $PINNED / latest $LATEST / latest ahead of pin: $AHEAD"
+          # A dist-tag the package has never published makes `npm view` exit
+          # non-zero. That is a channel with nothing to watch, not a failure.
+          if ! CANDIDATE=$(npm view "@deepseek-ai/dsh@${{ matrix.dist_tag }}" version 2>/dev/null) || [ -z "$CANDIDATE" ]; then
+            echo "::notice::@deepseek-ai/dsh has no '${{ matrix.dist_tag }}' dist-tag"
+            echo "bump=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The whole decision — stage against channel, then ahead-not-different
+          # — lives in `scripts/upstream-bump.mjs`, which is unit-tested against
+          # the real semver. It used to be a `node -e` here, which no test could
+          # reach and which a matrix would have duplicated per row. It writes its
+          # reasoning to stderr, so a "no" says which of the rules stopped it.
+          BUMP=$(node scripts/upstream-bump.mjs "$CANDIDATE" "$PINNED" "${{ matrix.channel }}")
+          echo "candidate=$CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.channel }}: pinned $PINNED / ${{ matrix.dist_tag }} $CANDIDATE / bump: $BUMP"
 
-      - name: Open bump PR
-        if: steps.versions.outputs.ahead == 'yes'
+      - name: Open the bump PR
+        if: steps.versions.outputs.bump == 'yes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LATEST: ${{ steps.versions.outputs.latest }}
+          CHANNEL: ${{ matrix.channel }}
+          BASE: ${{ matrix.base }}
+          CANDIDATE: ${{ steps.versions.outputs.candidate }}
           PR_BODY: |
-            `package.json` carries the release version `scripts/release-version.mjs` derives from the pin — upstream's core and rc number, with the scheme number carried across unchanged. That number is electron-updater's channel, so moving it strands the installed base for a release and stays a migration someone announces by hand. The new version is recorded in `PUBLISHED` as well, so the next bump is compared against it.
+            `package.json` carries the release version `scripts/release-version.mjs` derives from the pin — upstream's core and pre-release number, with the scheme number carried across unchanged. That number is electron-updater's channel, so moving it strands the installed base for a release and stays a migration someone announces by hand. The new version is recorded in this channel's `PUBLISHED` list as well, so the next bump is compared against it.
 
             The build workflow on this PR re-runs the sidecar contract suite and five-target packaging against the new version. Green checks mean the coupling contracts held; a red check names the exact seam that changed.
         run: |
-          BRANCH="upstream-bump/$LATEST"
+          # The channel is in the branch name because two channels can want the
+          # same upstream version — upstream promoting its `alpha` tag onto an rc
+          # is enough — and both rows would otherwise claim one branch name and
+          # the first one to finish would silence the other.
+          BRANCH="upstream-bump/$CHANNEL/$CANDIDATE"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
-            echo "bump branch already exists"; exit 0
+            echo "bump branch $BRANCH already exists"; exit 0
           fi
           git config user.name "Luna"
           git config user.email "xxs.main@gmail.com"
@@ -87,19 +127,19 @@ jobs:
           # same two hand edits before its checks said anything about the
           # harness. Deriving instead needs no dependency, which is why there is
           # no install step above. stdout is the release version, nothing else.
-          RELEASE=$(node scripts/release-version.mjs "$LATEST")
+          RELEASE=$(node scripts/release-version.mjs "$CANDIDATE" "$CHANNEL")
           git add harness.json package.json tests/unit/version-scheme.spec.ts
-          git commit -m "Track upstream @deepseek-ai/dsh $LATEST"
+          git commit -m "Track upstream @deepseek-ai/dsh $CANDIDATE on the $CHANNEL channel"
           git push -u origin "$BRANCH"
           gh label create upstream-bump --color 0E8A16 --description "Automated harness version bump" 2>/dev/null || true
           # Built as a file so the body can keep its backticks without fighting
           # shell quoting for them.
           {
-            printf 'Automated bump: pinned `%s`, shipping as `%s`.\n\n' "$LATEST" "$RELEASE"
+            printf 'Automated bump of the **%s** channel: pinned `%s`, shipping as `%s`.\n\n' "$CHANNEL" "$CANDIDATE" "$RELEASE"
             printf '%s\n' "$PR_BODY"
           } > "$RUNNER_TEMP/pr-body.md"
           gh pr create \
-            --base dev \
-            --title "Track upstream @deepseek-ai/dsh $LATEST" \
+            --base "$BASE" \
+            --title "Track upstream @deepseek-ai/dsh $CANDIDATE on $CHANNEL" \
             --label upstream-bump \
             --body-file "$RUNNER_TEMP/pr-body.md"

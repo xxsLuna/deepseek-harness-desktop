@@ -90,16 +90,29 @@ construction: there is nothing to edit.
 
 **Check `dist-tags`, not just the newest version.** `npm view @deepseek-ai/dsh
 dist-tags` has shown `next` ahead of `latest` (rc.8 published as `next` while
-`latest` was still rc.7). `watch-upstream.yml` reads `npm view … version`, which
-is the `latest` tag. Testing a `next` release and shipping it to users are
-separate decisions.
+`latest` was still rc.7), and again on 0.1.2-rc.1 — published to `next` at
+06:21 UTC, still not `latest` when the watch ran at 08:03 the same morning, and
+`latest` the next day. `watch-upstream.yml` reads one dist-tag per channel:
+`latest` for develop, `alpha` for alpha, and none at all for stable. Testing a
+`next` release and shipping it to users are separate decisions, which is why
+nothing follows `next` automatically.
 
 **Pinning ahead of `latest` used to make the daily watch propose a downgrade.**
 The gate was `pinned != latest` — inequality, not newer-than — so while the pin
 was a `next` release the watch opened a PR walking it *back* to `latest` every
 day. It now compares properly and only opens a PR when `latest` is genuinely
-ahead; the comparator in `watch-upstream.yml` is the reference. Recorded because
-the comparator looks like over-engineering until you know it replaced a `!=`.
+ahead; `scripts/upstream-bump.mjs` is the reference, and
+`tests/unit/upstream-bump.spec.ts` checks it against the real `semver`. Recorded
+because the comparator looks like over-engineering until you know it replaced a
+`!=`.
+
+**Channels give that mistake a second shape, and a quieter one.** `alpha` and
+`rc` number independently inside one core — upstream published `0.1.2-alpha.5`
+and then `0.1.2-rc.1`, and `5` there does not outrank `1`. A comparison across
+stages therefore answers whichever way the semver happens to fall and still looks
+like an answer. `bumpVerdict` refuses to compare at all unless the dist-tag *and*
+the branch's pin are both a stage that channel carries, and every refusal names
+which of the two stopped it.
 
 ### The pin covers one package only
 
@@ -180,6 +193,35 @@ done
 `session-telemetry-otel` fails differently and worse: its overlay *is* guarded by
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
+
+### 0.1.2 breaks three seams, and the rc breaks the same three as the alpha
+
+Measured on 2026-09-04 against staged `0.1.2-alpha.5`, and each one confirmed in
+a `0.1.2-rc.1` install too. Recorded per seam because "0.1.2 does not work" is
+the kind of note that gets re-derived from scratch every time someone tries the
+bump — and because two of the three would have been read as flakes.
+
+- **`@deepseek-ai/dsh-host-apiproxy` is gone.** Its last publish is `0.1.1-rc.2`,
+  the version pinned here, and it is absent from both 0.1.2 closures.
+  `packages/connection/src/client.ts` imports `AbstractApiClient` from its
+  `/client` and `RpcId`/`serverResponseSchema` from its `/api`, so `npm run
+  build` dies in esbuild before anything boots. Find where those three moved;
+  they are contracts this package implements, not code to reimplement.
+- **The sidecar does not start.** `healProfilesModuleFallback` in `dsh-app-boot`
+  reaches `readModuleFallbackManifest` with an undefined path and throws
+  `ERR_INVALID_ARG_TYPE`, from our `prepareProfile`
+  (`packages/bundle/lib/boot.js`). Profile module-fallback healing is new in the
+  0.1.2 line; the boot sequence around it needs re-reading rather than patching
+  at the call site.
+- **The prune leaves 12 `typescript-too-old.d.ts` files.** One per `lexical` and
+  `@lexical/*` package, and `pruned-payload.spec.ts` catches them. That name is
+  not a `.d.ts` a wildcard export drags in by accident — check what those
+  packages' `exports` maps say before widening `NEVER_RUNTIME`.
+
+The bump PR arrives red on all three, which is the contract suite doing its job:
+each failure names its seam instead of reaching a user. Do not take a 0.1.2 pin
+to any channel until they are fixed — including develop, whose watch row will
+propose `0.1.2-rc.1` every morning until it is.
 
 ---
 
@@ -265,8 +307,31 @@ not on the branch its channel names:
 | Develop | `desktop-dev` | `dev` | `release-version.mjs <upstream> dev` |
 | Alpha | `desktop-alpha` | `alpha` | `release-version.mjs <upstream> alpha` |
 
-`docs/update-channels.md` is the design; the alpha branch does not exist yet
-because upstream's alpha harness does not build against this shell.
+`docs/update-channels.md` is the design. **The `alpha` branch exists as of
+`0.1.2-alpha.5`.** The reason previously recorded for having no such branch —
+that upstream's alpha harness does not build against this shell — was a note
+rather than a result, and nothing pinned it.
+
+The alpha row of `watch-upstream.yml` still tolerates its absence: it asks the
+API for the branch, reports a notice and stops. Keep that. A channel that has
+been closed again is a normal state, and the alternative is a job that fails
+every night to say so.
+
+**A change to the watch has to reach every branch it watches.** A scheduled run
+uses the workflow file from `main` — GitHub reads it from the default branch —
+but `actions/checkout` then puts the BASE branch on disk, so
+`scripts/upstream-bump.mjs` and `scripts/release-version.mjs` are the base
+branch's copies. Land a watch change on `main` alone and the `dev` row dies on
+module resolution. The step checks for the script first and names the branch
+that is missing it.
+
+**A channel branch is seeded, not just forked.** Cut from `main` or `dev` it
+carries an `rc` pin, and `bumpVerdict` refuses to measure an `alpha` dist-tag
+against one rather than pick a direction out of the semver — so the branch would
+sit there looking open and never bump. Seeding is a hand cut and owes what a hand
+cut owes: `release-version.mjs <upstream> alpha` for the three files, plus
+`package-lock.json`, which carries the root version too. After that the watch
+keeps it current.
 
 **The version cut is not the script's job when only the build counter moves.**
 `release-version.mjs` derives a version for an UPSTREAM bump and resets the

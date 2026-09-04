@@ -166,21 +166,27 @@ published two releases in two days.
 
 ### The upstream watcher becomes per-channel
 
-`watch-upstream.yml` today reads one version and opens one PR:
+**Built.** `watch-upstream.yml` is a matrix over channels: the `latest`
+dist-tag onto `dev`, `alpha` onto `alpha`, and nothing onto `main` — stable moves
+only when someone promotes a pin deliberately, which is the whole meaning of that
+channel. The rows do not share a fate (`fail-fast: false`), and each reads its
+pin from the branch it will target rather than from `main`, because the pins
+diverge permanently by design.
 
-- `:34` `LATEST=$(npm view @deepseek-ai/dsh version)` — the `latest` dist-tag
-- `:90` derives the release version with `scripts/release-version.mjs`
-- `:102` opens the PR `--base dev`
-
-For three channels it needs the dist-tag and the base branch as a matrix: the
-`alpha` tag onto `alpha`, `latest` onto `dev`, and nothing onto `main` — stable
-moves only when someone promotes a pin deliberately, which is the whole meaning
-of that channel.
+The `alpha` row is inert until that branch exists. It asks the API for the
+branch, reports its absence as a notice and stops, rather than failing
+`actions/checkout` every night for a channel nobody has opened.
 
 The comparator that decides whether to open a PR at all must compare within a
 channel. Comparing an `alpha` dist-tag against a branch pinned to an `rc` would
 propose a bump in whichever direction the semver happened to fall, which is the
-`!=`-versus-newer-than mistake AGENTS.md already records once.
+`!=`-versus-newer-than mistake AGENTS.md already records once. That decision left
+the YAML for `scripts/upstream-bump.mjs`, where a test can reach it, and it now
+refuses outright unless the dist-tag and the pin are both a stage the channel
+carries. `tests/unit/upstream-bump.spec.ts` checks its ordering against the real
+`semver`, and checks that every matrix row targets the same branch
+`verify-tag-on-channel-branch` cuts that channel from — two files that have to
+agree, where disagreeing would only surface at release time.
 
 **Every hazard in AGENTS.md's "Cutting a release" applies unchanged to develop
 tags**, including the one that matters most: a draft left unpublished breaks
