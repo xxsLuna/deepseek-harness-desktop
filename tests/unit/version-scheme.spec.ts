@@ -59,7 +59,7 @@ const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.
  * `scripts/release-version.mjs` writes into whichever list matches the channel
  * it was given.
  */
-const PUBLISHED_DEV: readonly string[] = ['0.1.1-desktop-dev0.2.0']
+const PUBLISHED_DEV: readonly string[] = ['0.1.1-desktop-dev0.2.0', '0.1.1-desktop-dev0.2.1']
 const PUBLISHED_ALPHA: readonly string[] = []
 
 /** Every channel's list, by the identifier its versions carry. */
