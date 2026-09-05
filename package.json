@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "0.1.1-desktop-dev0.2.0",
+  "version": "0.1.1-desktop-dev0.2.1",
   "description": "Unofficial desktop app for DeepSeek Harness",
   "private": true,
   "license": "MIT",
