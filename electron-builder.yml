@@ -2,6 +2,28 @@ appId: com.github.xxsluna.deepseek-harness-desktop
 productName: DeepSeek Harness
 copyright: MIT — bundles DeepSeek Harness (c) DeepSeek AI
 
+# `productName` has a SPACE in it, and every artifact name below is spelled out
+# without one for that reason. It is not cosmetic — the space silently broke
+# auto-update on every platform and every release.
+#
+# Three parties disagree about what a space becomes:
+#
+#   electron-builder writes the file   `DeepSeek Harness Setup 0.1.1-….exe`
+#   …and the URL-safe form into the yml `DeepSeek-Harness-Setup-0.1.1-….exe`
+#   GitHub renames the uploaded asset   `DeepSeek.Harness.Setup.0.1.1-….exe`
+#
+# So `latest*.yml` named a file that does not exist and every download 404'd —
+# the installer, the dmg, the zip and the AppImage alike. Only the `.deb`
+# resolved, because its Debian-convention name is built from `${name}`, which
+# has no space. It went unseen because until the electron-updater CJS interop
+# fix (see src/updater.ts) no check ever reached the download at all: this is
+# the next layer of the same "the app cannot update itself" bug.
+#
+# Spelling the names here makes all three agree, and the shapes are the same
+# ones electron-builder's defaults produced, minus the space.
+# `scripts/verify-feed.mjs` is what keeps them agreeing — it runs in the build
+# and fails if any feed names a file the build did not produce.
+
 directories:
   output: out
   # build/ is the harness staging dir, so icons live in assets/
@@ -53,6 +75,10 @@ afterPack: scripts/after-pack.mjs
 # app ships the wrong architecture's koffi, ripgrep and sharp (see the matrix
 # comment in .github/workflows/build.yml).
 mac:
+  # Space-free, see the note under productName. Covers both dmg and zip; they
+  # differ by ${ext}, and the zip drops the `-mac` suffix the default carried —
+  # nothing reads that suffix, electron-updater takes the name from the feed.
+  artifactName: DeepSeek-Harness-${version}-${arch}.${ext}
   target: [dmg, zip]
   category: public.app-category.developer-tools
   identity: null
@@ -75,6 +101,9 @@ win:
   signExecutable: false
 
 nsis:
+  # Space-free, see the note under productName. This is the one that matters
+  # most: NSIS + latest.yml is the whole updater feed on Windows.
+  artifactName: DeepSeek-Harness-Setup-${version}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -91,6 +120,13 @@ linux:
   target: [AppImage, deb]
   category: Development
   maintainer: Luna <xxs.main@gmail.com>
+
+# Space-free, see the note under productName. AppImage only, and NOT set on
+# `linux:` — that would take the deb with it, and the deb is the one artifact
+# whose name was always right: Debian convention builds it from `${name}`,
+# which has no space. Renaming it would break the convention to fix nothing.
+appImage:
+  artifactName: DeepSeek-Harness-${version}-${arch}.${ext}
 
 protocols:
   - name: DeepSeek Harness
