@@ -45,6 +45,22 @@ const SHIPPING = /^(\d+)\.(\d+)\.(\d+)-desktop-(v|dev|alpha)(\d+)\.(\d+)\.(\d+)$
 const UPSTREAM = /^(\d+)\.(\d+)\.(\d+)-(alpha|beta|rc)\.(\d+)$/
 
 /**
+ * The stage upstream published a version at.
+ *
+ * Exported for `upstream-bump.mjs`, which has to establish that a dist-tag
+ * belongs to a channel at all BEFORE it compares anything: an `alpha` tag
+ * measured against an `rc` pin proposes a bump in whichever direction the
+ * semver happens to fall, which is the `!=`-versus-newer-than mistake AGENTS.md
+ * already records once.
+ * @param version - upstream's published version, e.g. `0.1.2-alpha.5`.
+ * @returns `alpha`, `beta` or `rc`, or undefined when the version is not a
+ * shape this scheme can read — a stable upstream release, among others.
+ */
+export function upstreamStage(version) {
+  return UPSTREAM.exec(version)?.[4]
+}
+
+/**
  * Which upstream stage each channel is allowed to carry.
  *
  * Checked rather than assumed, because nothing downstream would catch the
@@ -52,10 +68,10 @@ const UPSTREAM = /^(\d+)\.(\d+)\.(\d+)-(alpha|beta|rc)\.(\d+)$/
  * says stable, is offered to every stable install, and carries a harness
  * upstream has not called ready.
  */
-const STAGE_FOR_CHANNEL = { v: ['rc'], dev: ['rc'], alpha: ['alpha'] }
+export const STAGE_FOR_CHANNEL = { v: ['rc'], dev: ['rc'], alpha: ['alpha'] }
 
 /** The channel identifiers this script accepts, as the CLI spells them. */
-const CHANNELS = Object.keys(STAGE_FOR_CHANNEL)
+export const CHANNELS = Object.keys(STAGE_FOR_CHANNEL)
 
 /** Every ordered field of a release version, most significant first. */
 const fields = (match) => match.slice(1).map(Number)
