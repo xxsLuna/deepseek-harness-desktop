@@ -90,16 +90,29 @@ construction: there is nothing to edit.
 
 **Check `dist-tags`, not just the newest version.** `npm view @deepseek-ai/dsh
 dist-tags` has shown `next` ahead of `latest` (rc.8 published as `next` while
-`latest` was still rc.7). `watch-upstream.yml` reads `npm view … version`, which
-is the `latest` tag. Testing a `next` release and shipping it to users are
-separate decisions.
+`latest` was still rc.7), and again on 0.1.2-rc.1 — published to `next` at
+06:21 UTC, still not `latest` when the watch ran at 08:03 the same morning, and
+`latest` the next day. `watch-upstream.yml` reads one dist-tag per channel:
+`latest` for develop, `alpha` for alpha, and none at all for stable. Testing a
+`next` release and shipping it to users are separate decisions, which is why
+nothing follows `next` automatically.
 
 **Pinning ahead of `latest` used to make the daily watch propose a downgrade.**
 The gate was `pinned != latest` — inequality, not newer-than — so while the pin
 was a `next` release the watch opened a PR walking it *back* to `latest` every
 day. It now compares properly and only opens a PR when `latest` is genuinely
-ahead; the comparator in `watch-upstream.yml` is the reference. Recorded because
-the comparator looks like over-engineering until you know it replaced a `!=`.
+ahead; `scripts/upstream-bump.mjs` is the reference, and
+`tests/unit/upstream-bump.spec.ts` checks it against the real `semver`. Recorded
+because the comparator looks like over-engineering until you know it replaced a
+`!=`.
+
+**Channels give that mistake a second shape, and a quieter one.** `alpha` and
+`rc` number independently inside one core — upstream published `0.1.2-alpha.5`
+and then `0.1.2-rc.1`, and `5` there does not outrank `1`. A comparison across
+stages therefore answers whichever way the semver happens to fall and still looks
+like an answer. `bumpVerdict` refuses to compare at all unless the dist-tag *and*
+the branch's pin are both a stage that channel carries, and every refusal names
+which of the two stopped it.
 
 ### The pin covers one package only
 
@@ -265,8 +278,19 @@ not on the branch its channel names:
 | Develop | `desktop-dev` | `dev` | `release-version.mjs <upstream> dev` |
 | Alpha | `desktop-alpha` | `alpha` | `release-version.mjs <upstream> alpha` |
 
-`docs/update-channels.md` is the design; the alpha branch does not exist yet
-because upstream's alpha harness does not build against this shell.
+`docs/update-channels.md` is the design. **The `alpha` branch does not exist
+yet.** The reason recorded here was that upstream's alpha harness does not build
+against this shell — a note rather than a result, since nothing pins it and
+`0.1.2-alpha.5` installs cleanly on its own. The alpha row of
+`watch-upstream.yml` asks the API for the branch, says it is absent and stops; a
+channel nobody has opened is a normal state, not a failing job.
+
+Opening it is two steps and neither is the watch's. Create the branch, then seed
+its `harness.json` with a real `alpha` pin — a branch forked from `main` or `dev`
+carries an `rc` pin, and `bumpVerdict` refuses to measure an `alpha` dist-tag
+against it rather than pick a direction out of the semver. After that the watch
+keeps it current, and the first bump PR's five-target build is what actually
+answers whether that harness works here.
 
 **The version cut is not the script's job when only the build counter moves.**
 `release-version.mjs` derives a version for an UPSTREAM bump and resets the
