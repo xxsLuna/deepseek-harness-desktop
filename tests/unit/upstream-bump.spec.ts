@@ -21,7 +21,20 @@ import { bumpVerdict, isAhead } from '../../scripts/upstream-bump.mjs'
 import { CHANNELS, STAGE_FOR_CHANNEL } from '../../scripts/release-version.mjs'
 
 const root = join(import.meta.dirname, '..', '..')
-const read = (...parts: string[]) => readFileSync(join(root, ...parts), 'utf8')
+/**
+ * Read a workflow, with its line endings normalised.
+ *
+ * Not a tidy-up. These assertions match multi-line patterns against YAML, and
+ * git hands a Windows checkout CRLF — so `(\S+)\n` finds `\r` where it wants
+ * `\n` and matches nothing at all. The matrix then reads as EMPTY, and an
+ * assertion that every row names a known channel passes vacuously while the one
+ * demanding a row per channel fails. That is exactly what CI showed: green on
+ * macOS and both Linux targets, red on win-x64 alone.
+ *
+ * Normalising here rather than in each pattern, because the next pattern
+ * someone adds would have the same bug and the same platform-shaped symptom.
+ */
+const read = (...parts: string[]) => readFileSync(join(root, ...parts), 'utf8').replaceAll('\r\n', '\n')
 
 const watchWorkflow = read('.github', 'workflows', 'watch-upstream.yml')
 const releaseWorkflow = read('.github', 'workflows', 'release.yml')
