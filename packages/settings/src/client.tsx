@@ -518,9 +518,24 @@ function DesktopSettingsSection(): ReactNode {
             />
           </Row>
         )}
+        {/*
+          Two rows, because these are two versions and one of them used to
+          disappear. The harness version shared this hint slot with the update
+          check's result, and `checked` is component state that only resets when
+          a NEW check starts — so pressing "Check now" replaced the harness
+          version with a status message and never put it back, until the page
+          was reopened. The slot now belongs to the check, which is what it was
+          for; the harness gets a row of its own.
+
+          `nested` rather than a peer row, for the reason that modifier exists:
+          the relationship is containment, not equality. This app SHIPS that
+          harness — and the version above literally encodes it, since the middle
+          field of `…-desktop-v0.2.6` is the `rc.2` below. Two peer rows would
+          read as two independent products.
+        */}
         <Row
           label="Version"
-          hint={checked === undefined ? `Harness ${view.harnessVersion}` : checked.message}
+          hint={checked?.message}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <span style={{ ...styles.hint, opacity: 0.75 }}>{view.version}</span>
@@ -534,6 +549,13 @@ function DesktopSettingsSection(): ReactNode {
               {check === 'checking' ? <><Spinner /> Checking…</> : 'Check now'}
             </button>
           </div>
+        </Row>
+        <Row
+          label="Harness"
+          nested
+          hint="The DeepSeek Harness this build ships. The version above is this app’s own."
+        >
+          <span style={{ ...styles.hint, opacity: 0.75 }}>{view.harnessVersion}</span>
         </Row>
       </section>
     </div>
