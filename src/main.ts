@@ -22,7 +22,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { launchDshHome } from './dsh-home.js'
 import { SidecarLog } from './sidecar-log.js'
-import { teeConsole } from './console-log.js'
+import { silenceStreamErrors, teeConsole } from './console-log.js'
 import { failureResponse, type FailureReport } from './failure-page.js'
 import { reloadDelayMs, shouldRestart } from './restart-policy.js'
 import { createSidecarAddress } from './socket-path.js'
@@ -147,7 +147,13 @@ async function run(): Promise<void> {
   // Everything the launcher warns or errors about lands in the same file from
   // here on, including the modules that never knew about it. Installed right
   // after the log so it covers the rest of startup.
+  //
+  // It also makes every console method non-throwing, which is load-bearing in a
+  // packaged app: stdout is whatever was inherited, and a write to a pipe whose
+  // reader has gone raises EPIPE. electron-updater logs through this console,
+  // so the line announcing an available update used to crash the main process.
   teeConsole(console, (line) => logs.write(line))
+  silenceStreamErrors()
 
   /**
    * Set once the launcher has stopped trying. Read per request below rather
