@@ -131,6 +131,17 @@ jobs:
         if: startsWith(matrix.target, 'linux')
         run: node scripts/verify-payload.mjs "$(ls -d out/linux*-unpacked | head -1)/resources" --platform linux --arch ${{ endsWith(matrix.target, '-arm64') && 'arm64' || 'x64' }}
 
+      # One step for every target, because the failure it catches was not
+      # platform-specific: `productName` has a space, electron-builder wrote the
+      # URL-safe form into latest*.yml, GitHub renamed the uploaded asset's
+      # spaces to dots, and every download 404'd on Windows, macOS and AppImage
+      # alike for every release. Nothing said so — the app just never updated.
+      #
+      # Here rather than after publishing, because a published release cannot be
+      # repaired without cutting another one.
+      - name: Verify update feed
+        run: node scripts/verify-feed.mjs out
+
       # ELECTRON_DISABLE_SANDBOX: hosted ubuntu-24.04 restricts unprivileged
       # user namespaces and the unpacked build's chrome-sandbox lacks SUID, so
       # Chromium cannot sandbox here. A deliberate CI-only fidelity reduction;
