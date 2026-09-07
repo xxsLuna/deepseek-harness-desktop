@@ -602,8 +602,26 @@ npm run build
 npm run prune                 # --platform/--arch default to the host
 npx electron-builder --<mac|win|linux>
 node scripts/verify-payload.mjs <resources dir>
+node scripts/verify-feed.mjs out
 node scripts/smoke-packaged.mjs
 ```
+
+- **`verify-feed.mjs` is not optional, and it is the newest gate here.**
+  `productName` has a **space** in it, and three parties disagree about what a
+  space becomes: electron-builder writes the artifact with it, writes the
+  URL-safe form (space → `-`) into `latest*.yml`, and GitHub renames an uploaded
+  asset's spaces to `.`. So every feed named a file that did not exist and
+  **every download 404'd — Windows, macOS and AppImage, on every release**. Only
+  the `.deb` resolved, because Debian convention builds its name from `${name}`.
+  The artifact names are now spelled without a space in `electron-builder.yml`
+  and this gate keeps them that way. It needs no network: the mismatch is
+  already visible on disk, since GitHub's rename only turns a wrong name into a
+  differently wrong one.
+
+  Worth knowing how long it hid. Until the electron-updater CJS interop fix, no
+  check ever reached the download at all — so this was the *next* layer of "the
+  app cannot update itself", and fixing the first one is what exposed it. A
+  release cannot be repaired after publishing; it can only be superseded.
 
 - **`npm run prune` is destructive and must run after `build`, never before** —
   `build` restages the local packages.
