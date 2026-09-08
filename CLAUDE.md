@@ -55,6 +55,35 @@ Verified in this repo, so reach for these before inventing anything:
   module. Values the launcher decides are passed with `!!js process.env.X` at
   the row, so the launcher stays the single place the decision is made.
 
+### A declared export is not automatically a safe seam
+
+The seam question is about the **shape of the coupling**, not the import path,
+and `0.1.2` is what taught that. `@dsh-desktop/connection` imported
+`AbstractApiClient` from `dsh-host-apiproxy/client` — a path that package
+declared in its own `exports` map, so nothing was reaching anywhere it should
+not. The fragility was what the code then *did* with it: it **subclassed** the
+class, and beside it reimplemented the connection loop, which the file's own
+header admitted "mirrors the upstream package-internal controller".
+
+That is the tell. Copying an internal controller means the behaviour you need
+has no seam yet, and a subclass makes you depend on the parts of a class its
+author never promised — construction order, protected members, the fact that it
+exists at all. `0.1.2` retired the whole package, and 130 of our 291 lines
+turned out to be a second implementation of something upstream had meanwhile
+taken ownership of (`ConnectionHandle.start()`: "API Gateway owns the loop; a
+second call throws").
+
+So, in order of preference: **provide a value upstream asks for** (a service, a
+hook, a registered row) → **call a function it exports** → and only then think
+about a class it exports. If the only way through is to mirror upstream's
+internals, that is the moment to say the seam is missing, not to write the copy
+— because the copy will be load-bearing and undocumented the day it drifts.
+
+`tests/contract/upstream-seams.spec.ts` checks the narrower half of this: that
+every specifier we import is one upstream declares. It cannot see coupling
+shape, and it was green throughout the incident above. This paragraph is the
+part a reviewer has to hold.
+
 ### What genuinely cannot be a plugin
 
 The Electron launcher in `src/`. It is the process that *spawns* the harness,
