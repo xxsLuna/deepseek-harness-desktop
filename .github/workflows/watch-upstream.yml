@@ -27,6 +27,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Stable follows npm `latest` too — the same tag develop does, because
+          # both channels carry upstream's rc stage (STAGE_FOR_CHANNEL).
+          #
+          # This row used to be deliberately absent, and the reasoning is worth
+          # keeping rather than deleting: `main` moves when someone promotes a
+          # pin they have decided to stand behind, and a nightly job doing that
+          # is the one thing the stable channel exists to prevent. What changed
+          # is the reading of what the job does — it opens a PR, and a PR is a
+          # proposal. Merging `main` is still a person's decision, and that is
+          # the step where the promise of this channel actually lives.
+          #
+          # The cost is duplication, not risk: this row and the develop row
+          # follow the same tag from the same pin, so while `main` and `dev` sit
+          # on one pin they propose the identical bump twice every morning.
+          - channel: v
+            dist_tag: latest
+            base: main
           # Develop follows npm `latest` — upstream's newest rc.
           - channel: dev
             dist_tag: latest

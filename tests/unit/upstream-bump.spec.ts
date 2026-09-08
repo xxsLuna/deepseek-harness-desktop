@@ -141,11 +141,19 @@ describe('the watch matrix', () => {
     for (const { channel } of matrixRows) expect(CHANNELS).toContain(channel)
   })
 
-  it('leaves stable out', () => {
-    // Not an oversight to be tidied up later. `main` moves when someone promotes
-    // a pin they have decided to stand behind; a nightly job doing it is the one
-    // thing the stable channel exists to prevent.
-    expect(matrixRows.map((row) => row.channel)).not.toContain('v')
+  it('watches stable too, and still leaves the merge to a person', () => {
+    // This assertion used to say the opposite, and the reasoning it carried is
+    // worth keeping: `main` moves when someone promotes a pin they have decided
+    // to stand behind, and a nightly job doing THAT is the one thing the stable
+    // channel exists to prevent. What changed is the reading of what the job
+    // does — it opens a PR, and a PR is a proposal. The promise of this channel
+    // lives in the merge, which is still a person's.
+    expect(matrixRows.map((row) => row.channel)).toContain('v')
+    // The half that must not drift: watching stable is only safe while nothing
+    // merges it automatically. A workflow that gained an auto-merge step would
+    // turn this row into exactly the thing the comment above says it is not.
+    const commands = watchWorkflow.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n')
+    expect(commands, 'the stable row must open a PR, never merge one').not.toMatch(/gh pr merge|--auto\b|--merge\b/)
   })
 
   it('targets the branch release.yml cuts each channel from', () => {
@@ -163,7 +171,6 @@ describe('the watch matrix', () => {
     // see an upstream release again.
     const watched = new Set(matrixRows.map((row) => row.channel))
     for (const channel of CHANNELS) {
-      if (channel === 'v') continue
       expect(watched, `no watch row for the ${channel} channel`).toContain(channel)
     }
   })

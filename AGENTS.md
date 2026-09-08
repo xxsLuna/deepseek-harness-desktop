@@ -93,9 +93,20 @@ dist-tags` has shown `next` ahead of `latest` (rc.8 published as `next` while
 `latest` was still rc.7), and again on 0.1.2-rc.1 — published to `next` at
 06:21 UTC, still not `latest` when the watch ran at 08:03 the same morning, and
 `latest` the next day. `watch-upstream.yml` reads one dist-tag per channel:
-`latest` for develop, `alpha` for alpha, and none at all for stable. Testing a
-`next` release and shipping it to users are separate decisions, which is why
-nothing follows `next` automatically.
+`latest` for stable and develop alike — both carry upstream's rc stage — and
+`alpha` for alpha. Testing a `next` release and shipping it to users are separate
+decisions, which is why nothing follows `next` automatically.
+
+**Stable is watched, and the merge is what keeps it stable.** This row was
+deliberately absent at first, on the reasoning that `main` moves only when
+someone promotes a pin they have decided to stand behind. That reasoning still
+holds — what changed is the reading of what the job does. It opens a PR, and a
+PR is a proposal; the promise of the channel lives in the merge, which is still
+a person's. So the constraint moved rather than went away: **nothing may merge
+that PR automatically**, and `upstream-bump.spec.ts` fails on an auto-merge step
+appearing in the workflow. Note the duplication this buys — while `main` and
+`dev` sit on one pin, the two rows follow the same tag and propose the identical
+bump twice every morning.
 
 **Pinning ahead of `latest` used to make the daily watch propose a downgrade.**
 The gate was `pinned != latest` — inequality, not newer-than — so while the pin
