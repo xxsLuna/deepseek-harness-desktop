@@ -558,9 +558,19 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // the layout bundle that owns the frame.
     const res = await pluginBundle(socketPath, '@deepseek-ai/dsh-client-ui-layout')
     expect(res.status).toBe(200)
-    for (const local of ['_sidebarCol', '_centerCol', '_detailsCol']) {
+    for (const local of ['_sidebarCol', '_centerCol']) {
       expect(res.body, `upstream no longer emits ${local}`).toContain(local)
     }
+    // The right column has had two names — `_detailsCol` up to 0.1.2 and
+    // `_rightbarCol` from 0.1.5-alpha.1 — and the stylesheet lists both, so
+    // one build serves either upstream line. Asserted as "one of these", which
+    // still fails on a rename to a THIRD name: that is the case that would
+    // un-inset the column silently, and it is the only case worth failing on.
+    const rightColumn = ['_detailsCol', '_rightbarCol']
+    expect(
+      rightColumn.filter((local) => res.body.includes(local)),
+      `upstream emits neither ${rightColumn.join(' nor ')}; the right column would not be inset`,
+    ).not.toEqual([])
   })
 
   it('still emits the rail local the collapsed band cover paints over', async () => {
