@@ -135,7 +135,7 @@ export class Sidecar {
 
   constructor(private readonly options: SidecarOptions) {}
 
-  /** Spawn and resolve once the socket answers (rejects after timeoutMs). */
+  /** Spawn and resolve once the desktop surface answers (rejects after timeoutMs). */
   async start(timeoutMs = 60_000): Promise<void> {
     const { harnessRoot, address, titleBand, path, cwd, onLog, onUnexpectedExit } = this.options
     // Annotated, not inferred: the union of the injected and the real one
