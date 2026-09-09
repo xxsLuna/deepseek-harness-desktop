@@ -183,8 +183,74 @@ async function pluginBundle(socketPath: string, id: string): Promise<SocketRespo
   return await socketRequest(socketPath, { path: entry!.url.replaceAll('&amp;', '&') })
 }
 
-/** One unary RPC over the socket, unwrapped to its result. */
-async function rpc(socketPath: string, method: string, payload: Record<string, unknown> = {}): Promise<{
+/**
+ * A Remote payload: the named arguments wrapped in the one field 0.1.2 wants.
+ *
+ * The envelope is checked before anything is dispatched — "Remote payload must
+ * contain exactly one plain-object args field" — and the arguments inside it
+ * are then matched against the method descriptor EXACTLY: an unknown field or
+ * a missing required one is `gateway/arguments-invalid`, not a default.
+ *
+ * So the wire names in these tests are assertions about upstream's surface,
+ * which is what makes them worth having: 0.1.2 renamed the arguments as well
+ * as the endpoints, and a positional or loosely-named call fails identically
+ * whether the field moved or the method vanished.
+ * @param args - named arguments, keyed by the descriptor's wire names.
+ * @returns the payload to put on the wire.
+ */
+function remoteArgs(args: Record<string, unknown>): { args: Record<string, unknown> } {
+  return { args }
+}
+
+/**
+ * The first value a logical stream yields, over the desktop bridge.
+ *
+ * 0.1.2 turned several listings into streams: `workspace.list` is gone and
+ * `workspace/follow` "streams a complete Workspace baseline followed by
+ * ordered increments", so the baseline IS the list and it arrives as the
+ * stream's first frame.
+ *
+ * Read through `/__desktop/remote-stream` rather than the Gateway's WebSocket
+ * mux, because that bridge is what the renderer uses — the app scheme carries
+ * no upgrade. Using it here means a test that reads a listing also exercises
+ * the transport the app depends on.
+ * @param socketPath - the carrier socket.
+ * @param endpoint - `namespace/method` of a stream method.
+ * @param payload - the named wire arguments.
+ * @returns the first value the stream yielded.
+ * @throws when the stream failed or ended without a value.
+ */
+async function firstStreamValue(
+  socketPath: string,
+  endpoint: string,
+  payload: Record<string, unknown> = {},
+): Promise<unknown> {
+  const res = await socketRequest(socketPath, {
+    path: '/__desktop/remote-stream',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ endpoint, payload: remoteArgs(payload) }),
+    // The baseline is the first frame and the stream stays open for
+    // increments, so waiting for `end` would wait for the generation to be
+    // cancelled. One chunk is the baseline.
+    firstChunkOnly: true,
+  })
+  if (res.status !== 200) throw new Error(`${endpoint}: HTTP ${String(res.status)}`)
+  const first = res.body.split('\n').find((line) => line !== '')
+  if (first === undefined) throw new Error(`${endpoint}: the bridge framed nothing`)
+  const frame = JSON.parse(first) as { v?: unknown, e?: { message?: string } }
+  if ('e' in frame && frame.e !== undefined) throw new Error(`${endpoint}: ${frame.e.message ?? 'stream failed'}`)
+  return frame.v
+}
+
+/**
+ * One unary RPC over the socket, unwrapped to its result.
+ * @param socketPath - the carrier socket.
+ * @param method - `namespace/method`.
+ * @param args - the named wire arguments, exact.
+ * @returns the RPC result, ok or error.
+ */
+async function rpc(socketPath: string, method: string, args: Record<string, unknown> = {}): Promise<{
   ok: boolean
   value?: unknown
   error?: { code: string }
@@ -193,7 +259,7 @@ async function rpc(socketPath: string, method: string, payload: Record<string, u
     path: `/api/${method}`,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload }),
+    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload: remoteArgs(args) }),
   })
   if (res.status !== 200) throw new Error(`${method}: HTTP ${String(res.status)}`)
   return (JSON.parse(res.body) as { result: { ok: boolean, value?: unknown, error?: { code: string } } }).result
@@ -484,31 +550,36 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(answer.body).toContain('"accepted":false')
   })
 
-  it('composes the shipped agent presets, so sessions can be created', async () => {
-    // The preset roots are an assembly fact the upstream LAUNCHER patches in,
-    // not any bundle — miss that overlay and every session.create fails with
-    // agent-preset-not-found while the app otherwise looks healthy.
-    const list = await rpc(socketPath, 'agentPreset.list')
-    expect(list.ok, JSON.stringify(list)).toBe(true)
-    const ids = (list.value as { presets: { id: string, trust: string }[] }).presets.map((p) => p.id)
-    expect(ids).toContain('standard')
-    for (const preset of (list.value as { presets: { trust: string }[] }).presets) {
-      expect(preset.trust).toBe('system')
-    }
-  })
+  // The agent-preset roster used to be asserted here through
+  // `agentPreset.list`. 0.1.2 exposes presets over no Remote at all — the
+  // chosen default is a settings namespace now — so the roster is not
+  // observable from a client, and there is no endpoint to rename this to.
+  //
+  // What the check was FOR survives, and is covered: the preset roots are an
+  // assembly fact the upstream launcher patches in, and missing that overlay
+  // makes every `session/create` fail with agent-preset-not-found. The two
+  // tests below create a session, so they fail exactly when this one would
+  // have — on the consequence rather than on the inventory.
+  //
+  // Written down rather than deleted quietly, because "the roster is right"
+  // and "a session can be created" are not the same assertion, and a future
+  // reader should know which one is still standing.
 
   it('creates a session and exports it as a downloadable archive', async () => {
     // A fresh home has no workspace; create one through the same API the UI
     // uses after the picker returns a path.
-    const created = await rpc(socketPath, 'workspace.create', { path: home })
+    const created = await rpc(socketPath, 'workspace/create', { request: { path: home } })
     expect(created.ok, JSON.stringify(created)).toBe(true)
-    const workspaces = await rpc(socketPath, 'workspace.list')
-    expect(workspaces.ok).toBe(true)
-    const items = (workspaces.value as { items: { workspaceId: string }[] }).items
+    // `workspace.list` is gone: 0.1.2 streams the baseline through
+    // `workspace/follow`, so the listing is the stream's first frame — a
+    // TAGGED frame, `{type:'baseline',value:{items,archivedSessionIds}}`,
+    // because the increments that follow it are tagged too.
+    const baseline = await firstStreamValue(socketPath, 'workspace/follow')
+    const items = (baseline as { value: { items: { workspaceId: string }[] } }).value.items
     const workspaceId = items[0]?.workspaceId
     expect(workspaceId, 'workspace.create did not produce a workspace').toBeDefined()
 
-    const session = await rpc(socketPath, 'session.create', { workspaceId })
+    const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
     expect(session.ok, JSON.stringify(session)).toBe(true)
     const sessionId = (session.value as { sessionId?: string }).sessionId
     expect(typeof sessionId).toBe('string')
@@ -539,35 +610,58 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   })
 
   it('carries the server-to-client interaction plane', async () => {
-    // Approvals and ask-user questions arrive as SERVER-initiated requests on
-    // the mux stream and are answered through /api/respond. Both directions
-    // must survive the app scheme, which cannot open a WebSocket.
-    const mux = await socketRequest(socketPath, { path: '/api/events.mux', firstChunkOnly: true })
-    expect(mux.status).toBe(200)
-    expect(String(mux.headers['content-type'])).toContain('text/event-stream')
+    // Approvals and ask-user questions are SERVER-initiated: the harness asks
+    // and the page answers. Both directions have to survive the app scheme,
+    // which cannot open a WebSocket — so this is the plane the desktop had to
+    // rebuild, and the one test that proves the rebuild carries it.
+    //
+    // 0.1.2 moved both halves. The downlink was an SSE mux at
+    // `/api/events.mux`; it is now a reserved Remote stream named `$events`,
+    // opened through the same `wireStream` adapter as any other stream — which
+    // means the desktop bridge already carries it, and reading it HERE through
+    // the bridge is what shows that. The uplink was `/api/respond`; it is now
+    // an ordinary unary RPC, `$events/result`, on the `/api` channel the proxy
+    // already forwards.
+    //
+    // Neither route exists any more, so the old version of this test failed
+    // 404 — the honest signal, and the reason the suite is worth keeping.
+    const ready = await firstStreamValue(socketPath, '$events')
+    // The opening frame is the readiness proof, and it is also where 0.1.2 put
+    // the host facts that `host.describe` used to answer for.
+    const opened = ready as { type?: string, clientId?: string, host?: unknown }
+    expect(opened.type, JSON.stringify(opened)).toBe('ready')
+    expect(typeof opened.clientId).toBe('string')
+    expect(opened.host).toBeDefined()
 
-    const answered = await socketRequest(socketPath, {
-      path: '/api/respond',
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-response', rpcId: crypto.randomUUID(), result: { ok: true, value: {} } }),
+    // The uplink, addressed with the `$` segment upstream reserves — a fact
+    // about the URL and not only the dispatcher, since the channel validates
+    // path segments before anything is dispatched.
+    const answered = await rpc(socketPath, '$events/result', {
+      clientId: 'contract-no-such-client',
+      eventId: crypto.randomUUID(),
+      outcome: { kind: 'next' },
     })
-    // An unknown rpcId is refused with a receipt, not an error: the reply path
-    // is reachable and correlating.
-    expect(answered.status).toBe(200)
-    expect(answered.body).toContain('not-pending')
+    // An unknown client is refused by CORRELATION, not by the transport: the
+    // reply path is reachable, parsed the envelope, and then declined to match
+    // it to a live generation. A 404 or a 415 here would mean the route moved
+    // again; `ok: true` would mean it accepts answers for nobody.
+    expect(answered.ok, JSON.stringify(answered)).toBe(false)
+    expect(answered.error?.code).toBe('gateway/internal')
   })
 
-  it('reports a working directory that is not the filesystem root', async () => {
-    // A GUI launch inherits the session manager's cwd; upstream derives the
-    // sandbox workspace-write fallback root from it, so `/` would widen the
-    // boundary to the whole filesystem.
-    const described = await rpc(socketPath, 'host.describe')
-    expect(described.ok).toBe(true)
-    const cwd = (described.value as { cwd: string }).cwd
-    expect(cwd).not.toBe('/')
-    expect(cwd.length).toBeGreaterThan(1)
-  })
+  // The working-directory check used to live here, reading `host.describe`.
+  // 0.1.2 removed that endpoint — host facts ride the Remote event
+  // generation's opening frame now, and that frame carries `home`, not a
+  // working directory — so the harness no longer reports the answer to
+  // anybody.
+  //
+  // The check did not go away; it moved to the party that decides it.
+  // `cwd` is the LAUNCHER's choice (`homedir()` in main, forwarded by
+  // `Sidecar.start`), and asserting that forwarding is a unit test's job:
+  // `tests/unit/sidecar.spec.ts`, "spawns the harness in the configured
+  // working directory". Recorded here because a reader looking for the
+  // filesystem-root guard should find out where it went rather than conclude
+  // it was dropped with the endpoint.
 
   // ── the plugin profile: the second module-resolution anchor ──
   //
@@ -673,10 +767,11 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     const parked = join(home, 'claude-plugins', 'handplaced', '.note-taker')
     const live = join(home, 'claude-plugins', 'handplaced', 'note-taker')
     const names = async (): Promise<string[]> => {
-      const workspaces = await rpc(socketPath, 'workspace.list')
-      const workspaceId = (workspaces.value as { items: { workspaceId: string }[] }).items[0]?.workspaceId
-      const session = await rpc(socketPath, 'session.create', { workspaceId })
-      const listed = await rpc(socketPath, 'skill.list', { sessionId: (session.value as { sessionId?: string }).sessionId })
+      // The baseline frame of `workspace/follow`; `workspace.list` is gone.
+      const baseline = await firstStreamValue(socketPath, 'workspace/follow')
+      const workspaceId = (baseline as { value: { items: { workspaceId: string }[] } }).value.items[0]?.workspaceId
+      const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
+      const listed = await rpc(socketPath, 'skills/list', { request: { sessionId: (session.value as { sessionId?: string }).sessionId } })
       return (listed.value as { skills: { name: string }[] }).skills.map((one) => one.name)
     }
 
@@ -691,15 +786,16 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // The format is not translated: the harness reads Claude's SKILL.md as its
     // own, and this is the end-to-end proof. skill.list is session-scoped, so a
     // workspace and a session come first — the same calls the UI makes.
-    const created = await rpc(socketPath, 'workspace.create', { path: home })
+    const created = await rpc(socketPath, 'workspace/create', { request: { path: home } })
     expect(created.ok, JSON.stringify(created)).toBe(true)
-    const workspaces = await rpc(socketPath, 'workspace.list')
-    const workspaceId = (workspaces.value as { items: { workspaceId: string }[] }).items[0]?.workspaceId
-    const session = await rpc(socketPath, 'session.create', { workspaceId })
+    // The baseline frame of `workspace/follow`; `workspace.list` is gone.
+    const baseline = await firstStreamValue(socketPath, 'workspace/follow')
+    const workspaceId = (baseline as { value: { items: { workspaceId: string }[] } }).value.items[0]?.workspaceId
+    const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
     expect(session.ok, JSON.stringify(session)).toBe(true)
     const sessionId = (session.value as { sessionId?: string }).sessionId
 
-    const listed = await rpc(socketPath, 'skill.list', { sessionId })
+    const listed = await rpc(socketPath, 'skills/list', { request: { sessionId } })
     expect(listed.ok, JSON.stringify(listed)).toBe(true)
     const names = (listed.value as { skills: { name: string }[] }).skills.map((one) => one.name)
 
