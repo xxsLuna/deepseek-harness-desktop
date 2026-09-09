@@ -17,12 +17,22 @@ const staged = join(root, 'build', 'harness', 'node_modules')
 /** @type {{ dir: string, id: string, entry: string, external: string[] }[]} */
 const BUNDLES = [
   {
-    // The upstream apiproxy client code is bundled in (published as plain
-    // ESM); nothing else is imported at runtime, so this one has no externals.
+    // Upstream's connection client is REQUIRED at runtime, not bundled: this
+    // bundle re-exports its `apply`, and bundling a second copy would mean two
+    // plugin bodies racing to `ctx.provide('connection', …)`.
+    //
+    // It has to be external for a second reason too — upstream's client bundle
+    // is not ESM. It registers itself with `window.__ModuleLoader__` and hands
+    // its exports back from a factory, so esbuild resolving the file finds no
+    // exports at all and quietly compiles `apply` to undefined (it warns, and
+    // that warning is the only sign). Keeping it external turns the import
+    // into the `require("@deepseek-ai/dsh-client-connection/client")` the
+    // loader answers — the same subpath form upstream's own bundles use
+    // between themselves.
     dir: 'connection',
     id: '@dsh-desktop/connection',
     entry: 'client.ts',
-    external: [],
+    external: ['@deepseek-ai/*'],
   },
   {
     // A React component: everything it renders with belongs to the page.
