@@ -232,7 +232,15 @@ had moved, not a feature that had gone.
   plugin route was mounted. The window then loaded through a proxy that could
   not yet mint a session, upstream answered the index 401, and a document load
   happens once, so nothing retried: the app printed `ready`, logged no error,
-  and showed an empty window. Every 0.1.2+ pin had this.
+  and showed an empty window.
+
+  **It was a race, which is the part that makes it nasty.** Whether the window
+  or the route registration got there first decided it, so the app opened blank
+  *most* of the time rather than every time — and one slow runner passing looks
+  exactly like a flake. Measured on the same commit: mac-arm64, win-x64 and
+  linux-x64 all reported `boot entries: 0`, while linux-arm64 reported
+  `ALL-PASS, boot entries: 55`. Do not read a single green smoke as evidence
+  here; a readiness condition that is merely *usually* true is the bug.
 
   Readiness now asks for `/desktop/index-url` and requires 200. That route is
   registered by `@dsh-desktop/bundle` inside `ctx.inject(['connection'])`, so it
