@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { APP_ORIGIN, desktopHostAction, isDesktopHostPath, isHostOnlyPath, isTrustedRendererRequest } from '../../src/socket-proxy.js'
+import { APP_ORIGIN, desktopHostAction, isDesktopHostPath, isHostOnlyPath, isTrustedRendererRequest, shouldRetryUnauthorized } from '../../src/socket-proxy.js'
 
 describe('isHostOnlyPath', () => {
   it('refuses the launcher-only surface', () => {
@@ -60,5 +60,30 @@ describe('isTrustedRendererRequest', () => {
   it('refuses a cross-site marker or a foreign origin', () => {
     expect(isTrustedRendererRequest(req({ 'sec-fetch-site': 'cross-site' }))).toBe(false)
     expect(isTrustedRendererRequest(req({ origin: 'https://evil.example' }))).toBe(false)
+  })
+})
+
+describe('shouldRetryUnauthorized', () => {
+  it('retries a 401 with no body, which is the document load', () => {
+    // The case that matters: a 401 index is a rendered page, not a failed
+    // load, so Chromium's did-fail-load never fires and the launcher's bounded
+    // reload never sees it. Without this the window stays blank for the rest
+    // of the app's life — measured, as the readiness bug.
+    expect(shouldRetryUnauthorized(401, false)).toBe(true)
+  })
+
+  it('does not retry a request that carried a body', () => {
+    // The body is a stream already piped to the sidecar and cannot be
+    // replayed, so the retry would send an empty one — a wrong answer in place
+    // of an honest 401.
+    expect(shouldRetryUnauthorized(401, true)).toBe(false)
+  })
+
+  it('leaves every other status alone', () => {
+    // Only the auth fence's own answer is worth re-minting for. A 403 is the
+    // launcher's own refusal, and a 404 or 500 says nothing about the session.
+    for (const status of [200, 204, 303, 400, 403, 404, 415, 500]) {
+      expect(shouldRetryUnauthorized(status, false), String(status)).toBe(false)
+    }
   })
 })
