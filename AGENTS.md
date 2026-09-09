@@ -447,6 +447,37 @@ bug in `appendPublished` (an empty list produced `[, 'x']`, an elision) that
 whose users most need it ships without it. This is the open question the channel
 design names and does not answer.
 
+### Check a channel branch's fix parity BEFORE you tag it
+
+The paragraph above says to cherry-pick. It did not say to verify, and the
+alpha channel's first release was tagged carrying **three** shipped fixes it had
+never received — the junction delete that empties the app's own `node_modules`,
+the artifact-name fix without which every update download 404s, and the EPIPE
+guard that stops a log line about an update from crashing the app. The branch
+had been seeded from a commit predating all three.
+
+Nothing caught it. Each channel branch runs its own CI over its own tree, so a
+missing fix is a test that is simply not present — a green build on that branch
+says the code on it works, never that the code on it is complete. The alpha
+branch had no `verify-feed` step at all, so the gate for one of the three was
+absent along with the fix it guards.
+
+Compare the trees instead of trusting the history, because a cherry-pick that
+replays under a new SHA makes ancestry useless here:
+
+```sh
+# From the channel branch, against the branch that has the fixes.
+git diff --stat <other-branch> HEAD -- . \r
+  ':!package.json' ':!package-lock.json' ':!harness.json' \r
+  ':!tests/unit/version-scheme.spec.ts'
+```
+
+Every path it lists is either a deliberate divergence or a gap. There should be
+none left but the version records; anything else needs a reason you can say out
+loud. `git merge-base --is-ancestor <sha> <branch>` answers a different and
+less useful question — it said all three were "missing" from `dev` too, which
+was false: they were there under replayed SHAs.
+
 **Publish the draft promptly — do not sit on it.** The tag appears in
 `releases.atom` the moment it is pushed, while the assets stay draft-private.
 electron-updater's channel walk picks the new tag, fails to fetch its
