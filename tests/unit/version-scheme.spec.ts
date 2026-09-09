@@ -60,7 +60,7 @@ const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.
  * it was given.
  */
 const PUBLISHED_DEV: readonly string[] = ['0.1.1-desktop-dev0.2.0', '0.1.1-desktop-dev0.2.1', '0.1.1-desktop-dev0.2.2']
-const PUBLISHED_ALPHA: readonly string[] = ['0.1.2-desktop-alpha0.5.0']
+const PUBLISHED_ALPHA: readonly string[] = ['0.1.2-desktop-alpha0.5.0', '0.1.5-desktop-alpha0.1.0']
 
 /** Every channel's list, by the identifier its versions carry. */
 const PUBLISHED_BY_CHANNEL: Record<string, readonly string[]> = {
