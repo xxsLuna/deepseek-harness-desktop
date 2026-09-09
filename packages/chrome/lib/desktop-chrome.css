@@ -42,10 +42,19 @@
  * owes us nothing for those locals, so tests/contract asserts each one still
  * matches exactly one element — a rename fails loudly instead of shipping a
  * broken layout.
+ *
+ * The right column is listed under BOTH names it has had: `_detailsCol` up to
+ * 0.1.2 and `_rightbarCol` from 0.1.5-alpha.1, where upstream renamed it. Both
+ * stay because the channels carry different pins and shell fixes are
+ * cherry-picked between them, so one stylesheet has to inset the column on
+ * either upstream line; the name that is absent selects nothing and costs
+ * nothing. The contract test is what says the column is still reachable under
+ * one of them.
  */
 [class*="_sidebarCol"],
 [class*="_centerCol"],
-[class*="_detailsCol"] {
+[class*="_detailsCol"],
+[class*="_rightbarCol"] {
   padding-top: var(--dsh-title-band) !important;
   box-sizing: border-box !important;
 }
