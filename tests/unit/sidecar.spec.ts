@@ -39,12 +39,12 @@ interface HarnessOptions {
 /** A Sidecar wired to stub processes and a stub readiness probe. */
 function harness(options: HarnessOptions = {}) {
   const children: FakeChild[] = []
-  const launches: { command: string, args: string[], env: NodeJS.ProcessEnv }[] = []
+  const launches: { command: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string }[] = []
   const exits: (number | null)[] = []
   const logs: string[] = []
 
   const spawn: SidecarSpawn = (command, args, spawnOptions) => {
-    launches.push({ command, args, env: spawnOptions.env ?? {} })
+    launches.push({ command, args, env: spawnOptions.env ?? {}, cwd: spawnOptions.cwd as string | undefined })
     const child = new FakeChild()
     children.push(child)
     options.onSpawn?.(child)
@@ -97,6 +97,21 @@ describe('Sidecar.start', () => {
       join('/opt', 'harness', 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'),
     ])
     expect(h.launches[0]!.env.ELECTRON_RUN_AS_NODE).toBe('1')
+  })
+
+  it('spawns the harness in the configured working directory', async () => {
+    // A GUI launch inherits the session manager's cwd, often `/`, and upstream
+    // derives the sandbox workspace-write fallback root from it — so `/` would
+    // widen that boundary to the whole filesystem. main passes `homedir()`.
+    //
+    // Asserted here because the harness stopped reporting it: the contract
+    // suite used to read `host.describe`, which 0.1.2 removed. The launcher is
+    // the only party that ever decided the answer, so this is where the guard
+    // belongs now.
+    const h = harness()
+    await h.sidecar.start()
+    expect(h.launches[0]?.cwd).toBe('/home/user')
+    expect(h.launches[0]?.cwd).not.toBe('/')
   })
 
   it('reports a crash so main can bring the harness back', async () => {
