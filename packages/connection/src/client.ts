@@ -1,291 +1,164 @@
 /**
- * @dsh-desktop/connection browser half — the SSE carrier for the app scheme.
+ * @dsh-desktop/connection browser half — the desktop transport, and nothing else.
  *
- * The upstream browser carrier opens WebSockets for the two event streams,
- * which cannot connect from a custom scheme. This carrier subclasses the
- * upstream AbstractApiClient and inherits its fetch/SSE defaults instead, so
- * unary calls and both event streams ride `fetch()` against the same origin.
- * The connection loop (readiness handshake, generation fence, exponential
- * backoff, sink isolation) mirrors the upstream package-internal controller;
- * the public type contracts it implements are imported from the upstream
- * package, so an upstream contract change fails this package's typecheck.
+ * This file used to be 291 lines and a whole `ConnectionHandle` of its own: a
+ * subclass of upstream's `AbstractApiClient`, a copy of upstream's browser RPC
+ * caller, and a connection loop its own header admitted "mirrors the upstream
+ * package-internal controller". It replaced upstream's connection plugin
+ * outright, because the one thing it actually needed to change — the renderer
+ * cannot open a WebSocket to the app scheme — had no seam.
+ *
+ * `0.1.2` added the seam, and describes it in exactly our terms: a carrier
+ * override "installed on the page global before plugin boot ... a shell that
+ * owns a different physical transport ... provides both halves here instead of
+ * forking this plugin". So all of that goes, and what is left is two transport
+ * functions plus one flag.
+ *
+ * The ordering rule the seam states — before plugin boot — holds by
+ * construction rather than by patch order: the global is assigned at module
+ * scope and `apply` is re-exported, so evaluation always precedes the plugin
+ * body. That is the same delegation the node half already does, which is why
+ * the row's shape does not change.
+ *
+ * `ownsHost` is the one that deserves a note. This file used to hardcode
+ * `isLoopback: true` with the comment "the host tree runs in this
+ * application's own sidecar process, so the surface is always loopback" —
+ * true, and unprovable to upstream, whose check is
+ * `isLoopbackHostname(location.hostname)` and a `dsh://` host is not one.
+ * `ownsHost: true` is that same claim, declared where upstream reads it.
  */
-import type { Context } from '@deepseek-ai/cordis'
-import { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client'
-import { RpcId, serverResponseSchema } from '@deepseek-ai/dsh-host-apiproxy/api'
-import type {
-  ClientConnectionRpc,
-  ConnectionConfig,
-  ConnectionHandle,
-  ConnectionSinks,
-  ConnectionState,
-  HostDescription,
-  IApiClient,
-} from '@deepseek-ai/dsh-client-connection/client'
+import type { ClientTransportHooks } from '@deepseek-ai/dsh-client-connection/client'
 
-/** Unary + SSE over the page origin; the base class owns every protocol invariant. */
-class AppSchemeApiClient extends AbstractApiClient {
-  protected doFetch(input: URL, init?: RequestInit): Promise<Response> {
-    return globalThis.fetch(input, init)
-  }
-}
+/**
+ * Where the sidecar bridges a logical stream. Answered by
+ * `@dsh-desktop/bundle`, which hands the endpoint straight to the Gateway's
+ * own `wireStream.open` — the adapter upstream documents as "shared by the
+ * WebSocket mux and local Host transports".
+ *
+ * Not under `/api`: that prefix belongs to upstream's route owner, and a path
+ * of ours living inside it is how the previous version ended up shadowing
+ * upstream routes to get a look in.
+ */
+const STREAM_PATH = '/__desktop/remote-stream'
 
-// ---- generic RPC caller (mirrors the upstream browser implementation) ------
+/** One NDJSON frame from the bridge: a value, or the failure that ended it. */
+type Frame = { readonly v: unknown } | { readonly e: { readonly message?: string, readonly code?: string } }
 
-const INTERNAL_BASE = 'http://dsh.internal'
-const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
-const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
-
-function resolveBase(): string {
-  const location = globalThis.location
-  return location?.origin !== undefined && location.origin !== 'null' ? location.origin : INTERNAL_BASE
-}
-
-function assertTarget(channel: string, endpoint: string): void {
-  const segments = endpoint.split('/')
-  if (!CHANNEL_PATTERN.test(channel) || segments.some(
-    (segment) => segment === '' || segment === '.' || segment === '..' || !ENDPOINT_SEGMENT_PATTERN.test(segment),
-  )) {
-    throw new Error(`connection: invalid RPC target ${JSON.stringify(`${channel}/${endpoint}`)}`)
-  }
-}
-
-/** Browser caller for generic Connection unary RPC channels (Typert Remotes). */
-function createConnectionRpc(): ClientConnectionRpc {
-  return {
-    async call(channel, endpoint, payload, signal) {
-      assertTarget(channel, endpoint)
-      const rpcId = RpcId(crypto.randomUUID())
-      const message = { type: 'client-request', rpcId, method: endpoint, payload }
-      const response = await globalThis.fetch(new URL(`${channel}/${endpoint}`, resolveBase()), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(message),
-        ...(signal === undefined ? {} : { signal }),
-      })
-      if (!response.ok) throw new Error(`transport failure for ${channel}/${endpoint}: HTTP ${response.status}`)
-      const full = serverResponseSchema.parse(await response.json())
-      if (full.rpcId !== rpcId) throw new Error(`rpcId mismatch for ${endpoint}: sent ${rpcId}, got ${full.rpcId}`)
-      return full.result
-    },
-  }
-}
-
-// ---- connection loop (mirrors the upstream package-internal controller) ----
-
-const CONNECTION_DEFAULTS = {
-  backoffBaseMs: 500,
-  backoffFactor: 2,
-  backoffMaxMs: 10_000,
-  streamOpenTimeoutMs: 3_000,
-}
-
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(done, ms)
-    signal.addEventListener('abort', done, { once: true })
-    function done(): void {
-      clearTimeout(t)
-      signal.removeEventListener('abort', done)
-      resolve()
-    }
+/**
+ * Open one logical stream over a streaming POST instead of the Gateway's
+ * WebSocket mux.
+ *
+ * **NDJSON rather than SSE, and rather than the mux protocol.** The mux exists
+ * to multiplex many logical streams onto one socket; here every stream is its
+ * own request, so there is nothing to multiplex and reproducing that framing
+ * would be copying upstream's internals to solve a problem we do not have.
+ * SSE would be the other obvious choice and is worse for this: it cannot carry
+ * a request body, so the payload would have to go in the URL, and its framing
+ * adds `data:` prefixes and heartbeat lines to filter for no gain when both
+ * ends are ours.
+ *
+ * An async generator, so calling this returns the iterable synchronously the
+ * way the hook's signature requires while the fetch is still in flight.
+ * @param endpoint - canonical Remote endpoint, passed through untouched.
+ * @param payload - decoded carrier payload, passed through untouched.
+ * @param signal - logical-stream cancellation; aborts the request, which is
+ * what tells the sidecar to abort the Gateway stream behind it.
+ * @yields each validated stream value the Gateway produced.
+ */
+async function* openRemoteStream(
+  endpoint: string,
+  payload: unknown,
+  signal: AbortSignal,
+): AsyncIterable<unknown> {
+  const response = await globalThis.fetch(STREAM_PATH, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ endpoint, payload }),
+    signal,
   })
+  if (!response.ok) {
+    throw new Error(`connection: stream ${endpoint} failed to open: HTTP ${response.status}`)
+  }
+  const body = response.body
+  if (body === null) throw new Error(`connection: stream ${endpoint} opened with no body`)
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let pending = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      // `stream: true` on every decode, including the flush below: a value can
+      // split a multi-byte character across two chunks, and decoding each
+      // chunk independently turns that into a replacement character inside
+      // otherwise valid JSON.
+      pending += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        const line = pending.slice(0, newline)
+        pending = pending.slice(newline + 1)
+        if (line !== '') yield unwrap(line, endpoint)
+        newline = pending.indexOf('\n')
+      }
+      if (done) break
+    }
+    // A frame with no trailing newline is a truncated write, not a value.
+    if (pending.trim() !== '') {
+      throw new Error(`connection: stream ${endpoint} ended mid-frame`)
+    }
+  } finally {
+    // Releases the lock whether the consumer broke out of the loop, the signal
+    // aborted, or a frame threw. Without it an early `break` leaves the body
+    // locked and the request open.
+    reader.releaseLock()
+  }
 }
 
 /**
- * Opens both streams and keeps iterating, reconnecting with exponential
- * backoff on loss. Sink exceptions never kill the pump; readiness is a
- * host.describe round-trip racing a stream-open timeout.
+ * Read one frame, turning a failure frame back into a thrown error.
+ *
+ * The bridge sends whatever `wireStream.failure(error)` produced, so the code
+ * and message reaching the consumer are the Gateway's own rather than a
+ * transport-shaped paraphrase of them.
+ * @param line - one NDJSON line, known non-empty.
+ * @param endpoint - for the message when the line is not a frame at all.
+ * @returns the value the frame carried.
  */
-class ConnectionController {
-  private generation = 0
-  private attempt = 0
-  private current: AbortController | null = null
-  private running = false
-  private lastState: ConnectionState | null = null
-  private readonly config: typeof CONNECTION_DEFAULTS
-
-  constructor(
-    private readonly api: IApiClient,
-    private readonly sinks: ConnectionSinks,
-    config: ConnectionConfig = {},
-  ) {
-    this.config = { ...CONNECTION_DEFAULTS, ...config }
+function unwrap(line: string, endpoint: string): unknown {
+  let frame: Frame
+  try {
+    frame = JSON.parse(line) as Frame
+  } catch {
+    throw new Error(`connection: stream ${endpoint} sent a frame that is not JSON`)
   }
-
-  /** Idempotent: begin the connect/pump/reconnect loop. */
-  start(): void {
-    if (this.running) return
-    this.running = true
-    void this.loop()
+  if ('e' in frame) {
+    const failure = new Error(frame.e.message ?? `stream ${endpoint} failed`)
+    if (frame.e.code !== undefined) Object.assign(failure, { code: frame.e.code })
+    throw failure
   }
-
-  /** Stop the loop and abort the current generation's streams. */
-  stop(): void {
-    this.running = false
-    this.current?.abort()
-    this.current = null
-  }
-
-  private backoffDelay(attempt: number): number {
-    const { backoffBaseMs, backoffFactor, backoffMaxMs } = this.config
-    const cap = Math.min(backoffMaxMs, backoffBaseMs * backoffFactor ** Math.max(0, attempt - 1))
-    return cap / 2 + Math.random() * (cap / 2)
-  }
-
-  /** Read through a method: stop() flips the flag across awaits. */
-  private isRunning(): boolean {
-    return this.running
-  }
-
-  private isGenerationActive(controller: AbortController): boolean {
-    return this.isRunning() && !controller.signal.aborted
-  }
-
-  private async loop(): Promise<void> {
-    while (this.running) {
-      const gen = ++this.generation
-      const ac = new AbortController()
-      this.current = ac
-      let muxOpened: () => void = () => {}
-      let hostOpened: () => void = () => {}
-      const streamsOpen = Promise.all([
-        new Promise<void>((resolve) => { muxOpened = resolve }),
-        new Promise<void>((resolve) => { hostOpened = resolve }),
-      ])
-      const failed = new Promise<void>((resolve) => {
-        const settle = (): void => {
-          if (gen === this.generation && !ac.signal.aborted) ac.abort()
-          resolve()
-        }
-        void this.pumpStream(this.api.events.mux({}, ac.signal, muxOpened), this.sinks.onMuxEnvelope, settle)
-        void this.pumpStream(this.api.events.host({}, ac.signal, hostOpened), this.sinks.onHostEnvelope, settle)
-      })
-      try {
-        const timeout = new AbortController()
-        const [description] = await Promise.all([
-          this.api.host.describe({}),
-          Promise.race([streamsOpen, sleep(this.config.streamOpenTimeoutMs, timeout.signal)]),
-        ])
-        timeout.abort()
-        const descriptionResult = description.result
-        if (!descriptionResult.ok) {
-          throw new Error(`host.describe failed: ${descriptionResult.error.code}: ${descriptionResult.error.message}`)
-        }
-        if (ac.signal.aborted) throw new Error('generation aborted during readiness handshake')
-        this.attempt = 0
-        this.emitState('connected')
-        if (this.isGenerationActive(ac)) {
-          this.callSink(() => {
-            this.sinks.onConnected?.(descriptionResult.value)
-          })
-        }
-      } catch {
-        if (!ac.signal.aborted) ac.abort()
-      }
-      await failed
-      if (!this.isRunning()) return
-      this.emitState('reconnecting')
-      this.attempt += 1
-      console.warn(`[desktop-runtime] connection lost, retry #${this.attempt}`)
-      const idle = new AbortController()
-      await sleep(this.backoffDelay(this.attempt), idle.signal)
-    }
-  }
-
-  private emitState(state: ConnectionState): void {
-    if (this.lastState === state) return
-    this.lastState = state
-    this.callSink(() => this.sinks.onStateChange?.(state))
-  }
-
-  private async pumpStream<F extends { payload: { type: string } }>(
-    stream: AsyncIterable<F>,
-    sink: ((envelope: F) => void) | undefined,
-    onEnd: () => void,
-  ): Promise<void> {
-    try {
-      for await (const envelope of stream) {
-        if (envelope.payload.type === 'stream/error') break
-        if (sink !== undefined) this.callSink(() => { sink(envelope) })
-      }
-    } catch { /* pump loss settles the generation below */ }
-    onEnd()
-  }
-
-  /** Sink exception isolation: a business-layer throw is logged only. */
-  private callSink(fn: () => void): void {
-    try {
-      fn()
-    } catch (error) {
-      console.error('[desktop-runtime] connection sink threw:', error)
-    }
-  }
+  return frame.v
 }
 
-// ---- plugin body ------------------------------------------------------------
-
-/** Required services (none — this is the wire root). */
-export const inject: string[] = []
+declare global {
+  // eslint-disable-next-line no-var
+  var __DSH_TRANSPORT__: ClientTransportHooks | undefined
+}
 
 /**
- * Provide ctx.connection over the app-scheme carrier. The host tree runs in
- * this application's own sidecar process, so the surface is always loopback.
- * @param ctx - client cordis context.
+ * Installed at module scope, which is what satisfies "before plugin boot".
+ *
+ * `fetch` is the page's own — unary RPC already rides `fetch()` against this
+ * origin and always did; the hook is mandatory, so it is passed through rather
+ * than left for upstream to default. `openStream` is the half that exists at
+ * all: without it upstream reaches for the Gateway WebSocket, which is the one
+ * thing the app scheme cannot do.
  */
-export function apply(ctx: Context): void {
-  const api: IApiClient = new AppSchemeApiClient()
-  const rpc = createConnectionRpc()
-  let started = false
-  let description: HostDescription | undefined
-  const descriptionListeners = new Set<() => void>()
-  const publishDescription = (next: HostDescription | undefined): void => {
-    if (Object.is(description, next)) return
-    description = next
-    for (const listener of [...descriptionListeners]) {
-      try {
-        listener()
-      } catch (error) {
-        console.error('[desktop-runtime] host-description listener threw:', error)
-      }
-    }
-  }
-  const handle: ConnectionHandle = {
-    api,
-    isLoopback: true,
-    hostDescription: {
-      getSnapshot: () => description,
-      subscribe: (listener) => {
-        descriptionListeners.add(listener)
-        return () => {
-          descriptionListeners.delete(listener)
-        }
-      },
-    },
-    rpc,
-    start(sinks, config) {
-      if (started) throw new Error('connection: the stream loop is already owned by another consumer')
-      started = true
-      const controller = new ConnectionController(api, {
-        ...sinks,
-        onConnected: (next) => {
-          publishDescription(next)
-          if (!Object.is(description, next)) return
-          sinks.onConnected?.(next)
-        },
-        onStateChange: (state) => {
-          if (state === 'reconnecting') publishDescription(undefined)
-          sinks.onStateChange?.(state)
-        },
-      }, config ?? {})
-      controller.start()
-      return {
-        stop: () => {
-          controller.stop()
-          publishDescription(undefined)
-        },
-      }
-    },
-  }
-  ctx.provide('connection', handle)
+globalThis.__DSH_TRANSPORT__ = {
+  fetch: (input, init) => globalThis.fetch(input, init),
+  openStream: openRemoteStream,
+  ownsHost: true,
 }
+
+// Upstream's plugin, unchanged, reading the transport above. Everything this
+// file used to reimplement — the RPC caller, the generation source, the
+// connect/reconnect loop, `ctx.connection` itself — is upstream's again.
+export { inject, apply } from '@deepseek-ai/dsh-client-connection/client'

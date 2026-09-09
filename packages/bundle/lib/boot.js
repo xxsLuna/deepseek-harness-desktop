@@ -118,7 +118,7 @@ function isEmptyEntryList(text) {
  * boots exactly this way, and every primitive used here is exported for it.
  * @returns the root config to boot, and the loaded profile.
  */
-function prepareProfile() {
+async function prepareProfile() {
   // Two heals into the same flat fallback directory. The BFS walks
   // `dependencies` AND `peerDependencies` from the anchor's manifest, and our
   // packages are copied in BESIDE the dsh tree rather than depended on by it —
@@ -131,8 +131,14 @@ function prepareProfile() {
   // resolving once the root config lives in the profile, and the client-module
   // scan caches an unresolvable name as "not a client package" with no log line.
   // A row named in `cordis.patch.yml` must be named there too.
-  healProfilesModuleFallback(installAnchor, home)
-  healProfilesModuleFallback(desktopAnchor, home)
+  //
+  // One options object and a promise, both since 0.1.2: this used to be
+  // `(anchor, home)` positionally and synchronous. Passing the old shape put
+  // the anchor where the options go, so `readModuleFallbackManifest` was
+  // handed an undefined path and the sidecar died before any row loaded —
+  // which looked like a broken profile rather than a moved signature.
+  await healProfilesModuleFallback({ installAnchor, home })
+  await healProfilesModuleFallback({ installAnchor: desktopAnchor, home })
 
   const dir = resolveProfileDir(PROFILE, home)
   // Seeded EMPTY, and left that way. The three app-owned layers (dsh-base,
@@ -164,7 +170,7 @@ function prepareProfile() {
 /** @type {{ rootConfig: string, profile: import('@deepseek-ai/dsh-app-boot').Profile } | undefined} */
 let anchored
 try {
-  anchored = prepareProfile()
+  anchored = await prepareProfile()
 } catch (error) {
   console.warn(`${NAME}: plugin profile unavailable, continuing with no installed plugins: ${String(error)}`)
 }

@@ -57,10 +57,15 @@
         lead: !!js Number(process.env.DSH_DESKTOP_BAND_LEAD ?? 0)
         menuButton: !!js process.env.DSH_DESKTOP_BAND_MENU === '1'
 
-    # Dual-face transport row: the node half delegates to the upstream
-    # client-connection apply (the /api route, trust fence, and host
-    # ctx.connection), while the browser half is this package's own SSE
-    # carrier bundle instead of the upstream WebSocket one.
+    # Dual-face transport row, and both faces now delegate to the upstream
+    # client-connection apply — the /api route, trust fence and host
+    # ctx.connection on the node side, and the whole browser connection
+    # plugin (RPC caller, generation source, connect/reconnect loop) on the
+    # other. The browser half only installs the transport hooks upstream reads
+    # off the page global first, which is why the row still has to be OURS
+    # rather than upstream's `connection` re-enabled: the global must be set
+    # before that plugin's body runs, and re-exporting its `apply` from a
+    # module that assigns the global is what guarantees the order.
     - id: desktop-connection
       name: '@dsh-desktop/connection'
       config:
