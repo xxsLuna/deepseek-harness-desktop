@@ -20,6 +20,15 @@ const root = join(import.meta.dirname, '..', '..')
 const harnessRoot = join(root, 'build', 'harness')
 const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
 const token = 'contract-test-token'
+
+/**
+ * The browser session every request carries once the sidecar is up.
+ *
+ * Minted during the readiness wait and then attached by `socketRequest`, which
+ * is what the launcher's proxy does for the renderer. Undefined until then, so
+ * the readiness probe itself can observe the 401 that says the fence is live.
+ */
+let sessionCookie: string | undefined
 // Resolved through the electron package rather than guessed at, so it follows
 // the version pinned in package.json.
 const electronBinary = createRequire(import.meta.url)('electron') as string
@@ -82,7 +91,17 @@ function socketRequest(socketPath: string, options: {
       socketPath,
       path: options.path,
       method: options.method ?? 'GET',
-      headers: { host: '127.0.0.1', authorization: `Bearer ${token}`, ...options.headers },
+      // Bearer token AND session cookie, because upstream wants both since
+      // 0.1.2 and the launcher's proxy sends both on every forwarded request
+      // (src/socket-proxy.ts). A helper that sent only the token would make
+      // every test here 401 while the app worked, which is the least useful
+      // kind of red. `sessionCookie` is minted once readiness is reached.
+      headers: {
+        host: '127.0.0.1',
+        authorization: `Bearer ${token}`,
+        ...(sessionCookie === undefined ? {} : { cookie: sessionCookie }),
+        ...options.headers,
+      },
     }, (res) => {
       let body = ''
       res.setEncoding('utf8')
@@ -102,6 +121,41 @@ function socketRequest(socketPath: string, options: {
     req.on('error', reject)
     req.end(options.body)
   })
+}
+
+/**
+ * Mint the browser session `/api` requires, the way the launcher does.
+ *
+ * Harness 0.1.2 put `/api` behind `BrowserAuth`: the carrier's bearer token
+ * gets a request past the carrier, and a `dsh-auth-<authority>` cookie gets it
+ * past upstream's fence. The cookie is minted by GETting `/` with this
+ * process's launch token, which `@dsh-desktop/bundle` hands out on
+ * `/desktop/index-url` — a launcher-only path, because whoever can read it can
+ * mint a session.
+ *
+ * This mirrors `src/browser-session.ts` deliberately rather than importing it:
+ * that module belongs to the Electron main process and this suite speaks to the
+ * socket directly. Mirroring means a change that breaks the launcher's exchange
+ * breaks this too, which is the coupling worth having — the alternative is a
+ * green suite over an app that cannot authenticate.
+ *
+ * The exchange answers 303 with the cookie on the redirect itself, so the
+ * `set-cookie` is read from that response rather than followed.
+ * @param socketPath - the carrier socket.
+ * @returns the `cookie` request-header value, or undefined when unavailable.
+ */
+async function mintBrowserSession(socketPath: string): Promise<string | undefined> {
+  const answer = await socketRequest(socketPath, { path: '/desktop/index-url' })
+  if (answer.status !== 200) return undefined
+  const url = (JSON.parse(answer.body) as { url?: string }).url
+  if (url === undefined) return undefined
+  const target = new URL(url)
+  const minted = await socketRequest(socketPath, { path: `${target.pathname}${target.search}` })
+  const setCookie = minted.headers['set-cookie'] ?? []
+  const pairs = setCookie
+    .map((line) => line.split(';', 1)[0]?.trim())
+    .filter((pair): pair is string => pair !== undefined && pair.includes('='))
+  return pairs.length === 0 ? undefined : pairs.join('; ')
 }
 
 /** One unary RPC over the socket, unwrapped to its result. */
@@ -197,18 +251,41 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // Readiness must be judged on /api, not the static fallback: the carrier
     // answers 404 for unclaimed paths during startup, so a static probe can
     // pass before the /api route owner has registered.
+    //
+    // Two things about this probe changed with harness 0.1.2, and both are the
+    // seam moving rather than the app breaking.
+    //
+    // It mints a browser session first. `/api` is behind `BrowserAuth` now, and
+    // a request without the cookie is answered 401 whatever it asks for. This
+    // test speaks to the socket directly rather than through the launcher's
+    // proxy, so it has to do for itself what `src/browser-session.ts` does for
+    // the renderer — which is also what keeps this honest: if the exchange
+    // stopped working, the launcher's path would be broken too and this fails.
+    //
+    // And it asks for `$events/result`, because `host.describe` no longer
+    // exists — host facts ride the Remote event generation's opening frame in
+    // 0.1.2. `$events/result` is an endpoint the Gateway's `claimsEndpoint`
+    // accepts, which is exactly what readiness means here: the /api route owner
+    // has registered and its interceptor is claiming.
     const deadline = Date.now() + 90_000
     for (;;) {
       if (child.exitCode !== null) throw new Error(`sidecar exited during startup:\n${log}`)
       // Pipe names have no filesystem presence on Windows; just try connecting.
       if (process.platform === 'win32' || existsSync(socketPath)) {
         try {
+          sessionCookie = await mintBrowserSession(socketPath)
           const probe = await socketRequest(socketPath, {
-            path: '/api/host.describe',
+            path: '/api/$events/result',
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method: 'host.describe', payload: {} }),
+            body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method: '$events/result', payload: {} }),
           })
+          // 200 and nothing else, and the three outcomes are cleanly apart:
+          // 200 with a session, 401 without one, 404 for an endpoint the
+          // Gateway does not claim. The response BODY carries a business error
+          // (`gateway/internal` — this probe sends no real arguments) and that
+          // is fine: what readiness means here is that the fence passed and
+          // the interceptor claimed the endpoint.
           if (probe.status === 200) return
         } catch { /* not accepting yet */ }
       }

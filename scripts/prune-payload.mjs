@@ -125,12 +125,28 @@ export function entryPointPaths(stageDir) {
     if (path.includes('*')) subtrees.add(path.split('*')[0])
     else exact.add(path)
   }
-  /** Walk an exports subtree, skipping `types` conditions — declarations are not runtime entries. */
+  /**
+   * Walk an exports subtree, skipping `types` conditions — declarations are not
+   * runtime entries.
+   *
+   * `types@<5.2` and friends are the same condition with a TypeScript version
+   * range attached, and matching `types` exactly missed all of them. `@lexical`
+   * ships twelve packages whose exports read
+   *
+   *     "types@<5.2": "./dist/typescript-too-old.d.ts",
+   *     "types":      "./dist/index.d.ts",
+   *
+   * so the guard protected a declaration whose entire purpose is to fail a
+   * build with a helpful message. Twelve files is nothing; the reason to fix it
+   * is that `pruned-payload.spec.ts` asserts NO declaration ships, so this
+   * failed the contract suite on a 0.1.2 pin and would have on any pin that
+   * pulled a package using the qualified form.
+   */
   const walkExports = (node, dir) => {
     if (typeof node === 'string') return keep(dir, node)
     if (node === null || typeof node !== 'object') return
     for (const [key, value] of Object.entries(node)) {
-      if (key === 'types') continue
+      if (key === 'types' || key.startsWith('types@')) continue
       walkExports(value, dir)
     }
   }
