@@ -72,4 +72,30 @@ describe('updater.ts', () => {
     // reaches the runtime.
     expect(source).not.toMatch(/await\s+import\(\s*'electron-updater'\s*\)/)
   })
+
+  it('leaves autoDownload off, so an update is asked about before it downloads', () => {
+    // Turning this back on does not break anything visibly — it just removes
+    // the question. ~100MB starts downloading on a four-hourly timer, and the
+    // consent dialog never fires because `update-available` is immediately
+    // followed by the download the user was going to be asked about.
+    expect(source).toContain('autoUpdater.autoDownload = false')
+  })
+
+  it('installs with the relaunch flag, not through the quit handler alone', () => {
+    // `autoInstallOnAppQuit` installs with `install(true, false)`, and that
+    // `false` is `isForceRunAfter`: the app installed on quit and never came
+    // back, so the user had to launch it again themselves. Only
+    // `quitAndInstall(true, true)` passes the flag through.
+    expect(source).toContain('quitAndInstall(true, true)')
+    // Kept as the fallback for a download that finishes just as the user
+    // quits, so asserted rather than assumed gone.
+    expect(source).toContain('autoUpdater.autoInstallOnAppQuit = true')
+  })
+
+  it('acts on update-downloaded, which is the only thing that can relaunch', () => {
+    // With autoDownload off, this event is the sole signal that a consented
+    // download finished. Lose the listener and the app downloads an update and
+    // then sits there, which is the previous behaviour wearing a dialog.
+    expect(source).toMatch(/on\('update-downloaded'/)
+  })
 })
