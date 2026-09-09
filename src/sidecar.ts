@@ -62,18 +62,46 @@ export interface SidecarOptions extends SidecarPaths {
   readonly probe?: (address: SidecarAddress) => Promise<boolean>
 }
 
-/** One GET / probe over the socket; resolves true on any HTTP answer. */
+/**
+ * The route whose presence means the desktop surface is actually mounted.
+ *
+ * `@dsh-desktop/bundle` registers it inside `ctx.inject(['connection'])`, so it
+ * answers only once the connection service exists AND our own row has run —
+ * which is precisely the condition the proxy needs before it can mint a browser
+ * session. Host-only, so the renderer cannot reach it either way.
+ */
+const READY_PATH = '/desktop/index-url'
+
+/**
+ * One probe over the socket; resolves true only once the desktop surface is up.
+ *
+ * This used to HEAD `/` and accept any status below 500, which meant "the web
+ * server is listening". Since harness 0.1.2 that is no longer the same
+ * question: `/` sits behind `BrowserAuth`, and an unauthenticated request is
+ * answered **401** — a status this already accepted — so the probe started
+ * passing the instant the socket bound, before any plugin route was mounted.
+ *
+ * The window then loaded through a proxy that could not yet mint a session, the
+ * index request went out without a cookie, and upstream answered it 401. A
+ * document load happens once, so nothing retried: the app came up, printed
+ * `ready`, logged no error, and showed an empty window forever. The packaged
+ * smoke is what caught it (`ui-rendered boot entries: 0`).
+ *
+ * So readiness asks for the thing the launcher actually depends on, and asks
+ * for 200 rather than "not a server error" — a 404 here is the old bug exactly,
+ * and it must not read as ready.
+ */
 function probe(address: SidecarAddress): Promise<boolean> {
   return new Promise((resolve) => {
     const req = httpRequest({
       socketPath: address.socketPath,
-      path: '/',
+      path: READY_PATH,
       method: 'HEAD',
       headers: { host: '127.0.0.1', authorization: `Bearer ${address.token}` },
       timeout: 1_000,
     }, (res) => {
       res.resume()
-      resolve(res.statusCode !== undefined && res.statusCode < 500)
+      resolve(res.statusCode === 200)
     })
     req.on('error', () => resolve(false))
     req.on('timeout', () => {

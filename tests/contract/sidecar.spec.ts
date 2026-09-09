@@ -412,6 +412,44 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(bare).toBe(401)
   })
 
+  it('answers readiness on the desktop surface, not on the auth fence', async () => {
+    // What the launcher's readiness probe may and may not ask.
+    //
+    // The probe used to HEAD `/` and accept any status below 500. Since 0.1.2
+    // `/` sits behind `BrowserAuth`, so an unauthenticated HEAD is answered
+    // 401 — and 401 was inside that accept set. Readiness therefore meant only
+    // "the socket is bound", which it reaches before any plugin route exists.
+    //
+    // The cost was total and silent: the window loaded through a proxy that
+    // could not yet mint a session, upstream answered the index 401, and a
+    // document load happens once, so nothing retried. The app printed `ready`,
+    // logged nothing, and showed an empty window. Both halves are asserted
+    // here because the bug needed both to be true.
+    const headWithoutCookie = (path: string): Promise<number> => new Promise((resolve, reject) => {
+      const req = httpRequest({
+        socketPath,
+        path,
+        method: 'HEAD',
+        // The bearer token but deliberately NO cookie: exactly what the
+        // launcher can present before it has a session, which is the moment
+        // readiness is being decided.
+        headers: { host: '127.0.0.1', authorization: `Bearer ${token}` },
+      }, (res) => {
+        res.resume()
+        resolve(res.statusCode ?? 0)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    // Half one: `/` cannot be the probe, because the fence answers it.
+    expect(await headWithoutCookie('/'), '/ no longer 401s without a session; re-read what readiness can mean').toBe(401)
+    // Half two: the route the probe uses now answers 200, and it exists only
+    // once `@dsh-desktop/bundle` has run inside `ctx.inject(['connection'])` —
+    // which is the condition the proxy needs before it can mint anything.
+    expect(await headWithoutCookie('/desktop/index-url'), 'the desktop surface no longer answers the readiness path').toBe(200)
+  })
+
   it('serves the UI with the boot manifest and the desktop connection row', async () => {
     const res = await socketRequest(socketPath, { path: '/' })
     expect(res.status).toBe(200)
