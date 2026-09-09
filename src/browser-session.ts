@@ -20,9 +20,22 @@
  * sees the launch token, never holds a session, and cannot mint one: the URL
  * that would let it is behind `isHostOnlyPath`.
  *
- * One session per sidecar. `reset()` exists because a sidecar restart means a
- * new process, a new launch token, and a cookie bound to a secret the old
- * process minted — reusing it would 401 every request until the app restarted.
+ * A cookie DOES survive a sidecar restart, which is worth knowing before
+ * wiring anything to a restart signal. It is validated against a secret
+ * upstream persists in the credentials record — created once per `$DSH_HOME`
+ * and loaded again on every boot — plus the authority and the expiry. The
+ * launch token only mints; it is not carried in the cookie and is not checked
+ * when one is presented. So the new process accepts the old process's cookie,
+ * and `reset()` is deliberately not called anywhere today.
+ *
+ * It stays as the recovery hook for the cases that analysis does not cover: a
+ * credentials record rotated or removed under a running app, and the cookie's
+ * own expiry — upstream's default is 30 days and this row does not override it.
+ * Both end the same way, with every request answered 401 and nothing retrying,
+ * which for a document load is a blank window. The proxy does not yet re-mint
+ * on a 401; that is the known gap, and it is a long tail rather than a
+ * startup problem now that readiness waits for the surface to be mounted
+ * (see `src/sidecar.ts`).
  */
 import { request as httpRequest } from 'node:http'
 import type { SidecarAddress } from './socket-path.js'
