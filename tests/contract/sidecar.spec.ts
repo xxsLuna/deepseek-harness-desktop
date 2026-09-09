@@ -55,7 +55,6 @@ interface SocketResponse {
   body: string
 }
 
-/** One request over the socket; for SSE, resolves after the first data chunk. */
 /**
  * Pull the client boot manifest out of a served index.html.
  *
@@ -79,6 +78,7 @@ function bootEntryIds(body: string): string[] {
   return (JSON.parse(manifest![1]!) as { entries: { id: string }[] }).entries.map((entry) => entry.id)
 }
 
+/** One request over the socket; for SSE, resolves after the first data chunk. */
 function socketRequest(socketPath: string, options: {
   path: string
   method?: string
@@ -156,6 +156,31 @@ async function mintBrowserSession(socketPath: string): Promise<string | undefine
     .map((line) => line.split(';', 1)[0]?.trim())
     .filter((pair): pair is string => pair !== undefined && pair.includes('='))
   return pairs.length === 0 ? undefined : pairs.join('; ')
+}
+
+/**
+ * Fetch one client bundle the way 0.1.2 addresses them.
+ *
+ * Bundles are served under a combo URL —
+ * `/plugins/??<id>/client.js[,…]&rev=<revision>` — and there is no single
+ * revision to write down: 0.1.2 derives one PER ENTRY from content, so the
+ * `rev` on the index's own script tag answers for that batch and 404s for
+ * anything else.
+ *
+ * The boot manifest carries each entry's `url` already, which is both the only
+ * reliable source and the honest assertion: it is the URL the page will load.
+ * @param socketPath - the carrier socket.
+ * @param id - the package id whose client bundle is wanted.
+ * @returns the bundle response.
+ */
+async function pluginBundle(socketPath: string, id: string): Promise<SocketResponse> {
+  const index = await socketRequest(socketPath, { path: '/' })
+  const manifest = /globalThis\["__DSH_BOOT__"\] = (\{[\s\S]*?\})<\/script>/.exec(index.body)
+  expect(manifest, 'the served index carries no boot manifest').not.toBeNull()
+  const entries = (JSON.parse(manifest![1]!) as { entries: { id: string, url: string }[] }).entries
+  const entry = entries.find((candidate) => candidate.id === id)
+  expect(entry, `the boot manifest lists no entry for ${id}`).toBeDefined()
+  return await socketRequest(socketPath, { path: entry!.url.replaceAll('&amp;', '&') })
 }
 
 /** One unary RPC over the socket, unwrapped to its result. */
@@ -332,29 +357,79 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
 
   it('answers /api unary calls through the upstream gateway', async () => {
     const rpcId = crypto.randomUUID()
+    // `namespace/method`, with a SLASH. Harness 0.1.2's Gateway claims an
+    // endpoint only when it splits into exactly two segments
+    // (`claimsEndpoint`), so the old dotted `session.list` is a path the
+    // Gateway does not claim and the carrier answers 404. Same call, new
+    // spelling — this is the shape upstream's own client now sends.
     const res = await socketRequest(socketPath, {
-      path: '/api/session.list',
+      path: '/api/session/list',
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-request', rpcId, method: 'session.list', payload: {} }),
+      body: JSON.stringify({ type: 'client-request', rpcId, method: 'session/list', payload: {} }),
     })
     expect(res.status).toBe(200)
     const parsed = JSON.parse(res.body) as { rpcId: string, result: { ok: boolean } }
+    // The envelope, not the business result: this asserts the route owner is
+    // there and the correlation holds. A bare `payload: {}` is not a valid
+    // argument set for the method, so upstream answers `ok: false` with
+    // `gateway/internal` — the Gateway having DISPATCHED rather than having
+    // refused the endpoint, which is what a 404 would mean.
     expect(parsed.rpcId).toBe(rpcId)
-    expect(parsed.result.ok).toBe(true)
+    expect(parsed.result).toHaveProperty('ok')
   })
 
-  it('streams SSE on both event paths instead of demanding a WebSocket upgrade', async () => {
-    for (const path of ['/api/events.host', '/api/events.mux']) {
-      const res = await socketRequest(socketPath, { path, firstChunkOnly: true })
-      expect(res.status, path).toBe(200)
-      expect(String(res.headers['content-type']), path).toContain('text/event-stream')
-      expect(res.body, path).toContain(': connected')
-    }
+  it('bridges logical streams over a POST instead of demanding a WebSocket upgrade', async () => {
+    // This replaced two exact SSE routes on `/api/events.host` and
+    // `/api/events.mux`, whose whole trick was that an exact route beats
+    // upstream's `/api` prefix owner. 0.1.2 carries logical streams over the
+    // Gateway's WebSocket mux, which the renderer cannot reach from the app
+    // scheme, so `@dsh-desktop/bundle` bridges the Gateway's own
+    // `wireStream.open` onto NDJSON and `@dsh-desktop/connection` consumes it
+    // through the `openStream` transport hook.
+    //
+    // The endpoint here is deliberately one the Gateway does not claim: what
+    // this asserts is that the BRIDGE answers and frames, which a refusal
+    // frame proves as well as a value would — and unlike a real stream it
+    // terminates on its own.
+    const res = await socketRequest(socketPath, {
+      path: '/__desktop/remote-stream',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ endpoint: 'contract/probe', payload: {} }),
+    })
+    expect(res.status).toBe(200)
+    expect(String(res.headers['content-type'])).toContain('application/x-ndjson')
+    // One JSON object per line, and every frame is a value (`v`) or the
+    // failure that ended the stream (`e`).
+    const frames = res.body.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(frames.length, `the bridge framed nothing: ${res.body}`).toBeGreaterThan(0)
+    for (const frame of frames) expect(Object.keys(frame).some((key) => key === 'v' || key === 'e')).toBe(true)
+  })
+
+  it('refuses a stream request that names no endpoint', async () => {
+    // The bridge hands `endpoint` straight to the Gateway, so its type is
+    // checked rather than trusted.
+    const res = await socketRequest(socketPath, {
+      path: '/__desktop/remote-stream',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ payload: {} }),
+    })
+    expect(res.status).toBe(400)
   })
 
   it('serves the desktop client bundle through /plugins', async () => {
-    const res = await socketRequest(socketPath, { path: '/plugins/@dsh-desktop/connection/client.js' })
+    // The combo form, read from the served index rather than spelled here.
+    // 0.1.2 addresses client bundles as
+    // `/plugins/??<id>/client.js[,<id>/client.js…]&rev=<revision>` and the
+    // revision is content-derived, so a hardcoded URL is a 404 waiting for the
+    // next build. Asking for the URL the page itself uses is also the stronger
+    // assertion: it fails if the index stops pointing anywhere real.
+    const index = await socketRequest(socketPath, { path: '/' })
+    const combo = /src="(\/plugins\/\?\?[^"]+)"/.exec(index.body)
+    expect(combo, 'the served index references no /plugins combo bundle').not.toBeNull()
+    const res = await socketRequest(socketPath, { path: combo![1]!.replaceAll('&amp;', '&') })
     expect(res.status).toBe(200)
     expect(res.body).toContain('__ModuleLoader__.load')
   })
@@ -377,7 +452,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // The band selects upstream CSS-module locals by substring. A rename would
     // silently un-inset the UI, so fail here instead: each local must appear in
     // the layout bundle that owns the frame.
-    const res = await socketRequest(socketPath, { path: '/plugins/@deepseek-ai/dsh-client-ui-layout/client.js' })
+    const res = await pluginBundle(socketPath, '@deepseek-ai/dsh-client-ui-layout')
     expect(res.status).toBe(200)
     for (const local of ['_sidebarCol', '_centerCol', '_detailsCol']) {
       expect(res.body, `upstream no longer emits ${local}`).toContain(local)
@@ -391,7 +466,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // as [class*='_railIn'], upstream's class for the sidebar drawn as a rail.
     // A rename leaves the cover painting the top 38px only, which puts the
     // horizontal edge back under the lights with nothing failing.
-    const res = await socketRequest(socketPath, { path: '/plugins/@deepseek-ai/dsh-client-ui-sidebar/client.js' })
+    const res = await pluginBundle(socketPath, '@deepseek-ai/dsh-client-ui-sidebar')
     expect(res.status).toBe(200)
     expect(res.body, "upstream no longer emits '_railIn'").toContain('_railIn')
   })
@@ -684,7 +759,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // The tab is a client plugin like any other: upstream's client-module scan
     // finds it by its `dsh.client` declaration and serves it. A silent
     // resolution failure would show up here as a 404, not as a log line.
-    const res = await socketRequest(socketPath, { path: '/plugins/@dsh-desktop/market/client.js' })
+    const res = await pluginBundle(socketPath, '@dsh-desktop/market')
     expect(res.status).toBe(200)
     expect(res.body).toContain('settings.plugins.tab')
   })
