@@ -2,17 +2,22 @@
 /**
  * @dsh-desktop/bundle — the desktop surface's runtime glue plugin. Mirrors the
  * upstream `dsh-web-app` glue for a windowed surface with no URL: mounts the
- * `frontend-static` fallback owner over the built web dist, registers exact
- * SSE routes for the two event streams (the renderer cannot open a WebSocket
- * to the app scheme, so the streams ride the fetch downlink the API gateway
- * already serves), and contributes the desktop-surface prompt section plus the
- * DSH_SURFACE shell variable.
+ * `frontend-static` fallback owner over the built web dist, bridges logical
+ * Remote streams onto a streaming POST (the renderer cannot open a WebSocket
+ * to the app scheme, so the Gateway's WebSocket mux is unreachable), and
+ * contributes the desktop-surface prompt section plus the DSH_SURFACE shell
+ * variable.
+ *
+ * The bridge is half of one contract; `@dsh-desktop/connection`'s browser
+ * bundle is the other, installing the `openStream` hook upstream reads off the
+ * page global. Both ends attach to declared API — `wireStream` here,
+ * `__DSH_TRANSPORT__` there — which is what replaced a subclassed API client
+ * and a copied connection loop.
  */
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { addHarnessSourceSection } from '@deepseek-ai/dsh-app-boot'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import * as FrontendStatic from '@deepseek-ai/dsh-host-frontend-static'
 
 /** Stable Cordis plugin name. */
@@ -47,23 +52,68 @@ function desktopSurfacePrompt() {
 }
 
 /**
- * Pipe one web Response into a node ServerResponse, streaming the body.
- * @param {Response} response - the gateway's response.
- * @param {import('node:http').ServerResponse} res - the carrier response.
+ * Where the browser half opens a logical stream. Mirrored by `STREAM_PATH` in
+ * `@dsh-desktop/connection`'s client bundle; the two are one contract and
+ * `tests/contract/stream-bridge.spec.ts` is what stops them drifting apart.
+ *
+ * Outside `/api` deliberately. That prefix has an upstream route owner, and
+ * the routes this replaced lived inside it purely so an exact match would beat
+ * that owner — which is shadowing, not composing.
  */
-async function pipeResponse(response, res) {
-  res.writeHead(response.status, Object.fromEntries(response.headers))
-  if (response.body === null) {
-    res.end()
-    return
+const REMOTE_STREAM_PATH = '/__desktop/remote-stream'
+
+/** How much of a request body is a plausible stream request, in bytes. */
+const MAX_STREAM_REQUEST_BYTES = 1 << 20
+
+/**
+ * Where the launcher asks for the URL that mints a browser session.
+ *
+ * Under `/desktop/`, so `isHostOnlyPath` in the launcher's proxy refuses it to
+ * the renderer. That fence is the point: the answer carries this process's
+ * launch token, and a page able to read it could mint a session of its own.
+ */
+const INDEX_URL_PATH = '/desktop/index-url'
+
+/**
+ * The authority the launcher's proxy presents to this server.
+ *
+ * `src/socket-proxy.ts` rewrites `host` to this on every forwarded request, so
+ * upstream's fence sees a loopback authority. It is repeated here rather than
+ * shared because the two live in different processes with no import between
+ * them — and `tests/contract/browser-auth.spec.ts` is what stops the copy
+ * drifting: a cookie is bound to its authority, so a mismatch would mint a
+ * session that never authenticates anything.
+ */
+const PROXY_AUTHORITY = '127.0.0.1'
+
+/**
+ * Read the `{ endpoint, payload }` a stream request carries.
+ *
+ * Bounded, because this reads a request body into memory and the only caller
+ * is a local page: a body that does not stop arriving is a bug or an abuse,
+ * and either way the answer is to stop reading rather than to grow.
+ * @param {import('node:http').IncomingMessage} req - the POST to the bridge.
+ * @returns {Promise<{ endpoint: string, payload: unknown } | undefined>} the
+ * request, or undefined when it is not one.
+ */
+async function readStreamRequest(req) {
+  /** @type {Buffer[]} */
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > MAX_STREAM_REQUEST_BYTES) return undefined
+    chunks.push(chunk)
   }
-  const reader = response.body.getReader()
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    if (!res.write(value)) await new Promise((resolve) => res.once('drain', resolve))
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    // `endpoint` is passed straight to the Gateway, so its type is checked
+    // here rather than trusted; `payload` is opaque by contract and is not.
+    if (typeof body?.endpoint !== 'string' || body.endpoint === '') return undefined
+    return { endpoint: body.endpoint, payload: body.payload }
+  } catch {
+    return undefined
   }
-  res.end()
 }
 
 /**
@@ -78,27 +128,101 @@ export function apply(ctx, config) {
   // because it is window chrome rather than transport and the launcher
   // configures it. It taps the same index this fallback owner serves.
 
-  // SSE downlink: exact routes beat the /api prefix route, so these two paths
-  // reach the gateway's fetch handler (which streams SSE) instead of the web
-  // carrier's WebSocket-upgrade answer.
-  ctx.inject(['apiProxy'], (proxyCtx) => {
-    const handler = toFetchHandler(proxyCtx.apiProxy)
-    for (const path of ['/api/events.mux', '/api/events.host']) {
-      proxyCtx.effect(() => proxyCtx.webServer.register({
-        kind: 'exact',
-        path,
-        handler: async (req, res) => {
-          const control = new AbortController()
-          res.once('close', () => control.abort())
-          const response = await handler.fetch(new Request(`http://127.0.0.1${req.url ?? path}`, {
-            method: req.method,
-            headers: { accept: 'text/event-stream' },
-            signal: control.signal,
-          }))
-          await pipeResponse(response, res)
-        },
-      }), `desktop-runtime: SSE route ${path}`)
-    }
+  // The stream bridge. Its client half is @dsh-desktop/connection's
+  // `openStream` hook; between them they replace the Gateway's WebSocket mux,
+  // which the renderer cannot reach because the app scheme does not carry a
+  // WebSocket upgrade.
+  //
+  // `wireStream` is the Gateway's own public adapter, documented as "shared by
+  // the WebSocket mux and local Host transports" — so this bridges at the API
+  // upstream offers carriers, not at the wire. Nothing here knows how an
+  // endpoint decodes into a Remote method, or how the mux frames anything; the
+  // endpoint and payload are passed through exactly as they arrived.
+  //
+  // This replaced two exact routes on `/api/events.mux` and `/api/events.host`
+  // whose whole trick was that an exact route beats upstream's `/api` prefix
+  // route, so they could shadow the carrier's upgrade answer. Shadowing an
+  // upstream route to get a look in is the shape of a missing seam; this path
+  // is ours and sits outside `/api` for that reason.
+  // The launcher's half of upstream's browser authentication.
+  //
+  // Since 0.1.2 `/api` is behind `BrowserAuth`: a request is authenticated by a
+  // `dsh-auth-<authority>` cookie, and the only way to mint one is to GET `/`
+  // carrying this process's launch token as `?token=`. That is upstream's model
+  // for `dsh web`, where a human opens a printed URL in a browser.
+  //
+  // A desktop window is not that. It has no address bar to carry a token, and
+  // making the renderer do the exchange would mean relying on Chromium storing
+  // a Set-Cookie for a custom scheme and following a redirect through the
+  // protocol handler — two behaviours we would be depending on rather than
+  // owning. The launcher already injects the carrier's bearer token on every
+  // proxied request; the cookie is the same kind of credential and belongs in
+  // the same place.
+  //
+  // So this hands the launcher the authenticated URL and lets it do the
+  // exchange over the socket, out of the renderer's reach entirely. Host-only
+  // by its `/desktop/` prefix: `isHostOnlyPath` refuses it to the page, which
+  // matters more here than for the picker — this URL carries the launch token,
+  // and a page that could read it could mint its own session.
+  ctx.inject(['connection'], (connectionCtx) => {
+    connectionCtx.effect(() => connectionCtx.webServer.register({
+      kind: 'exact',
+      path: INDEX_URL_PATH,
+      handler: (req, res) => {
+        // The authority the proxy presents on every forwarded request, which is
+        // what the cookie will be bound to. Not read from this request: the
+        // answer must describe the requests the LAUNCHER will make later, and
+        // those are the ones the proxy rewrites.
+        const url = connectionCtx.connection.authenticatedUrl(`http://${PROXY_AUTHORITY}`)
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ url }))
+      },
+    }), `desktop-runtime: ${INDEX_URL_PATH}`)
+  })
+
+  ctx.inject(['typertGateway'], (gatewayCtx) => {
+    gatewayCtx.effect(() => gatewayCtx.webServer.register({
+      kind: 'exact',
+      path: REMOTE_STREAM_PATH,
+      handler: async (req, res) => {
+        const control = new AbortController()
+        // The request closing is the only cancellation signal there is: the
+        // client aborts its fetch when the logical stream is cancelled, and
+        // this is what carries that through to the Gateway.
+        res.once('close', () => control.abort())
+        const opened = await readStreamRequest(req)
+        if (opened === undefined) {
+          res.writeHead(400, { 'content-type': 'text/plain' })
+          res.end('desktop-runtime: expected {"endpoint":string,"payload":unknown}')
+          return
+        }
+        // NDJSON, not SSE: one request per logical stream means there is
+        // nothing to multiplex and no framing to reproduce. Buffering off, or
+        // a proxy hop would hold values until something flushed it.
+        res.writeHead(200, {
+          'content-type': 'application/x-ndjson',
+          'cache-control': 'no-store',
+          'x-accel-buffering': 'no',
+        })
+        const write = (frame) => new Promise((resolve) => { res.write(`${JSON.stringify(frame)}\n`, () => resolve()) })
+        try {
+          const values = await gatewayCtx.typertGateway.wireStream.open(opened.endpoint, opened.payload, control.signal)
+          for await (const value of values) {
+            if (control.signal.aborted) break
+            await write({ v: value })
+          }
+        } catch (error) {
+          // The Gateway's own failure shape, not a transport paraphrase of it,
+          // so the code and message the consumer sees are the ones it would
+          // have seen over the mux. An aborted request has nobody to tell.
+          if (!control.signal.aborted) {
+            await write({ e: gatewayCtx.typertGateway.wireStream.failure(error) })
+          }
+        } finally {
+          res.end()
+        }
+      },
+    }), `desktop-runtime: stream bridge ${REMOTE_STREAM_PATH}`)
   })
 
   if (config.surfaceContext) {

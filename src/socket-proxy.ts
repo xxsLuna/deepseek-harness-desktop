@@ -14,6 +14,7 @@
 import { request as httpRequest } from 'node:http'
 import { Readable } from 'node:stream'
 import type { SidecarAddress } from './socket-path.js'
+import { BrowserSession } from './browser-session.js'
 
 /** The renderer's origin under the standard+secure dsh scheme. */
 export const APP_ORIGIN = 'dsh://app'
@@ -84,6 +85,7 @@ export function isTrustedRendererRequest(req: Request): boolean {
  * @returns the handler for protocol.handle('dsh', ...).
  */
 export function createSocketProxy(address: SidecarAddress): (req: Request) => Promise<Response> {
+  const session = new BrowserSession(address)
   return async (req) => {
     if (!isTrustedRendererRequest(req)) {
       return new Response('forbidden', { status: 403 })
@@ -101,6 +103,15 @@ export function createSocketProxy(address: SidecarAddress): (req: Request) => Pr
     })
     headers.host = '127.0.0.1'
     headers.authorization = `Bearer ${address.token}`
+    // Upstream's `/api` fence wants a browser session on top of the carrier
+    // token (harness 0.1.2's BrowserAuth). The launcher holds the one session
+    // and replays it here, for the same reason it injects the token above: the
+    // renderer is a window, not a browser that followed a printed URL, and the
+    // cookie is a credential for the sidecar rather than page state. See
+    // browser-session.ts. Any cookie the page sent is replaced, never merged —
+    // this header is the launcher's to state.
+    const cookie = await session.cookieHeader()
+    if (cookie !== undefined) headers.cookie = cookie
 
     return await new Promise<Response>((resolve, reject) => {
       const upstream = httpRequest({
