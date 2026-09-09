@@ -234,16 +234,47 @@ export class Sidecar {
     throw new Error(`sidecar did not answer on its socket within ${timeoutMs}ms`)
   }
 
-  /** SIGTERM, then SIGKILL after graceMs. Resolves when the process is gone. */
+  /**
+   * SIGTERM, then SIGKILL after graceMs, then give up.
+   *
+   * Bounded on purpose. This used to `await` the child's `exit` with nothing
+   * behind it, so a process that outlived SIGKILL — a wedged handle, a
+   * grandchild holding it — hung this promise for the life of the app. Two
+   * callers make that fatal rather than untidy:
+   *
+   * - `before-quit` in main is `stop().finally(() => app.exit(0))`, so the app
+   *   could not be quit at all: no window, no exit, nothing on screen.
+   * - the updater awaits this before `quitAndInstall`, so a downloaded update
+   *   would never install and the app would sit there having said it would
+   *   restart.
+   *
+   * Giving up is the right answer for both. The signals have been sent; what
+   * remains is an orphan the OS will reap when this process goes, and every
+   * caller's next step (exit, or hand over to the installer) is better than
+   * waiting forever for an acknowledgement that is not coming.
+   * @param graceMs - how long SIGTERM gets before SIGKILL, and again before
+   * this stops waiting.
+   */
   async stop(graceMs = 8_000): Promise<void> {
     const child = this.child
     if (child === undefined) return
     this.stopping = true
     const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
     child.kill('SIGTERM')
-    const timer = setTimeout(() => child.kill('SIGKILL'), graceMs)
-    await exited
-    clearTimeout(timer)
+    let escalate: NodeJS.Timeout | undefined
+    let abandon: NodeJS.Timeout | undefined
+    try {
+      await Promise.race([
+        exited,
+        new Promise<void>((resolve) => {
+          escalate = setTimeout(() => child.kill('SIGKILL'), graceMs)
+          abandon = setTimeout(resolve, graceMs * 2)
+        }),
+      ])
+    } finally {
+      if (escalate !== undefined) clearTimeout(escalate)
+      if (abandon !== undefined) clearTimeout(abandon)
+    }
     this.child = undefined
   }
 
