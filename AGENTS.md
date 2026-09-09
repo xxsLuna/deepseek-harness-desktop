@@ -223,6 +223,30 @@ had moved, not a feature that had gone.
   The launcher does that exchange and replays the cookie, beside the bearer
   token it already injected (`src/browser-session.ts`); the URL that mints it is
   host-only, so the page can never mint its own.
+
+  **`/` went behind it too, and that broke readiness — read this before touching
+  the probe.** `Sidecar`'s probe used to HEAD `/` and accept any status below
+  500, which meant "the web server is listening". Under `BrowserAuth` an
+  unauthenticated `/` is answered **401**, a status already inside that accept
+  set, so the probe began passing the instant the socket bound — before any
+  plugin route was mounted. The window then loaded through a proxy that could
+  not yet mint a session, upstream answered the index 401, and a document load
+  happens once, so nothing retried: the app printed `ready`, logged no error,
+  and showed an empty window. Every 0.1.2+ pin had this.
+
+  Readiness now asks for `/desktop/index-url` and requires 200. That route is
+  registered by `@dsh-desktop/bundle` inside `ctx.inject(['connection'])`, so it
+  answers only once the thing the proxy depends on actually exists — a 404 there
+  is the old bug exactly, which is why "not a server error" is not good enough.
+  Both halves are pinned in `tests/contract/sidecar.spec.ts` ("answers readiness
+  on the desktop surface, not on the auth fence").
+
+  Note which gate caught it: **the packaged smoke**, as `ui-rendered boot
+  entries: 0`. The contract suite was green throughout, because it mints a
+  session for itself and speaks to the socket directly — it never exercises the
+  order the launcher boots in. `npm run smoke` reproduces it locally in seconds;
+  pass `--user-data-dir` to a scratch directory so it does not fight the
+  installed app's single-instance lock.
 - **The sidecar did not start.** `healProfilesModuleFallback` became async, and
   our `prepareProfile` called it without awaiting, so
   `readModuleFallbackManifest` got an undefined path and threw
