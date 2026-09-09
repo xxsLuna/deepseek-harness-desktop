@@ -94,7 +94,7 @@ const DOWNGRADE_WARNING: Record<ChannelChoice, string> = {
 
 /** Mirrors UpdateCheckResult in src/updater.ts. */
 interface UpdateCheck {
-  state: 'up-to-date' | 'downloading' | 'available' | 'unsupported' | 'failed'
+  state: 'up-to-date' | 'available' | 'unsupported' | 'failed'
   message: string
   version?: string
 }
