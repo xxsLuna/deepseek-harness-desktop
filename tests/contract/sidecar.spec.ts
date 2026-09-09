@@ -377,7 +377,24 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
           // (`gateway/internal` — this probe sends no real arguments) and that
           // is fine: what readiness means here is that the fence passed and
           // the interceptor claimed the endpoint.
-          if (probe.status === 200) return
+          //
+          // But the interceptor claiming is NOT the services being registered,
+          // and that gap is a race the suite lost in CI: `workspace/create`
+          // came back `gateway/service-unavailable — active Service
+          // "workspaceController" is unavailable` on one of four targets while
+          // the other three and every local run passed. So readiness also asks
+          // a real Remote service for a real answer.
+          //
+          // `workspace/follow` is the probe because it is what the suite
+          // actually reaches for first, it lives on the controller that was
+          // missing, and it has no side effects — its baseline is a read. It
+          // travels over our own NDJSON bridge too, so this covers that route
+          // being mounted in the same breath. A stream error throws, the catch
+          // below treats it as not-ready, and the loop tries again.
+          if (probe.status === 200) {
+            await firstStreamValue(socketPath, 'workspace/follow')
+            return
+          }
         } catch { /* not accepting yet */ }
       }
       if (Date.now() > deadline) throw new Error(`sidecar never answered:\n${log}`)
