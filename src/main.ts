@@ -400,7 +400,24 @@ async function run(): Promise<void> {
   // Both preferences are read per check rather than captured: the user changes
   // them while the app runs, and a captured channel would leave the switch
   // doing nothing until a restart.
-  updater = startUpdater(() => settings.get().autoUpdate, win, () => settings.get().updateChannel)
+  //
+  // `shutdown` is how the updater brings the app down before it hands over to
+  // the installer. It has to be the sidecar's own stop rather than `app.quit()`:
+  // `quitAndInstall` spawns the installer BEFORE quitting, so the harness must
+  // already be out of the install directory by then. See `applyUpdate`.
+  updater = startUpdater(
+    () => settings.get().autoUpdate,
+    win,
+    () => settings.get().updateChannel,
+    {
+      shutdown: () => sidecar.stop(),
+      // The packaged smoke has nobody to answer a modal, and a channel
+      // assignment sets allowDowngrade — so a build ahead of its channel gets
+      // offered that channel's newest release and the dialog would fire. The
+      // check still runs; only the question is suppressed.
+      offerInteractively: process.env.DSH_DESKTOP_SMOKE !== '1',
+    },
+  )
   app.on('before-quit', () => updater?.stop())
 
   // The tray is unconditional: it is how a hidden window comes back, and with
