@@ -194,34 +194,68 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
-### 0.1.2 breaks three seams, and the rc breaks the same three as the alpha
+### What 0.1.2 broke, and where each seam went
 
-Measured on 2026-09-04 against staged `0.1.2-alpha.5`, and each one confirmed in
-a `0.1.2-rc.1` install too. Recorded per seam because "0.1.2 does not work" is
-the kind of note that gets re-derived from scratch every time someone tries the
-bump — and because two of the three would have been read as flakes.
+Six seams, measured on 2026-09-04 against staged `0.1.2-alpha.5` and confirmed
+in a `0.1.2-rc.1` install. All six are closed and the whole suite is green on
+`0.1.2-rc.1`; this stays written down because "0.1.2 does not work" is the kind
+of note that gets re-derived from scratch every time, and because the SHAPE of
+these breaks is the guide to the next bump — four of the six were a seam that
+had moved, not a feature that had gone.
 
-- **`@deepseek-ai/dsh-host-apiproxy` is gone.** Its last publish is `0.1.1-rc.2`,
-  the version pinned here, and it is absent from both 0.1.2 closures.
-  `packages/connection/src/client.ts` imports `AbstractApiClient` from its
-  `/client` and `RpcId`/`serverResponseSchema` from its `/api`, so `npm run
-  build` dies in esbuild before anything boots. Find where those three moved;
-  they are contracts this package implements, not code to reimplement.
-- **The sidecar does not start.** `healProfilesModuleFallback` in `dsh-app-boot`
-  reaches `readModuleFallbackManifest` with an undefined path and throws
-  `ERR_INVALID_ARG_TYPE`, from our `prepareProfile`
-  (`packages/bundle/lib/boot.js`). Profile module-fallback healing is new in the
-  0.1.2 line; the boot sequence around it needs re-reading rather than patching
-  at the call site.
-- **The prune leaves 12 `typescript-too-old.d.ts` files.** One per `lexical` and
-  `@lexical/*` package, and `pruned-payload.spec.ts` catches them. That name is
-  not a `.d.ts` a wildcard export drags in by accident — check what those
-  packages' `exports` maps say before widening `NEVER_RUNTIME`.
+- **`@deepseek-ai/dsh-host-apiproxy` is gone.** Its last publish is
+  `0.1.1-rc.2`. `packages/connection` had subclassed `AbstractApiClient` from
+  its `/client` and imported `RpcId`/`serverResponseSchema` from its `/api`, so
+  the build died in esbuild before anything booted. Replaced by
+  `globalThis.__DSH_TRANSPORT__`, upstream's own carrier-override seam: the
+  package now installs `fetch`/`openStream` hooks and re-exports upstream's
+  client half instead of reimplementing it. 291 lines became 164. This is the
+  break worth studying — a declared export was never the seam.
+- **The renderer's downlink had no carrier.** The Gateway's WebSocket mux is
+  unreachable from the app scheme, and the two exact `/api/events.*` routes that
+  used to shadow it were shadowing, not composing. Bridged at
+  `TypertGatewayService.wireStream` — upstream's documented adapter "shared by
+  the WebSocket mux and local Host transports" — onto one NDJSON POST per
+  logical stream, which removes the multiplexing problem rather than
+  reproducing it (`packages/bundle/lib/index.js`).
+- **`/api` went behind `BrowserAuth`.** A `dsh-auth-<authority>` cookie
+  authenticates every call, and only a GET carrying the launch token mints one.
+  The launcher does that exchange and replays the cookie, beside the bearer
+  token it already injected (`src/browser-session.ts`); the URL that mints it is
+  host-only, so the page can never mint its own.
+- **The sidecar did not start.** `healProfilesModuleFallback` became async, and
+  our `prepareProfile` called it without awaiting, so
+  `readModuleFallbackManifest` got an undefined path and threw
+  `ERR_INVALID_ARG_TYPE` (`packages/bundle/lib/boot.js`).
+- **`settingsNamespace` left the market's import surface.** Replaced by the
+  literal namespace the row already used.
+- **The prune left 12 `typescript-too-old.d.ts` files.** One per `lexical` and
+  `@lexical/*` package, caught by `pruned-payload.spec.ts`; those packages
+  export a `types@`-prefixed condition, which the prune now skips.
 
-The bump PR arrives red on all three, which is the contract suite doing its job:
-each failure names its seam instead of reaching a user. Do not take a 0.1.2 pin
-to any channel until they are fixed — including develop, whose watch row will
-propose `0.1.2-rc.1` every morning until it is.
+The API surface moved underneath the tests as well, and the contract suite is
+where that is recorded — it went from "the sidecar never answered" to green in
+one pass per fact:
+
+- Endpoints are `namespace/method`, two segments, validated before dispatch.
+  Every dotted name (`workspace.list`, `skill.list`, `session.create`) is gone.
+- Payloads are `{ args: { … } }` — one wrapper field, and the arguments inside
+  are matched against the method descriptor EXACTLY. Most methods take a single
+  `request` object. `build/harness/node_modules/@deepseek-ai/dsh-api-remotes/lib/client.js`
+  is the generated descriptor registry: read the wire names there rather than
+  guessing, because a renamed field and a deleted method fail identically.
+- Listings became streams. `workspace/follow` yields a tagged baseline frame,
+  `{type:'baseline',value:{items,archivedSessionIds}}`, then ordered increments.
+- The interaction plane is a reserved Remote stream, `$events`, whose opening
+  frame is `{type:'ready',clientId,host}`; answers go back as a unary
+  `$events/result`. `/api/events.mux` and `/api/respond` are both gone.
+- Client bundles are addressed by combo URL, `/plugins/??<id>/client.js&rev=…`,
+  with a per-entry content revision — so read each entry's `url` from the boot
+  manifest instead of composing one.
+- `host.describe` and `agentPreset.list` have no replacement. Their checks moved
+  to the party that decides the answer: `cwd` is the launcher's, so it is a unit
+  test now, and the preset roster is covered by session creation failing without
+  it. Both moves are commented where the tests used to be.
 
 ---
 
