@@ -243,9 +243,20 @@ Three guards now hold it, and the split is deliberate:
 - `tests/contract/upstream-rows.spec.ts` — `connection` moved from the disabled
   list to the reconfigured one, so a rename still fails by name.
 
+A fourth place had to move, and it is worth knowing it exists: **`scripts/
+verify-payload.mjs` runs only after `electron-builder`**, so neither local suite
+reaches it. It carried the literal list `['connection', 'settings', 'market'] +
+lib/client.js` and failed all five targets on a file no longer built — after
+unit and contract had gone green on every one of them. It now derives the check
+from each staged manifest's `exports` map, which cannot go stale and picked up
+`layout-memory/client` and the `claude-plugins` subpaths that the list had never
+covered.
+
 The general lesson, which is not about connection: **externalising a specifier
 is a claim that some MOUNTED row answers it.** Disabling a row and requiring its
 module are the same decision made twice, in two files, in opposite directions.
+And a hardcoded roster of this repo's own packages is a second place to
+remember — every one of them that could be derived from a manifest now is.
 
 ### What 0.1.2 broke, and where each seam went
 

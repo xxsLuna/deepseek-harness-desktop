@@ -64,13 +64,32 @@ if (existsSync(join(resources, 'node'))) {
 const harness = join(resources, 'harness')
 assertExists(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), 'harness')
 assertExists(join(harness, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js'), 'desktop bundle')
-// Every package declaring `dsh.client` must ship the bundle its exports promise.
-// Upstream's client-module registry resolves `exports['./client']` at boot and
-// throws MissingClientBundleError when the file is absent — so a packaged build
-// that skipped build-client.mjs does not degrade, it refuses to start. Asserting
-// it here names the missing bundle instead.
-for (const pkg of ['connection', 'settings', 'market']) {
-  assertExists(join(harness, 'node_modules', '@dsh-desktop', pkg, 'lib', 'client.js'), `${pkg} client bundle`)
+// Every file a desktop package's `exports` map promises must actually be there.
+//
+// DERIVED from the staged manifests, not listed. It used to be the literal
+// `['connection', 'settings', 'market'] + lib/client.js`, and that list went
+// stale the moment `@dsh-desktop/connection` stopped being a client module and
+// started shipping `lib/transport.js` — every target failed here on a file no
+// longer built, which is the list being a second place to remember rather than
+// a check. Reading the manifest cannot go stale: whatever a package promises is
+// what gets asserted, including the next subpath nobody thinks to add.
+//
+// Worth asserting at all because both kinds of miss are late and loud rather
+// than degraded. Upstream's client-module registry resolves `exports['./client']`
+// at boot and throws MissingClientBundleError when the file is absent, so a
+// packaged build that skipped build-client.mjs refuses to start; a missing
+// injected asset is read at request time, so it surfaces when a window opens.
+const desktopPackages = join(harness, 'node_modules', '@dsh-desktop')
+for (const pkg of existsSync(desktopPackages) ? readdirSync(desktopPackages) : []) {
+  const manifestPath = join(desktopPackages, pkg, 'package.json')
+  if (!existsSync(manifestPath)) continue
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  for (const [subpath, target] of Object.entries(manifest.exports ?? {})) {
+    // Only the plain string form is promised as a file; a conditional map is
+    // upstream's shape, not one this repo's packages use.
+    if (typeof target !== 'string') continue
+    assertExists(join(desktopPackages, pkg, target), `${pkg} exports ${subpath}`)
+  }
 }
 // The band ships as page assets read at request time, so a missing one is only
 // found when a window opens; assert them here instead.
