@@ -46,6 +46,36 @@ describe.skipIf(!existsSync(layoutClient))('upstream layout surface', () => {
     expect(source()).toMatch(/toggleSidebar\(\)\s*\{/)
   })
 
+  it('still routes the toggle by viewport width, which is what a restore must survive', () => {
+    // EXISTENCE was never the fragile part. This assertion is here because the
+    // three above passed while the feature was broken: 0.1.5 kept the attribute
+    // and the method and changed WHEN and WHERE the toggle lands.
+    //
+    // The axis depends on a width that is not settled when a plugin first runs,
+    // so an early toggle can flip `narrowExpanded` instead of the width. The
+    // restore is a reconcile loop because of this line; if upstream ever makes
+    // the toggle unconditional, the loop is doing needless work and the reason
+    // written in `packages/layout-memory/src/client.ts` has gone stale.
+    expect(source()).toMatch(/viewportWidth < 1024\)\s*\w+\.layoutInfo\.narrowExpanded = !/)
+  })
+
+  it('still clears narrowExpanded when the width crosses the boundary', () => {
+    // The other half, and the one that actually erased the restore: a toggle
+    // that landed on `narrowExpanded` is wiped by the first real resize. Losing
+    // this line would not break the plugin, but it would mean the settle window
+    // it waits out is no longer buying anything.
+    expect(source()).toMatch(/!==\s*\w+\s*<\s*1024\)\s*\w+\.layoutInfo\.narrowExpanded = false/)
+  })
+
+  it('does not throw the readiness error the restore used to depend on', () => {
+    // The restore was built on `panel actions not wired (root entry not
+    // mounted)` being thrown until the layout root had rendered — a throw the
+    // loop treated as "not yet". 0.1.5 removed the guard and the retry silently
+    // stopped running. Asserted as an ABSENCE so that if upstream brings it
+    // back, whoever reads this knows the loop could be simplified again.
+    expect(source()).not.toContain('panel actions not wired')
+  })
+
   it('covers the narrow layout with the same attribute', () => {
     // Wide collapses by width (`panels.sidebar === 0`), narrow by a separate
     // flag. Both must land on one attribute or the plugin remembers only one

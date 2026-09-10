@@ -194,6 +194,51 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### A removed throw is a silent break, and existence tests do not see it
+
+The sidebar stopped remembering its collapsed state in `0.1.5`. Nothing failed:
+the preference was still written (`dsh-desktop.sidebar-collapsed` = `true`, in
+`localStorage` on `dsh://app`), the plugin still loaded, and
+`tests/contract/layout-surface.spec.ts` was green throughout.
+
+`@dsh-desktop/layout-memory` restored by calling `ctx.layout.toggleSidebar()`
+once and treating a throw as "not ready yet" — upstream's own
+`panel actions not wired (root entry not mounted)`. **0.1.5 deleted that guard**
+(`attachPanels` is gone; the controller now takes the store's actions in its
+constructor), so the call always succeeds and the retry loop never runs.
+
+That alone would be harmless if the toggle were unconditional. It is not:
+
+```
+toggleSidebar: (d) => {
+  if (d.layoutInfo.viewportWidth < 1024) d.layoutInfo.narrowExpanded = !d.layoutInfo.narrowExpanded
+  else d.layoutInfo.sidebar = d.layoutInfo.sidebar === 0 ? 280 : 0
+},
+setViewportWidth: (d, width) => {
+  if (d.layoutInfo.viewportWidth < 1024 !== width < 1024) d.layoutInfo.narrowExpanded = false
+},
+```
+
+The axis depends on a width that is not settled when a plugin first runs, so an
+early toggle flips `narrowExpanded` — and the first real resize across 1024
+**clears it**. The restore succeeded, the preference was read, and the window
+still opened expanded.
+
+**Why the contract suite missed it, which is the part worth keeping.** That file
+asserted the attribute exists, is rendered `|| void 0`, and that `toggleSidebar`
+is on the face. All three were still true. What changed was WHEN the lever
+becomes effective and WHICH field it moves — behaviour, not surface — and an
+existence test cannot see behaviour. It now also pins the width-dependent axis,
+the reset, and the ABSENCE of the readiness throw, so bringing the guard back
+is visible too.
+
+The restore is a bounded reconcile loop now: toggle while the DOM disagrees,
+stop once agreement has held long enough that the reset cannot still be coming,
+and give up rather than flap. It asks upstream for no promise about timing.
+`tests/unit/layout-reconcile.spec.ts` drives that rule against those two actions
+transcribed verbatim — the simulation fails on the old one-toggle logic with the
+sidebar expanded, which is how it was checked.
+
 ### Attaching to the PARENT console is a claim about the process tree
 
 The console flash came back in `0.1.5`: a window per command again. The fix
