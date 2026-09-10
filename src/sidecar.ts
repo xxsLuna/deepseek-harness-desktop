@@ -55,6 +55,16 @@ export interface SidecarOptions extends SidecarPaths {
   /** Called when the process exits without stop() being requested. */
   readonly onUnexpectedExit: (code: number | null) => void
   /**
+   * Whether the spawn hides the child's console, from
+   * `windowsHideFor(outcome)` in ./hidden-console.ts.
+   *
+   * Defaults to `true`, which is what it always was. `false` is only correct
+   * when the LAUNCHER owns a console it hid itself, and it is the whole point
+   * of doing so: the sidecar then inherits that hidden console instead of
+   * starting with none, and so does every process the harness spawns below it.
+   */
+  readonly windowsHide?: boolean
+  /**
    * The three steps that touch the outside world, injected only by the unit
    * tests — production passes none. The alternative is leaving the
    * start/stop/restart rules untested, and the `stopping` flag below has
@@ -212,7 +222,13 @@ export class Sidecar {
       // GUI launch popped a window every grandchild shell inherited. Electron's
       // binary is GUI-subsystem so it no longer applies to this process, but the
       // shells the harness spawns are still console binaries.
-      windowsHide: true,
+      //
+      // Dropped ONLY when the launcher owns a console it hid itself, because
+      // then this flag is what stands between the sidecar and inheriting it —
+      // and a hidden console inherited down the whole tree is what stops the
+      // ACL runner allocating (and briefly showing) one per command. See
+      // ./hidden-console.ts for the trace that made the change.
+      windowsHide: this.options.windowsHide ?? true,
     })
     this.child = child
     const forward = (chunk: Buffer): void => {

@@ -25,6 +25,7 @@ import { SidecarLog } from './sidecar-log.js'
 import { silenceStreamErrors, teeConsole } from './console-log.js'
 import { failureResponse, type FailureReport } from './failure-page.js'
 import { reloadDelayMs, shouldRestart } from './restart-policy.js'
+import { acquireHiddenConsole, windowsHideFor } from './hidden-console.js'
 import { createSidecarAddress } from './socket-path.js'
 import { createSocketProxy, isDesktopHostPath } from './socket-proxy.js'
 import { Sidecar, type SidecarPaths } from './sidecar.js'
@@ -135,6 +136,13 @@ async function run(): Promise<void> {
   const address = createSidecarAddress(process.platform, tmpdir())
   const paths = resolvePaths()
 
+  // Before anything is spawned, and that ordering is the fix. A console is
+  // inherited by every descendant, so taking one here — hidden — means the
+  // sidecar, the ACL runner and the shells below them all get one without any
+  // of them allocating (and briefly showing) their own. Doing it late would
+  // leave whatever had already started without it.
+  const consoleOutcome = await acquireHiddenConsole(paths.harnessRoot)
+
   // Read before anything is built: the title bar the window is constructed
   // with, and the band the sidecar bakes into the served stylesheet, are both
   // this preference.
@@ -218,6 +226,7 @@ async function run(): Promise<void> {
     ...paths,
     address,
     titleBand: band,
+    windowsHide: windowsHideFor(consoleOutcome),
     path: resolveSidecarPath(process.env, process.platform),
     cwd: homedir(),
     onLog: (line) => {

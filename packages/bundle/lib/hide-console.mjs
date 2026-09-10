@@ -57,8 +57,46 @@ import { createRequire } from 'node:module'
 /** Set once per process; a descendant inherits NODE_OPTIONS and loads this again. */
 const DONE = Symbol.for('@dsh-desktop/hide-console.done')
 
+/**
+ * This process's console outcome, memoized on a global rather than in a module
+ * variable — the same reason DONE is: NODE_OPTIONS can load this module more
+ * than once in one process, and each instance would otherwise answer for
+ * itself.
+ *
+ * The LAUNCHER reads it. Only `allocated` means "a console this process created
+ * and hid", which is the one case where a child may safely inherit it instead
+ * of being spawned with `windowsHide` — see src/hidden-console.ts.
+ * @typedef {'unsupported' | 'present' | 'attached' | 'allocated' | 'failed'} ConsoleOutcome
+ */
+const OUTCOME = Symbol.for('@dsh-desktop/hide-console.outcome')
+
 /** SW_HIDE, for ShowWindow. */
 const SW_HIDE = 0
+
+/**
+ * The process whose console every descendant should join.
+ *
+ * `AttachConsole` takes an arbitrary pid, and that is the whole fix. Attaching
+ * to the PARENT assumes the parent owns a console, which is a claim about the
+ * process tree — and a trace under a real GUI launch shows the claim is false:
+ *
+ *   pid 31400 ppid 46196 | attached to the parent console   (the sidecar)
+ *   pid 28972 ppid 46696 | AttachConsole(parent) failed     (the ACL runner)
+ *
+ * 46696 is neither the sidecar nor anything that ran this module. Upstream puts
+ * a short-lived process between the sidecar and the runner, it owns no console,
+ * and so the runner allocated one — visible for the instant before it is
+ * hidden, once per command.
+ *
+ * Publishing the owner's pid removes the assumption entirely: an intermediate
+ * that never loads this module still passes the variable down, and the runner
+ * attaches to the console owner directly however deep it sits.
+ *
+ * NOT `DSH_`-prefixed, and that is load-bearing: upstream's `scrubbedParentEnv`
+ * drops every `DSH_*` name, so a `DSH_`-named variable reaches the sidecar and
+ * nothing below it. The trace switch above learned this the same way.
+ */
+const CONSOLE_PID_ENV = 'HARNESS_DESKTOP_CONSOLE_PID'
 
 /**
  * ATTACH_PARENT_PROCESS — attach to the console the parent already owns.
@@ -81,7 +119,7 @@ const ATTACH_PARENT_PROCESS = 0xFFFFFFFF
  */
 function record(path, line) {
   try {
-    appendFileSync(path, `pid ${process.pid} | ${line}\n`)
+    appendFileSync(path, `pid ${process.pid} ppid ${process.ppid} | ${line}\n`)
   } catch {
     // Tracing must never be able to break a boot.
   }
@@ -97,9 +135,14 @@ function record(path, line) {
  * @returns nothing.
  */
 export function allocateHiddenConsole() {
-  if (process.platform !== 'win32') return
-  const globals = /** @type {Record<symbol, boolean>} */ (/** @type {unknown} */ (globalThis))
-  if (globals[DONE] === true) return
+  const globals = /** @type {Record<symbol, unknown>} */ (/** @type {unknown} */ (globalThis))
+  /** Memoize and answer, so every caller in this process agrees. */
+  const settle = (/** @type {ConsoleOutcome} */ value) => {
+    globals[OUTCOME] = value
+    return value
+  }
+  if (process.platform !== 'win32') return settle('unsupported')
+  if (globals[DONE] === true) return /** @type {ConsoleOutcome} */ (globals[OUTCOME] ?? 'failed')
   globals[DONE] = true
 
   const trace = process.env.HARNESS_DESKTOP_SPAWN_TRACE
@@ -111,45 +154,66 @@ export function allocateHiddenConsole() {
     const koffi = createRequire(import.meta.url)('koffi')
     const kernel32 = koffi.load('kernel32.dll')
     const getConsoleWindow = kernel32.func('void * __stdcall GetConsoleWindow()')
-    if (getConsoleWindow() !== null) {
-      report('console already present, left alone')
-      return
+    const attachConsole = kernel32.func('int __stdcall AttachConsole(uint32 dwProcessId)')
+
+    /** Name this process as the console to join, for everything below it. */
+    const publish = () => {
+      process.env[CONSOLE_PID_ENV] = String(process.pid)
     }
 
-    // ATTACH before ALLOC, and that ordering is the difference between a blink
-    // per command and none. AllocConsole CREATES a console window and it is
-    // visible for the instant before ShowWindow hides it — once per process, and
-    // the ACL runner is a fresh process for every command, so the flash simply
-    // got shorter rather than going away. Attaching to the parent's console
-    // creates no window at all.
-    //
-    // It resolves differently at each level, which is exactly what is wanted:
-    // the sidecar's parent is the Electron launcher, a GUI process with no
-    // console, so the attach fails there and it allocates once at startup. The
-    // runner's parent IS the sidecar, so the attach succeeds and it reuses the
-    // hidden console instead of making its own.
-    const attachConsole = kernel32.func('int __stdcall AttachConsole(uint32 dwProcessId)')
-    if (attachConsole(ATTACH_PARENT_PROCESS) !== 0) {
-      report(`attached to the parent console (argv1 ${String(process.argv[1])})`)
-      return
+    if (getConsoleWindow() !== null) {
+      // A terminal launch. The console is not ours to hide, but it IS the one
+      // descendants should share, so it is still published.
+      publish()
+      report('console already present, left alone')
+      return settle('present')
     }
+
+    // The published owner first, the parent second, allocation last. Ordering
+    // matters at every step: the owner is the only one that survives an
+    // intermediate process, the parent is the cheap case when there is none,
+    // and AllocConsole CREATES a window that is visible for the instant before
+    // ShowWindow hides it — which is the flash this whole module exists to
+    // remove, and the runner takes that path once per command without the
+    // first branch.
+    const owner = Number(process.env[CONSOLE_PID_ENV])
+    if (Number.isInteger(owner) && owner > 0 && owner !== process.pid && attachConsole(owner) !== 0) {
+      publish()
+      report(`attached to the published console owner ${String(owner)} (argv1 ${String(process.argv[1])})`)
+      return settle('attached')
+    }
+
+    if (attachConsole(ATTACH_PARENT_PROCESS) !== 0) {
+      publish()
+      report(`attached to the parent console (argv1 ${String(process.argv[1])})`)
+      return settle('attached')
+    }
+    // NOT GetLastError: koffi makes its own calls between bindings and clobbers
+    // the thread's last error, which reported ERROR_ACCESS_DENIED ("this
+    // process already has a console") for a process whose AllocConsole then
+    // SUCCEEDED — a contradiction, and a wasted round. `ppid` on every line is
+    // what answered it instead.
+    report(`AttachConsole failed for owner ${String(process.env[CONSOLE_PID_ENV] ?? 'none')} and parent (argv1 ${String(process.argv[1])})`)
 
     const allocConsole = kernel32.func('int __stdcall AllocConsole()')
     if (allocConsole() === 0) {
       report('AttachConsole and AllocConsole both failed')
-      return
+      return settle('failed')
     }
     const handle = getConsoleWindow()
     if (handle === null) {
       report('AllocConsole succeeded but returned no window')
-      return
+      return settle('failed')
     }
     const showWindow = koffi.load('user32.dll').func('int __stdcall ShowWindow(void *hWnd, int nCmdShow)')
     showWindow(handle, SW_HIDE)
+    publish()
     report(`allocated and hid a console (argv1 ${String(process.argv[1])})`)
+    return settle('allocated')
   } catch (error) {
     // Never fatal. Without this the windows flash, which is where we started.
     report(`console setup failed: ${String(error?.message ?? error)}`)
+    return settle('failed')
   }
 }
 

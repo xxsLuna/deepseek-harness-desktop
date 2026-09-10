@@ -194,6 +194,61 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### Attaching to the PARENT console is a claim about the process tree
+
+The console flash came back in `0.1.5`: a window per command again. The fix
+that closed it the first time gives every process a console without showing
+one — attach to the parent's, allocate-and-hide only as a fallback — and
+`AllocConsole` is the visible path, so whoever takes it flashes. The ACL runner
+is a fresh process per command, so the runner taking it is a flash per command.
+
+`HARNESS_DESKTOP_SPAWN_TRACE` said which, once the app was launched the way a
+user launches it. **Launch method is part of the measurement here:** started
+from a shell the launcher inherits that console and nothing reproduces. Start
+it from `wscript` (a GUI host, no console) and the real behaviour appears.
+
+Adding `ppid` to every trace line is what actually solved it:
+
+```
+pid 31400 ppid 46196 | attached to the parent console   (the sidecar)
+pid 28972 ppid 46696 | AttachConsole(parent) failed     (the ACL runner)
+```
+
+**46696 is neither the sidecar nor anything that loads the helper.** Upstream
+puts a short-lived process between the sidecar and the runner; it owns no
+console, so the runner's parent attach fails and it allocates. The old fix was
+never wrong about mechanism — it was wrong about the tree, and the tree is
+upstream's to change.
+
+`AttachConsole` takes an arbitrary pid, so the fix is to stop asking about the
+parent: the process that owns the console publishes its pid in
+`HARNESS_DESKTOP_CONSOLE_PID`, and anything below attaches to it directly. An
+intermediate that never loads the helper still passes the variable down. **Not
+`DSH_`-prefixed** — `scrubbedParentEnv` drops that whole prefix, which is the
+same trap the trace switch fell into.
+
+The launcher now takes the console before it spawns anything
+(`src/hidden-console.ts`), so the one allocation is at app startup where a
+single flash is indistinguishable from the app opening. `windowsHide` on the
+sidecar spawn is dropped only when the launcher actually owns a hidden console
+— `present` is a terminal launch and handing that one down would put every
+harness subprocess in the user's terminal.
+
+Two instrument failures cost a round each, both worth remembering:
+
+- **`GetLastError` through koffi is not readable.** koffi makes its own calls
+  between bindings and clobbers the thread's last error. It reported
+  `ERROR_ACCESS_DENIED` ("this process already has a console") for a process
+  whose `AllocConsole` then SUCCEEDED — a contradiction that reads as a result.
+  `process.ppid`, read from Node, answered it instead.
+- **Verifying by hand cannot produce the shape on demand.** This was checked
+  manually twice and both fixes were wrong, because the failing shape needs an
+  intermediate process that only appears when the harness runs a real command.
+  `tests/contract/hidden-console.spec.ts` builds the shape itself — owner,
+  intermediate that never loads the helper, grandchild that does — and asserts
+  the grandchild joins rather than allocates. It was checked against the broken
+  build first; it fails there with the production line.
+
 ### A slot must be declared before anything registers into it
 
 `0.1.5-desktop-alpha0.1.1` fixed the module-table break and landed on the next
