@@ -194,6 +194,43 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### A slot must be declared before anything registers into it
+
+`0.1.5-desktop-alpha0.1.1` fixed the module-table break and landed on the next
+one, in the same dialog:
+
+```
+failed to apply loader entry ... (@dsh-desktop/settings):
+slot "settings.section" is not declared (a parent entry's children table must
+declare it)
+```
+
+`0.1.5` made the slot registry declarative. A slot exists only once a parent
+entry's `children` table declares it, and `slots.register` on an undeclared name
+**throws** — out of `apply`, so the whole plugin dies with it.
+`slots.inject(name, mount)` is the wait: it runs the mount when the declaration
+arrives. Every upstream settings section is written that way.
+
+`@dsh-desktop/market` had already been refitted to `slots.inject`.
+`@dsh-desktop/settings` had not, and that is the whole bug.
+
+**Why no suite could see it, which is the part worth keeping.** A client plugin's
+`apply` runs in the RENDERER. `tests/contract/sidecar.spec.ts` boots the real
+tree and proves what the sidecar serves — it never applies a client plugin, so
+this class of failure is structurally invisible to it, and the served bundle
+still contains every string a grep would look for. The only thing that can catch
+it is executing the bundle against a stub host, and the stub that existed
+(`market-client-bundle.spec.ts`) had a `register` that accepted anything. **A
+stub more permissive than the real host certifies the pattern that is about to
+break.**
+
+`tests/unit/client-slot-registration.spec.ts` closes it: the stub's `register`
+throws on an undeclared name exactly as the registry does, and it runs over
+every built bundle whose module asks for the `slots` service rather than over a
+named package — so the next client plugin is covered by existing. It was checked
+against the broken build before the fix went back in; it fails there with the
+production message.
+
 ### A disabled row has no client module, and nothing says so
 
 `0.1.5-desktop-alpha0.1.0` opened to **"Failed to load plugins"** with

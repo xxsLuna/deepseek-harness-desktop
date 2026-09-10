@@ -1074,20 +1074,32 @@ const SECTIONS: Record<string, () => ReactNode> = {
  * @param ctx - client root context.
  */
 export function apply(ctx: {
-  slots: { register: (options: object, component: () => ReactNode) => () => void }
+  slots: {
+    register: (options: object, component: () => ReactNode) => () => void
+    inject: (name: string, mount: () => unknown) => unknown
+  }
   effect: (execute: () => () => void, label?: string) => unknown
 }): void {
   // Driven off DESKTOP_SECTIONS rather than written out, because the nav
   // heading is placed by counting that many rows back from the end. Registering
   // a section the list does not know about would leave the heading one row too
   // low, and nothing would say so.
+  //
+  // `slots.inject` rather than a bare `register`, the same as
+  // `@dsh-desktop/market` already does for its tab. Since 0.1.5 a slot has to be
+  // DECLARED before anything registers into it — declaration comes from a
+  // parent entry's `children` table, and `settings.section` is declared by
+  // upstream's Settings page, which may activate after this row. A bare
+  // register throws `slot "settings.section" is not declared` and takes the
+  // whole plugin down with it; injecting waits for the declaration instead of
+  // racing it. Upstream's own settings sections are all written this way.
   for (const section of DESKTOP_SECTIONS) {
     const component = SECTIONS[section.id]
     if (component === undefined) continue
-    ctx.slots.register(
+    ctx.slots.inject('settings.section', () => ctx.slots.register(
       { name: 'settings.section', ...section, registrant: '@dsh-desktop/settings' },
       component,
-    )
+    ))
   }
   // Through ctx.effect, so unloading this plugin takes the rule with it —
   // otherwise the heading would outlive the entries it names and sit above
