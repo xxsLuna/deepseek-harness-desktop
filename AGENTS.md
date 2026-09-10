@@ -194,6 +194,59 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### A disabled row has no client module, and nothing says so
+
+`0.1.5-desktop-alpha0.1.0` opened to **"Failed to load plugins"** with
+`failed to import loader entry … (@dsh-desktop/connection): client-modules:
+require("@deepseek-ai/dsh-client-connection/client") missed the module table`.
+Every client plugin failed behind that one. Written down because three separate
+gates were green while it was true, and because the fix inverts an assertion
+that had looked obviously right for the life of the project.
+
+The refit onto `__DSH_TRANSPORT__` kept the shape the old design had: disable
+upstream's `connection` row, insert `desktop-connection` in its place, and have
+our client half `export { inject, apply }` from upstream's `/client`. Upstream's
+client bundles are **module-host factories**, not ESM, so that re-export could
+not be bundled and was correctly left external — which compiles it to a runtime
+`require` answered by the browser module table. And `dsh-client-modules` builds
+that table from `ctx.loader.entries()` with `entry.disabled` as a `continue`.
+**The row we disabled to make room was the only thing that would have put that
+module in the table.** `arriveGraphRow` skips a missing row in silence, so the
+failure surfaced only when the factory ran, in the renderer, on a user's machine.
+
+What made it invisible, in order:
+
+- `npm run build` is clean — esbuild's job ends at "left it external".
+- `npm test` was clean — nothing read what a bundle requires.
+- `npm run test:contract` was clean, and worse than clean: `sidecar.spec.ts`
+  **asserted the broken state**, requiring `@dsh-desktop/connection` in the boot
+  graph and upstream's client-connection absent. That assertion described the
+  old design faithfully and outlived it.
+- The sidecar log shows nothing. The failure is in the renderer.
+
+The fix is to stop standing in for the row. Upstream's `connection` is composed
+again (`inject: []` and a literal `trustedHosts`, because its own row reads both
+off `webRuntime` — a row this app disables), and `@dsh-desktop/connection` is
+node-only: it injects the transport at the top of the served `<head>`, which is
+what upstream's "before plugin boot" asks for and settles the ordering by
+position rather than by argument. `boot.js` re-asserts the row ON, where it used
+to re-assert it off.
+
+Three guards now hold it, and the split is deliberate:
+
+- `tests/unit/client-externals.spec.ts` — every specifier a built bundle
+  requires is a seed word or is declared in that package's `dsh.client`. Catches
+  the drift without a staged tree.
+- `tests/contract/sidecar.spec.ts` — the served boot graph carries upstream's
+  row, ours is not a client module, and the transport script precedes
+  `__ModuleLoader__` and `__DSH_BOOT__` in the document. Position, not presence.
+- `tests/contract/upstream-rows.spec.ts` — `connection` moved from the disabled
+  list to the reconfigured one, so a rename still fails by name.
+
+The general lesson, which is not about connection: **externalising a specifier
+is a claim that some MOUNTED row answers it.** Disabling a row and requiring its
+module are the same decision made twice, in two files, in opposite directions.
+
 ### What 0.1.2 broke, and where each seam went
 
 Six seams, measured on 2026-09-04 against staged `0.1.2-alpha.5` and confirmed
@@ -208,9 +261,11 @@ had moved, not a feature that had gone.
   its `/client` and imported `RpcId`/`serverResponseSchema` from its `/api`, so
   the build died in esbuild before anything booted. Replaced by
   `globalThis.__DSH_TRANSPORT__`, upstream's own carrier-override seam: the
-  package now installs `fetch`/`openStream` hooks and re-exports upstream's
-  client half instead of reimplementing it. 291 lines became 164. This is the
-  break worth studying — a declared export was never the seam.
+  package now installs `fetch`/`openStream` hooks instead of reimplementing the
+  client half. 291 lines became 164, and then 129. This is the break worth
+  studying — a declared export was never the seam.
+
+  **The first fix for it was wrong, and it shipped.** See below.
 - **The renderer's downlink had no carrier.** The Gateway's WebSocket mux is
   unreachable from the app scheme, and the two exact `/api/events.*` routes that
   used to shadow it were shadowing, not composing. Bridged at

@@ -3,8 +3,8 @@
 # every other row (tools, persistence, gateway, the whole ui-* roster) stays
 # exactly as the upstream web surface composes it.
 
-# The web transport: a TCP listener, its cmdline flag provider, the URL-printing
-# runtime glue, and the WebSocket browser carrier. All replaced below.
+# The web transport: a TCP listener, its cmdline flag provider, and the
+# URL-printing runtime glue. All replaced below.
 - id: web-startup
   disabled: true
 
@@ -14,8 +14,33 @@
 - id: web-runtime
   disabled: true
 
+# Connection stays UPSTREAM'S, reconfigured rather than disabled — this row is
+# the one desktop decision in this file that was got wrong once, so it carries
+# the reason.
+#
+# The physical carrier is all that differs here: the renderer cannot open a
+# WebSocket to the app scheme. Since 0.1.2 upstream takes an override for
+# exactly that (`globalThis.__DSH_TRANSPORT__`), so there is nothing left to
+# replace and `@dsh-desktop/connection` installs the override instead.
+#
+# Disabling this row and standing in for it — which is what shipped as
+# `0.1.5-desktop-alpha0.1.0` — cannot work, and fails silently in the build.
+# Upstream's client bundles are module-host factories, so a stand-in that
+# re-exports one compiles to a runtime require against the browser module
+# table, and `dsh-client-modules` builds that table only from MOUNTED rows.
+# Turning this row off removed the module the stand-in required, every client
+# plugin failed behind it, and the app opened to "Failed to load plugins".
 - id: connection
-  disabled: true
+  # `inject` and `config` are BOTH overridden, and neither is optional.
+  # Upstream's row reads `inject: [webRuntime]` with
+  # `trustedHosts: !!js ctx.webRuntime.trustedHosts`, and `web-runtime` is a row
+  # this app disables — so left alone the row waits forever on a service nothing
+  # provides, and its config expression has no `ctx.webRuntime` to read.
+  # An empty trust list is the honest value here: the only surface is the
+  # launcher's own socket, and there is no LAN bind to derive authorities from.
+  inject: []
+  config:
+    trustedHosts: []
 
 # The HMR browser half opens EventSource('/plugins/events'), which the app
 # scheme cannot serve; a failed client fiber would hold the whole UI on the
@@ -57,19 +82,18 @@
         lead: !!js Number(process.env.DSH_DESKTOP_BAND_LEAD ?? 0)
         menuButton: !!js process.env.DSH_DESKTOP_BAND_MENU === '1'
 
-    # Dual-face transport row, and both faces now delegate to the upstream
-    # client-connection apply — the /api route, trust fence and host
-    # ctx.connection on the node side, and the whole browser connection
-    # plugin (RPC caller, generation source, connect/reconnect loop) on the
-    # other. The browser half only installs the transport hooks upstream reads
-    # off the page global first, which is why the row still has to be OURS
-    # rather than upstream's `connection` re-enabled: the global must be set
-    # before that plugin's body runs, and re-exporting its `apply` from a
-    # module that assigns the global is what guarantees the order.
+    # The carrier override for the `connection` row above: a node-only row that
+    # injects `globalThis.__DSH_TRANSPORT__` at the top of the served `<head>`,
+    # where it precedes every boot row upstream injects. Carries no config —
+    # the connection options belong to upstream's row, which is the row that
+    # reads them.
+    #
+    # An injection rather than a client plugin ON PURPOSE. Upstream asks for
+    # the global "before plugin boot", and a document position settles that;
+    # a client row would have to win an ordering argument instead, and would
+    # have to be in the browser module table to do it.
     - id: desktop-connection
       name: '@dsh-desktop/connection'
-      config:
-        trustedHosts: []
 
     # Desktop Settings: one settings section for the preferences only the
     # launcher can act on (tray, close behaviour, notifications, title bar,

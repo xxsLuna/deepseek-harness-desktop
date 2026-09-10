@@ -5,10 +5,11 @@
  * **warns and skips** an id it cannot find — `warn("patch: entry %C not found")`
  * in `dsh-app-boot` — it does not throw, and the warning does not reach the app
  * log. So a renamed row leaves our patch a no-op and the upstream row at its
- * default, which for these is *on*: `webserver` binds a real TCP port,
- * `connection` mounts a WebSocket carrier the app scheme cannot serve,
- * `directory-picker` restores an OS chooser this process cannot bring to the
- * front. Nothing errors. The app simply stops being the app.
+ * default: `webserver` binds a real TCP port, `directory-picker` restores an OS
+ * chooser this process cannot bring to the front, and `connection` — which this
+ * app reconfigures rather than disables — mounts with upstream's own
+ * `trustedHosts` instead of ours. Nothing errors. The app simply stops being
+ * the app.
  *
  * `boot.js` now refuses to boot when one is missing, so the sidecar suite would
  * fail too — but it would fail as "the sidecar did not start". This file names
@@ -87,10 +88,17 @@ describe.skipIf(!existsSync(modules))('upstream patch rows', () => {
     ['web-startup', 'the desktop bundle supplies its own startup'],
     ['webserver', 'would bind a real TCP port'],
     ['web-runtime', 'replaced by the desktop runtime row'],
-    ['connection', 'would mount a WebSocket carrier the app scheme cannot serve'],
     ['client-hmr', 'dev-only, and it 404s against the app scheme'],
     ['directory-picker', 'replaced by the launcher-backed picker'],
     // Reconfigured rather than disabled.
+    //
+    // `connection` is here rather than above ON PURPOSE, and the move is the
+    // fix for a shipped break. Disabling it and standing in for it took the
+    // upstream client module out of the browser module table — the table is
+    // built from MOUNTED rows — so the stand-in's own require missed and every
+    // client plugin failed behind it. The carrier override
+    // (`__DSH_TRANSPORT__`) is the seam instead, so the row stays upstream's.
+    ['connection', 'reconfigured, not disabled: the desktop overrides its carrier, not the plugin'],
     ['agent-presets', 'repointed at the presets inside the dsh package'],
     ['session-telemetry-otel', 'what DSH_TELEMETRY_DISABLED turns off'],
   ])('still declares %s (%s)', (id) => {

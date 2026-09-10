@@ -1,12 +1,24 @@
-// Build this repo's browser bundles: src/client.ts* → lib/client.js, wrapped in
-// the module-host factory form (window.__ModuleLoader__.load) that the upstream
-// client module system executes.
+// Build this repo's browser bundles from `src/`, in one of two forms.
 //
-// What is bundled and what stays external differs per package, and the split
-// matters: React and the upstream client packages MUST be required at runtime,
-// because a second copy of React (or of a plugin's module instance) is a
-// different runtime than the page's — hooks fail and services do not match.
-// Upstream's own client bundles keep exactly these external.
+// `module` is the default: a bundle wrapped in the module-host factory form
+// (window.__ModuleLoader__.load) that upstream's client module system executes,
+// written to `lib/client.js`. What stays external matters here and the split is
+// not a size decision: React and the upstream client packages MUST be required
+// at runtime, because a second copy of React (or of a plugin's module instance)
+// is a different runtime than the page's — hooks fail and services do not
+// match. Upstream's own client bundles keep exactly these external.
+//
+// `page` is for code that is not a client plugin at all: a plain IIFE the node
+// half injects into the served document. It takes no externals, because there
+// is no module host answering a require at the point it runs.
+//
+// **An external is only answerable if the package it names is a MOUNTED loader
+// row.** `dsh-client-modules` builds the browser module table from
+// `ctx.loader.entries()` and skips `entry.disabled`, so externalising a package
+// whose row this app disables produces a bundle that builds clean, unit-tests
+// clean, and throws "missed the module table" at every user on boot. That
+// shipped once, as `0.1.5-desktop-alpha0.1.0`. `tests/unit/client-externals.spec.ts`
+// is what makes the drift fail here instead.
 import { build } from 'esbuild'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,25 +26,32 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const staged = join(root, 'build', 'harness', 'node_modules')
 
-/** @type {{ dir: string, id: string, entry: string, external: string[] }[]} */
+/**
+ * @type {{
+ *   dir: string,
+ *   id: string,
+ *   entry: string,
+ *   external: string[],
+ *   form?: 'module' | 'page',
+ *   out?: string,
+ * }[]}
+ */
 const BUNDLES = [
   {
-    // Upstream's connection client is REQUIRED at runtime, not bundled: this
-    // bundle re-exports its `apply`, and bundling a second copy would mean two
-    // plugin bodies racing to `ctx.provide('connection', …)`.
+    // Not a client plugin: upstream's carrier-override seam is a page global,
+    // and this builds the script that sets it. `@dsh-desktop/connection`'s node
+    // half injects the result at the top of `<head>`, which is what "before
+    // plugin boot" means in a document.
     //
-    // It has to be external for a second reason too — upstream's client bundle
-    // is not ESM. It registers itself with `window.__ModuleLoader__` and hands
-    // its exports back from a factory, so esbuild resolving the file finds no
-    // exports at all and quietly compiles `apply` to undefined (it warns, and
-    // that warning is the only sign). Keeping it external turns the import
-    // into the `require("@deepseek-ai/dsh-client-connection/client")` the
-    // loader answers — the same subpath form upstream's own bundles use
-    // between themselves.
+    // Nothing is external, and nothing needs to be — the source imports only a
+    // type. The previous shape re-exported upstream's client `apply` with
+    // `@deepseek-ai/*` external, which is the drift the header describes.
     dir: 'connection',
     id: '@dsh-desktop/connection',
-    entry: 'client.ts',
-    external: ['@deepseek-ai/*'],
+    entry: 'transport.ts',
+    external: [],
+    form: 'page',
+    out: 'transport.js',
   },
   {
     // A React component: everything it renders with belongs to the page.
@@ -60,15 +79,17 @@ const BUNDLES = [
 
 for (const bundle of BUNDLES) {
   const pkg = join(root, 'packages', bundle.dir)
+  const page = bundle.form === 'page'
+  const outfile = join(pkg, 'lib', bundle.out ?? 'client.js')
 
   const banner = `window.__ModuleLoader__.load({ id: ${JSON.stringify(bundle.id)}, factory: (require) => {`
     + '\nvar module = { exports: {} }; var exports = module.exports;'
 
   await build({
     entryPoints: [join(pkg, 'src', bundle.entry)],
-    outfile: join(pkg, 'lib', 'client.js'),
+    outfile,
     bundle: true,
-    format: 'cjs',
+    format: page ? 'iife' : 'cjs',
     platform: 'browser',
     target: 'es2022',
     sourcemap: false,
@@ -77,8 +98,10 @@ for (const bundle of BUNDLES) {
     jsx: 'automatic',
     // Resolve @deepseek-ai/* from the staged harness tree.
     nodePaths: [staged],
-    banner: { js: banner },
-    footer: { js: 'return module.exports; } });' },
+    ...page ? {} : {
+      banner: { js: banner },
+      footer: { js: 'return module.exports; } });' },
+    },
   })
-  console.log(`built ${bundle.id} -> packages/${bundle.dir}/lib/client.js`)
+  console.log(`built ${bundle.id} -> packages/${bundle.dir}/lib/${bundle.out ?? 'client.js'}`)
 }

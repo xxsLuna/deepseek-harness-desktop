@@ -8,11 +8,10 @@
  * contributes the desktop-surface prompt section plus the DSH_SURFACE shell
  * variable.
  *
- * The bridge is half of one contract; `@dsh-desktop/connection`'s browser
- * bundle is the other, installing the `openStream` hook upstream reads off the
- * page global. Both ends attach to declared API — `wireStream` here,
- * `__DSH_TRANSPORT__` there — which is what replaced a subclassed API client
- * and a copied connection loop.
+ * The bridge is half of one contract; `@dsh-desktop/connection` is the other,
+ * injecting the `openStream` hook upstream reads off the page global. Both
+ * ends attach to declared API — `wireStream` here, `__DSH_TRANSPORT__` there —
+ * which is what replaced a subclassed API client and a copied connection loop.
  */
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -53,8 +52,9 @@ function desktopSurfacePrompt() {
 
 /**
  * Where the browser half opens a logical stream. Mirrored by `STREAM_PATH` in
- * `@dsh-desktop/connection`'s client bundle; the two are one contract and
- * `tests/contract/stream-bridge.spec.ts` is what stops them drifting apart.
+ * `@dsh-desktop/connection`'s injected transport script; the two are one
+ * contract and `tests/contract/sidecar.spec.ts` is what stops them drifting
+ * apart.
  *
  * Outside `/api` deliberately. That prefix has an upstream route owner, and
  * the routes this replaced lived inside it purely so an exact match would beat
@@ -128,7 +128,7 @@ export function apply(ctx, config) {
   // because it is window chrome rather than transport and the launcher
   // configures it. It taps the same index this fallback owner serves.
 
-  // The stream bridge. Its client half is @dsh-desktop/connection's
+  // The stream bridge. Its page half is @dsh-desktop/connection's injected
   // `openStream` hook; between them they replace the Gateway's WebSocket mux,
   // which the renderer cannot reach because the app scheme does not carry a
   // WebSocket upgrade.

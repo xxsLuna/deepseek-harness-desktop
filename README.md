@@ -135,7 +135,7 @@ The app is a thin Electron shell around the **unmodified** published harness:
 | package | what it is |
 | --- | --- |
 | `@dsh-desktop/carrier` | a `webServer` provider listening on a socket path with a bearer token, instead of a TCP port |
-| `@dsh-desktop/connection` | the transport row: upstream's `/api` node half, with an SSE browser carrier replacing the WebSocket one (WebSockets cannot ride a custom scheme) |
+| `@dsh-desktop/connection` | the carrier override: a page script injected at the top of the served `<head>`, setting the `__DSH_TRANSPORT__` hooks upstream's own connection plugin reads (a WebSocket cannot ride a custom scheme, so `openStream` posts to the bridge instead) |
 | `@dsh-desktop/picker` | a `directoryPicker` provider delegating the pick to the launcher's window-owned dialog |
 | `@dsh-desktop/chrome` | the merged title band, injected into the served document; the launcher configures its height, leading inset and menu button through the patch layer |
 | `@dsh-desktop/settings` | the three **Desktop** sections — Desktop Settings, Shortcuts and Usage — registered into upstream's `settings.section` slot, with a CSS-only group heading above them in the nav. Every value they show is a launcher fact (close behaviour, notifications, title bar, auto-update, edge snapping, the toggle chord, the usage record), so the browser half talks to the launcher rather than the sidecar |

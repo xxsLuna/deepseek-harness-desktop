@@ -467,13 +467,37 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(await headWithoutCookie('/desktop/index-url'), 'the desktop surface no longer answers the readiness path').toBe(200)
   })
 
-  it('serves the UI with the boot manifest and the desktop connection row', async () => {
+  it('serves the UI with the boot manifest and the upstream connection row', async () => {
     const res = await socketRequest(socketPath, { path: '/' })
     expect(res.status).toBe(200)
     const ids = bootEntryIds(res.body)
-    expect(ids).toContain('@dsh-desktop/connection')
-    expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
+    // This assertion is INVERTED from what it was, and the inversion is the
+    // fix. It used to require our own row here and upstream's absent, because
+    // the desktop client half stood in for upstream's. That took upstream's
+    // client module out of the browser module table — `dsh-client-modules`
+    // builds it from mounted rows only — while the stand-in still required it,
+    // so every client plugin failed at boot with `missed the module table`.
+    // The carrier override is a page global now, so the row is upstream's and
+    // `@dsh-desktop/connection` is not a client module at all.
+    expect(ids).toContain('@deepseek-ai/dsh-client-connection')
+    expect(ids).not.toContain('@dsh-desktop/connection')
     expect(ids).not.toContain('@deepseek-ai/dsh-client-hmr')
+  })
+
+  it('installs the carrier override ahead of every boot row it has to beat', async () => {
+    const res = await socketRequest(socketPath, { path: '/' })
+    expect(res.status).toBe(200)
+    // Presence is not the property; POSITION is. Upstream reads
+    // `__DSH_TRANSPORT__` from its connection plugin and asks a shell to
+    // install it "before plugin boot", and an injected script earns that by
+    // going in first. A block that landed after the bootstrap batch would look
+    // identical to a `toContain` and would leave upstream reaching for the
+    // Gateway WebSocket the app scheme cannot open.
+    const transport = res.body.indexOf('data-dsh-desktop-transport')
+    expect(transport, 'the transport script is not in the served document').toBeGreaterThan(-1)
+    expect(res.body).toContain('__DSH_TRANSPORT__')
+    expect(transport).toBeLessThan(res.body.indexOf('__ModuleLoader__'))
+    expect(transport).toBeLessThan(res.body.indexOf('__DSH_BOOT__'))
   })
 
   it('answers /api unary calls through the upstream gateway', async () => {
@@ -506,8 +530,8 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // upstream's `/api` prefix owner. 0.1.2 carries logical streams over the
     // Gateway's WebSocket mux, which the renderer cannot reach from the app
     // scheme, so `@dsh-desktop/bundle` bridges the Gateway's own
-    // `wireStream.open` onto NDJSON and `@dsh-desktop/connection` consumes it
-    // through the `openStream` transport hook.
+    // `wireStream.open` onto NDJSON and `@dsh-desktop/connection`'s injected
+    // transport consumes it through the `openStream` hook.
     //
     // The endpoint here is deliberately one the Gateway does not claim: what
     // this asserts is that the BRIDGE answers and frames, which a refusal
@@ -666,8 +690,11 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // this process cannot bring to the front.
     const graph = await socketRequest(socketPath, { path: '/' })
     const ids = bootEntryIds(graph.body)
-    expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
-    expect(ids).toContain('@dsh-desktop/connection')
+    // The transport decision is no longer "our row instead of upstream's" but
+    // "upstream's row, with our carrier override on the page" — so what a home
+    // overlay must not be able to undo is the override, not the row.
+    expect(ids).toContain('@deepseek-ai/dsh-client-connection')
+    expect(graph.body).toContain('data-dsh-desktop-transport')
     // The picker must be ours, i.e. the native interaction served by the
     // launcher rather than a chooser the sidecar spawns.
     const requests = await socketRequest(socketPath, { path: '/desktop/picker/requests', firstChunkOnly: true })

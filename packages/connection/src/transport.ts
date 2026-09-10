@@ -14,11 +14,24 @@
  * forking this plugin". So all of that goes, and what is left is two transport
  * functions plus one flag.
  *
- * The ordering rule the seam states — before plugin boot — holds by
- * construction rather than by patch order: the global is assigned at module
- * scope and `apply` is re-exported, so evaluation always precedes the plugin
- * body. That is the same delegation the node half already does, which is why
- * the row's shape does not change.
+ * **This is a page script, not a client plugin, and that is the fix for a
+ * shipped break.** It also used to `export { inject, apply }` from upstream's
+ * `/client`, with the upstream `connection` row disabled so this row could
+ * stand in for it. That cannot work. Upstream's client bundles are already in
+ * module-host factory form, so the re-export compiled to a runtime
+ * `require("@deepseek-ai/dsh-client-connection/client")` resolved against the
+ * browser module table — and `dsh-client-modules` builds that table only from
+ * MOUNTED loader rows (`entry.disabled` is a `continue`). The row disabled to
+ * make room was the only thing that would have put that module there, so the
+ * require missed, every client plugin failed at boot behind it, and neither
+ * the build nor the unit suite could see any of it. `0.1.5-desktop-alpha0.1.0`
+ * shipped exactly that.
+ *
+ * So the row is upstream's again and the transport arrives with the document.
+ * That is also what the seam asks for literally — *before plugin boot*, which
+ * an injected script satisfies by position rather than by an argument about
+ * evaluation order. There is no module table to be in, no external to declare,
+ * and no ordering left to get wrong.
  *
  * `ownsHost` is the one that deserves a note. This file used to hardcode
  * `isLoopback: true` with the comment "the host tree runs in this
@@ -144,21 +157,21 @@ declare global {
 }
 
 /**
- * Installed at module scope, which is what satisfies "before plugin boot".
+ * The whole of this file's effect: three hooks on one global, read by
+ * upstream's `apply` when the connection plugin boots.
  *
  * `fetch` is the page's own — unary RPC already rides `fetch()` against this
  * origin and always did; the hook is mandatory, so it is passed through rather
  * than left for upstream to default. `openStream` is the half that exists at
  * all: without it upstream reaches for the Gateway WebSocket, which is the one
  * thing the app scheme cannot do.
+ *
+ * Nothing is exported. This builds to an IIFE the node half injects into the
+ * served document (`lib/inject.js`), so an export would have nowhere to go —
+ * and reaching for one is what broke the shipped alpha.
  */
 globalThis.__DSH_TRANSPORT__ = {
   fetch: (input, init) => globalThis.fetch(input, init),
   openStream: openRemoteStream,
   ownsHost: true,
 }
-
-// Upstream's plugin, unchanged, reading the transport above. Everything this
-// file used to reimplement — the RPC caller, the generation source, the
-// connect/reconnect loop, `ctx.connection` itself — is upstream's again.
-export { inject, apply } from '@deepseek-ai/dsh-client-connection/client'
