@@ -23,7 +23,8 @@
     "test": "vitest run tests/unit",
     "test:contract": "vitest run tests/contract --no-file-parallelism",
     "package": "electron-builder",
-    "smoke:packaged": "node scripts/smoke-packaged.mjs"
+    "smoke:packaged": "node scripts/smoke-packaged.mjs",
+    "stage:relock": "node scripts/stage-harness.mjs --relock"
   },
   "devDependencies": {
     "@types/node": "26.2.0",
