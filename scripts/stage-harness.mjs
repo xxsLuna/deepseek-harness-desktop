@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { nodePinVerdict } from './node-pin.mjs'
+import { lockedPin, stageMode } from './harness-lock.mjs'
 // The market's link-safe delete, reused rather than reimplemented: the reason
 // it exists is a platform fact about the pinned Node, and this script deletes
 // a junction on every run. One implementation means one place to fix.
@@ -18,6 +19,14 @@ const stageDir = join(root, 'build', 'harness')
 
 // --local-only refreshes just this repo's packages inside an existing stage.
 const localOnly = process.argv.includes('--local-only')
+// --relock re-resolves the caret ranges and writes the result back to
+// harness-lock.json. The only way the lock is ever regenerated, so a pin bump
+// is "edit harness.json, run this, commit both".
+const relock = process.argv.includes('--relock')
+/** The committed lock: what the staged closure is, not merely what it asked for. */
+const lockPath = join(root, 'harness-lock.json')
+/** Set inside the install block; read again when the lock is written back. */
+let stageDecision = { mode: 'ci' }
 if (localOnly && !existsSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh'))) {
   throw new Error('--local-only requires an existing stage; run without the flag first')
 }
@@ -31,6 +40,24 @@ if (!localOnly) {
     private: true,
     dependencies: { '@deepseek-ai/dsh': pin.harness },
   }, null, 2))
+
+  const committedLock = existsSync(lockPath) ? JSON.parse(readFileSync(lockPath, 'utf8')) : undefined
+  stageDecision = stageMode({ pin: pin.harness, lockPin: lockedPin(committedLock), relock })
+  const decision = stageDecision
+  if (decision.mode === 'stale') throw new Error(decision.message)
+  if (decision.mode === 'ci') {
+    // `npm ci` needs the lock beside the manifest it describes. Copied rather
+    // than symlinked: npm rewrites this file on some paths, and the committed
+    // one must only ever change through --relock.
+    writeFileSync(join(stageDir, 'package-lock.json'), JSON.stringify(committedLock, null, 2))
+  } else {
+    console.log(decision.mode === 'bootstrap'
+      ? 'stage-harness: no harness-lock.json; resolving the closure and writing one'
+      : 'stage-harness: --relock, resolving the closure again')
+  }
+  const installArgs = decision.mode === 'ci'
+    ? ['ci', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error']
+    : ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error']
 
   // The registry occasionally serves a 404 for a tarball its own metadata
   // still points at (seen on @tanstack/virtual-core, a transitive dependency of
@@ -54,7 +81,7 @@ if (!localOnly) {
   for (let attempt = 1; ; attempt += 1) {
     try {
       // npm is npm.cmd on Windows, which spawnSync only resolves through a shell.
-      execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-fund', '--no-audit', '--loglevel=error'], {
+      execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', installArgs, {
         cwd: stageDir,
         stdio: 'inherit',
         shell: process.platform === 'win32',
@@ -68,9 +95,10 @@ if (!localOnly) {
       const output = `${String(error.stdout ?? '')}${String(error.stderr ?? '')}${String(error.message ?? '')}`
       if (/heap out of memory|Reached heap limit/i.test(output)) {
         throw new Error(
-          'stage-harness: npm ran out of heap resolving the harness tree. Raise --max-old-space-size '
-          + 'above 4096 in this script, or give the stage a lockfile so npm stops re-resolving the '
-          + 'caret ranges. Retrying would just fail the same way.',
+          'stage-harness: npm ran out of heap resolving the harness tree. This only happens on a '
+          + 'resolve — `npm ci` from harness-lock.json does no search — so it means --relock, or a '
+          + 'lock that was missing. Raise --max-old-space-size above 4096 in this script if a '
+          + 'relock genuinely needs more. Retrying would just fail the same way.',
           { cause: error },
         )
       }
@@ -133,6 +161,15 @@ if (existsSync(packagesDir)) {
 
 // The staged harness decides which Node it needs; report it against the major
 // this repo pins, and fail loud on a version mismatch.
+// The resolve produced a closure; record it so the next stage installs THIS one
+// rather than whatever the ranges mean that day. Only ever written here, which
+// is what makes the committed file answerable for what ships.
+if (!localOnly && stageDecision.mode !== 'ci') {
+  const produced = readFileSync(join(stageDir, 'package-lock.json'), 'utf8')
+  writeFileSync(lockPath, produced)
+  console.log(`stage-harness: wrote harness-lock.json (${lockedPin(JSON.parse(produced)) ?? 'unknown'})`)
+}
+
 if (!localOnly) {
   const dshManifest = JSON.parse(readFileSync(join(stageDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
   const engines = dshManifest.engines?.node
