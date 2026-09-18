@@ -108,6 +108,8 @@ jobs:
           PR_BODY: |
             `package.json` carries the release version `scripts/release-version.mjs` derives from the pin — upstream's core and pre-release number, with the scheme number carried across unchanged. That number is electron-updater's channel, so moving it strands the installed base for a release and stays a migration someone announces by hand. The new version is recorded in this channel's `PUBLISHED` list as well, so the next bump is compared against it.
 
+            `harness-lock.json` is regenerated with the pin. It locks the whole ~500-package closure, not just `@deepseek-ai/dsh` — upstream declares the rest with caret ranges, and without the lock the transitives moved on their own (measured: `rc.1` one morning, `rc.2` the next, with the pin unchanged). The diff on that file is what upstream actually changed underneath the pin.
+
             The build workflow on this PR re-runs the sidecar contract suite and five-target packaging against the new version. Green checks mean the coupling contracts held; a red check names the exact seam that changed.
         run: |
           # The channel is in the branch name because two channels can want the
@@ -128,7 +130,22 @@ jobs:
           # harness. Deriving instead needs no dependency, which is why there is
           # no install step above. stdout is the release version, nothing else.
           RELEASE=$(node scripts/release-version.mjs "$CANDIDATE" "$CHANNEL")
-          git add harness.json package.json tests/unit/version-scheme.spec.ts
+          # A fourth file, because the pin alone no longer describes what gets
+          # installed. `harness.json` names ONE package out of ~500 and upstream
+          # declares the rest with caret ranges, so a stage without a lockfile
+          # resolved a different closure on every run — measured: the pin sat at
+          # 0.1.5-alpha.1 while the transitives went 0.1.5-rc.1 one morning and
+          # rc.2 the next, with nothing in the repo changing. `stage-harness.mjs`
+          # now refuses a lock that does not match the pin, so a bump that
+          # skipped this would arrive red on its first step instead of green on
+          # a tree nobody chose.
+          #
+          # Still no `npm install` above, and that is not an accident:
+          # stage-harness imports only node builtins and files from this repo, so
+          # it runs from a bare checkout. The install it performs is the harness
+          # closure into build/, which is the thing being locked.
+          node scripts/stage-harness.mjs --relock
+          git add harness.json harness-lock.json package.json tests/unit/version-scheme.spec.ts
           git commit -m "Track upstream @deepseek-ai/dsh $CANDIDATE on the $CHANNEL channel"
           git push -u origin "$BRANCH"
           gh label create upstream-bump --color 0E8A16 --description "Automated harness version bump" 2>/dev/null || true

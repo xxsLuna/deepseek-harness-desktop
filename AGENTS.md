@@ -114,6 +114,39 @@ like an answer. `bumpVerdict` refuses to compare at all unless the dist-tag *and
 the branch's pin are both a stage that channel carries, and every refusal names
 which of the two stopped it.
 
+### The pin covers one package only — so the lock covers the rest
+
+`harness.json` names `@deepseek-ai/dsh` and nothing else, and upstream declares
+its ~500-package closure with caret ranges. Staging used to `npm install` that,
+which meant the transitives were whatever the registry meant that hour.
+
+**Measured, 2026-09-10/11.** The pin sat at `0.1.5-alpha.1` throughout. One
+morning the closure resolved `0.1.5-rc.1`; the next, `rc.2` — with nothing in
+this repo changing. Four alpha releases shipped on `rc.1` while `harness.json`
+said `alpha.1`, and the question "is the build I tested the build that ships"
+had no answer at all. It also ran the macOS runners out of heap, and this
+script's own error message had already named a lockfile as the better fix.
+
+So `harness-lock.json` is committed and `npm run stage` installs from it with
+`npm ci`. Three consequences worth knowing before touching any of it:
+
+- **A pin bump is four files now, not three.** `npm run stage:relock` resolves
+  the closure again and writes the lock back; it is the only thing that ever
+  writes that file. `watch-upstream.yml` runs it, so the automated PR still
+  arrives green — and the lock's diff is the honest record of what upstream
+  moved underneath the pin.
+- **A pin that moves without its lock fails at the front of the stage**, by
+  name, with the command to fix it. That is deliberate: it used to be silent,
+  and silence is what shipped four releases on an undeclared closure.
+- **The watch job still has no `npm install` step.** `stage-harness.mjs` imports
+  only node builtins and files from this repo, so it runs from a bare checkout.
+  The install it performs is the harness closure, which is the thing being
+  locked.
+
+`tests/unit/harness-lock.spec.ts` holds the rule and asserts the committed lock
+resolves the pinned version, so the mismatch fails in `npm test` rather than at
+the front of a five-target build.
+
 ### The pin covers one package only
 
 `harness.json` pins the top-level `dsh`. Its ~195 `@deepseek-ai` dependencies and
