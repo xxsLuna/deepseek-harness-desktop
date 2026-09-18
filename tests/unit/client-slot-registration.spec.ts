@@ -125,10 +125,25 @@ function runBundle(dir: string): BundleRun {
 }
 
 /** Packages with a built client bundle whose module asks for the slot registry. */
+/**
+ * Packages that CLAIM a client bundle. `lib/client.js` is `.gitignore`d, so a
+ * branch switch can leave one behind from a branch that still built it — and
+ * running that stale file here reported a registration failure the checked-out
+ * source could not produce. The manifest decides what belongs to the package.
+ * @param dir - package directory name.
+ * @returns whether this package ships a client bundle.
+ */
+const claimsClientBundle = (dir: string): boolean => {
+  const manifest = JSON.parse(
+    readFileSync(join(packagesDir, dir, 'package.json'), 'utf8'),
+  ) as { exports?: Record<string, unknown>, dsh?: { client?: unknown } }
+  return manifest.dsh?.client !== undefined || manifest.exports?.['./client'] !== undefined
+}
+
 const slotBundles = readdirSync(packagesDir, { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
-  .filter((dir) => existsSync(join(packagesDir, dir, 'lib', 'client.js')))
+  .filter((dir) => claimsClientBundle(dir) && existsSync(join(packagesDir, dir, 'lib', 'client.js')))
   .flatMap((dir) => {
     // Reading the export rather than a list here: a bundle that does not take
     // `slots` gets a ctx this stub cannot honestly supply, so it is not run.

@@ -77,9 +77,30 @@ function requiredSpecifiers(file: string): string[] {
   return [...found]
 }
 
+/**
+ * Whether a package CLAIMS a client bundle, rather than merely having a file
+ * called one.
+ *
+ * `lib/client.js` is a build artifact and `.gitignore`d, so it outlives a
+ * branch switch: checking out a branch whose connection package still builds
+ * one leaves the file behind for a branch whose does not. That stale artifact
+ * then failed this spec with an externals drift that the checked-out source
+ * could not produce — a false red from another branch's build, which is the
+ * least useful kind.
+ *
+ * The manifest is the subject, so the manifest decides. A package that
+ * declares neither `dsh.client` nor a `./client` export ships no client
+ * bundle, whatever is lying in `lib/`.
+ * @param manifest - the package manifest.
+ * @returns whether a `lib/client.js` belongs to this package at all.
+ */
+function declaresClientBundle(manifest: Manifest): boolean {
+  return manifest.dsh?.client !== undefined || manifest.exports?.['./client'] !== undefined
+}
+
 const built = packages
   .map((pkg) => ({ ...pkg, file: join(packagesDir, pkg.dir, 'lib', 'client.js') }))
-  .filter((pkg) => existsSync(pkg.file))
+  .filter((pkg) => declaresClientBundle(pkg.manifest) && existsSync(pkg.file))
 
 describe.skipIf(built.length === 0)('built client bundles', () => {
   it.each(built.map((pkg) => [pkg.dir, pkg] as const))(
