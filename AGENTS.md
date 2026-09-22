@@ -138,10 +138,17 @@ So `harness-lock.json` is committed and `npm run stage` installs from it with
 - **A pin that moves without its lock fails at the front of the stage**, by
   name, with the command to fix it. That is deliberate: it used to be silent,
   and silence is what shipped four releases on an undeclared closure.
-- **The watch job still has no `npm install` step.** `stage-harness.mjs` imports
-  only node builtins and files from this repo, so it runs from a bare checkout.
-  The install it performs is the harness closure, which is the thing being
-  locked.
+- **The watch job installs this repo's devDependencies, and the note that used
+  to sit here was wrong.** It said `stage-harness.mjs` "imports only node
+  builtins and files from this repo, so it runs from a bare checkout" — written
+  from the import list without following it one level down. It imports
+  `./node-pin.mjs`, which imports `semver`, a devDependency. The relock step
+  therefore died with `Cannot find package 'semver'` on every scheduled run for
+  four days, and only the fact that upstream did not publish in that window kept
+  a bump from being missed. `npm ci --ignore-scripts` is the fix: 17s, and it
+  skips Electron's binary fetch, which is the only postinstall that costs
+  anything. The pin check it pulls in is not optional — `nodePinVerdict` throws
+  when upstream's `engines.node` cannot be met by the Electron the app runs on.
 
 `tests/unit/harness-lock.spec.ts` holds the rule and asserts the committed lock
 resolves the pinned version, so the mismatch fails in `npm test` rather than at
