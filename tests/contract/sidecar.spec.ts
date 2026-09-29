@@ -668,6 +668,16 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     const workspaceId = items[0]?.workspaceId
     expect(workspaceId, 'workspace.create did not produce a workspace').toBeDefined()
 
+    // This is also the assertion that a preset exists, and it is the reason
+    // there is no agent-preset overlay in boot.js any more. There used to be
+    // one, justified by a comment saying that without it "no preset exists and
+    // every session.create fails with agent-preset-not-found" — while the root
+    // it configured had silently not existed for releases, and the registry's
+    // own shipped presets were carrying the app the whole time. 0.1.7 then
+    // renamed the row and removed the option that overlay set.
+    //
+    // So the claim gets a test rather than a comment: session/create needs a
+    // preset, and it fails by that name when there is none.
     const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
     expect(session.ok, JSON.stringify(session)).toBe(true)
     const sessionId = (session.value as { sessionId?: string }).sessionId
@@ -795,28 +805,45 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(manifest.dsh?.profile?.bundles).toEqual([])
   })
 
-  it('links every local package into the flat module fallback', () => {
-    // COUPLING, and a silent one. The fallback is healed from two anchors: the
-    // dsh installation (which links the upstream closure) and
-    // @dsh-desktop/bundle (which links ours, via its peerDependencies). Our
-    // packages are copied in BESIDE the dsh tree rather than depended on by it,
-    // so the dsh closure alone links none of them.
+  it('writes no link farm for the profile', () => {
+    // This assertion used to be the OPPOSITE: `$DSH_HOME/profiles/node_modules`
+    // held one symlink per package, healed from two anchors. 0.1.7 runs the same
+    // BFS in memory and intercepts Node's ESM and CJS resolvers with it, so the
+    // directory is never written.
     //
-    // Read from packages/ rather than hard-coded: a new package whose name was
-    // never added to @dsh-desktop/bundle's peerDependencies fails HERE, instead
-    // of resolving to nothing at runtime — where the client-module scan caches
-    // an unresolvable name as "not a client package" and logs nothing at all.
-    const local = readdirSync(join(root, 'packages'), { withFileTypes: true })
-      .filter((e) => e.isDirectory() && existsSync(join(root, 'packages', e.name, 'package.json')))
-      .map((e) => (JSON.parse(
-        readFileSync(join(root, 'packages', e.name, 'package.json'), 'utf8'),
-      ) as { name: string }).name)
-    expect(local.length).toBeGreaterThan(0)
+    // Its absence is worth asserting rather than just no longer asserting its
+    // presence: that farm is the shape that emptied 271 packages when a plugin
+    // removal walked through one of its junctions, and `removeLinkProjections`
+    // in boot.js exists to clear it off machines that already have one. A farm
+    // reappearing means something started writing it again.
+    expect(existsSync(join(home, 'profiles', 'node_modules'))).toBe(false)
+    expect(existsSync(join(home, 'profiles', 'desktop', '.dsh-module-fallback'))).toBe(false)
+  })
 
-    const fallback = join(home, 'profiles', 'node_modules')
-    for (const name of local) expect(existsSync(join(fallback, name))).toBe(true)
-    // And the upstream closure landed too, or nothing composed would resolve.
-    expect(existsSync(join(fallback, '@deepseek-ai', 'dsh'))).toBe(true)
+  it('serves the client bundle of every local package that declares one', async () => {
+    // The sweep the link-farm assertion used to provide, moved onto the
+    // behaviour it was standing in for. A package that the resolution cannot
+    // reach does not throw: the client-module scan caches the name as "not a
+    // client package" and logs nothing at all, so the page loads with a row
+    // silently missing. Asking for the bundle is what proves the name resolved
+    // INSIDE the sidecar, which is the only place the interception exists.
+    //
+    // Derived from `packages/` rather than listed, so a new client package is
+    // covered the day it is added.
+    const clients = readdirSync(join(root, 'packages'), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(root, 'packages', e.name, 'package.json')))
+      .map((e) => JSON.parse(
+        readFileSync(join(root, 'packages', e.name, 'package.json'), 'utf8'),
+      ) as { name: string, dsh?: { client?: unknown } })
+      .filter((manifest) => manifest.dsh?.client !== undefined)
+      .map((manifest) => manifest.name)
+    expect(clients.length, 'no local package declares dsh.client any more').toBeGreaterThan(0)
+
+    for (const name of clients) {
+      const res = await pluginBundle(socketPath, name)
+      expect(res.status, `${name} client bundle`).toBe(200)
+      expect(res.body.length, `${name} client bundle is empty`).toBeGreaterThan(0)
+    }
   })
 
   it('reports what a Claude plugin published and what it withheld', async () => {

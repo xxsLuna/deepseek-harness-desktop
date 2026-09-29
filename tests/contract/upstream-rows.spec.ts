@@ -99,9 +99,22 @@ describe.skipIf(!existsSync(modules))('upstream patch rows', () => {
     // client plugin failed behind it. The carrier override
     // (`__DSH_TRANSPORT__`) is the seam instead, so the row stays upstream's.
     ['connection', 'reconfigured, not disabled: the desktop overrides its carrier, not the plugin'],
-    ['agent-presets', 'repointed at the presets inside the dsh package'],
+    // Not patched, and listed anyway. This app mounts no overlay on the preset
+    // registry — it used to, and 0.1.7 both renamed the row and removed the
+    // `roots` option that overlay set. What survives is the dependency: without
+    // SOME registry row, session.create has no preset to name. Named here so a
+    // second rename is a failure that says which row moved, rather than an app
+    // that opens and cannot start a session.
+    ['agent-preset-registry', 'session.create needs a preset, and this is the row that has them'],
     ['session-telemetry-otel', 'what DSH_TELEMETRY_DISABLED turns off'],
   ])('still declares %s (%s)', (id) => {
     expect(declared.has(id)).toBe(true)
+  })
+
+  it('no longer declares the pre-0.1.7 agent-presets row', () => {
+    // The rename is the whole reason the overlay above is gone. If upstream
+    // brings the old id back, the deletion deserves re-reading rather than
+    // silently continuing to do nothing.
+    expect(declared.has('agent-presets')).toBe(false)
   })
 })
