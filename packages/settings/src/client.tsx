@@ -518,9 +518,24 @@ function DesktopSettingsSection(): ReactNode {
             />
           </Row>
         )}
+        {/*
+          Two rows, because these are two versions and one of them used to
+          disappear. The harness version shared this hint slot with the update
+          check's result, and `checked` is component state that only resets when
+          a NEW check starts — so pressing "Check now" replaced the harness
+          version with a status message and never put it back, until the page
+          was reopened. The slot now belongs to the check, which is what it was
+          for; the harness gets a row of its own.
+
+          `nested` rather than a peer row, for the reason that modifier exists:
+          the relationship is containment, not equality. This app SHIPS that
+          harness — and the version above literally encodes it, since the middle
+          field of `…-desktop-v0.2.6` is the `rc.2` below. Two peer rows would
+          read as two independent products.
+        */}
         <Row
           label="Version"
-          hint={checked === undefined ? `Harness ${view.harnessVersion}` : checked.message}
+          hint={checked?.message}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <span style={{ ...styles.hint, opacity: 0.75 }}>{view.version}</span>
@@ -534,6 +549,13 @@ function DesktopSettingsSection(): ReactNode {
               {check === 'checking' ? <><Spinner /> Checking…</> : 'Check now'}
             </button>
           </div>
+        </Row>
+        <Row
+          label="Harness"
+          nested
+          hint="The DeepSeek Harness this build ships. The version above is this app’s own."
+        >
+          <span style={{ ...styles.hint, opacity: 0.75 }}>{view.harnessVersion}</span>
         </Row>
       </section>
     </div>
@@ -1074,20 +1096,32 @@ const SECTIONS: Record<string, () => ReactNode> = {
  * @param ctx - client root context.
  */
 export function apply(ctx: {
-  slots: { register: (options: object, component: () => ReactNode) => () => void }
+  slots: {
+    register: (options: object, component: () => ReactNode) => () => void
+    inject: (name: string, mount: () => unknown) => unknown
+  }
   effect: (execute: () => () => void, label?: string) => unknown
 }): void {
   // Driven off DESKTOP_SECTIONS rather than written out, because the nav
   // heading is placed by counting that many rows back from the end. Registering
   // a section the list does not know about would leave the heading one row too
   // low, and nothing would say so.
+  //
+  // `slots.inject` rather than a bare `register`, the same as
+  // `@dsh-desktop/market` already does for its tab. Since 0.1.5 a slot has to be
+  // DECLARED before anything registers into it — declaration comes from a
+  // parent entry's `children` table, and `settings.section` is declared by
+  // upstream's Settings page, which may activate after this row. A bare
+  // register throws `slot "settings.section" is not declared` and takes the
+  // whole plugin down with it; injecting waits for the declaration instead of
+  // racing it. Upstream's own settings sections are all written this way.
   for (const section of DESKTOP_SECTIONS) {
     const component = SECTIONS[section.id]
     if (component === undefined) continue
-    ctx.slots.register(
+    ctx.slots.inject('settings.section', () => ctx.slots.register(
       { name: 'settings.section', ...section, registrant: '@dsh-desktop/settings' },
       component,
-    )
+    ))
   }
   // Through ctx.effect, so unloading this plugin takes the rule with it —
   // otherwise the heading would outlive the entries it names and sit above

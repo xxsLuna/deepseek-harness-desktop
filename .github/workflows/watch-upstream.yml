@@ -140,10 +140,32 @@ jobs:
           # skipped this would arrive red on its first step instead of green on
           # a tree nobody chose.
           #
-          # Still no `npm install` above, and that is not an accident:
-          # stage-harness imports only node builtins and files from this repo, so
-          # it runs from a bare checkout. The install it performs is the harness
-          # closure into build/, which is the thing being locked.
+          # `stage-harness` needs this repo's devDependencies after all, and
+          # the comment that used to sit here said the opposite — that it
+          # "imports only node builtins and files from this repo". It does not:
+          # it imports `./node-pin.mjs`, which imports `semver`. That claim was
+          # written from the import list without following it one level down,
+          # and it broke this job for four days with
+          # `Cannot find package 'semver'` while upstream happened not to move.
+          #
+          # `--ignore-scripts` keeps it cheap: the only heavy postinstall here
+          # is Electron fetching its binary, and nothing in this job runs
+          # Electron. The harness closure that --relock installs below is the
+          # install that matters.
+          #
+          # Verified in a bare clone with no node_modules — the condition this
+          # job actually runs in — that the old line fails with
+          # `Cannot find package 'semver'` and that these two steps clear it in
+          # 17s. What that check could NOT reach is the closure install below:
+          # it dies on a Windows-only postinstall under a nested shell, which
+          # this Linux runner does not have. `build.yml` runs the same install
+          # on every target daily, so it is proven there rather than here.
+          #
+          # The pin check this pulls in is NOT optional — `nodePinVerdict`
+          # throws when upstream's `engines.node` cannot be met by the Electron
+          # binary the app runs the harness on, and a bump that trips it should
+          # never reach a PR.
+          npm ci --ignore-scripts --no-audit --no-fund
           node scripts/stage-harness.mjs --relock
           git add harness.json harness-lock.json package.json tests/unit/version-scheme.spec.ts
           git commit -m "Track upstream @deepseek-ai/dsh $CANDIDATE on the $CHANNEL channel"
