@@ -3,12 +3,18 @@
  *
  * `stage-harness.mjs` discovers `packages/*` by reading the directory, so a new
  * package reaches the staged tree on its own — and that is not enough. Upstream
- * builds `$DSH_HOME/profiles/node_modules` as one symlink per package in a BFS
- * over the anchor manifest's `dependencies` and `peerDependencies`
- * (`healProfilesModuleFallback`), and `packages/bundle/lib/boot.js` passes its
- * OWN manifest as the second anchor. A package missing from that list is
- * therefore never linked, and since `ctx.baseUrl` is the profile directory,
- * Node's parent walk never reaches the staged tree either.
+ * routes a bare package name through a resolution it computes with a BFS over
+ * the anchor manifest's `dependencies` and `peerDependencies`
+ * (`createRuntimeResolution`), and `packages/bundle/lib/boot.js` passes its OWN
+ * manifest as the second anchor. A package missing from that list is therefore
+ * in no entry, and since `ctx.baseUrl` is the profile directory, Node's parent
+ * walk never reaches the staged tree either.
+ *
+ * The BFS is the part that has not moved. Until 0.1.7 the same walk wrote
+ * `$DSH_HOME/profiles/node_modules` as one symlink per package
+ * (`healProfilesModuleFallback`); 0.1.7 keeps the walk and drops the symlinks,
+ * intercepting Node's ESM and CJS resolvers instead. So this file guards the
+ * same coupling it always did, and a missing name fails the same way.
  *
  * Adding `layout-memory` walked into exactly that: staged, composed as a row,
  * and the boot died with `Cannot find package '@dsh-desktop/layout-memory'`.
