@@ -3,7 +3,15 @@
  *
  * Only the functions with a rule in them — a chord captured from a keydown, and
  * the two that decide what a heatmap cell is. The components themselves need a
- * DOM and the staged harness's react, which is what the contract suite is for.
+ * DOM, which is what the contract suite is for.
+ *
+ * Importing them at all needs `react` to resolve, though, and that is why this
+ * repo carries react as a DEV dependency it otherwise has no use for. It used
+ * to come from the staged tree; upstream moved react to its own devDependencies
+ * between `0.1.5-alpha.1` and `0.1.5-rc.1`, so the staged closure stopped
+ * carrying it and this file stopped loading. The page is unaffected — the web
+ * frontend's dist bundles its own react — so the fix belongs here, in the
+ * toolchain, rather than in anything the app ships.
  */
 import { describe, expect, it } from 'vitest'
 import {

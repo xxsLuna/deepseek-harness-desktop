@@ -27,6 +27,23 @@ const TEST_DIRS = new Set(['test', 'tests', '__tests__', 'fixtures', '__fixtures
 /** Files that must survive every rule below: legal text, and the resolver's own metadata. */
 const KEEP_BASENAMES = /^(licen[cs]e|notice|copying|package\.json)/i
 
+/**
+ * Extensions that make a file code or a build artefact, never legal text.
+ *
+ * `KEEP_BASENAMES` is matched by PREFIX, so it shields `LICENSE.txt` and
+ * `NOTICE` — and also shielded `notice.d.ts`, which upstream 0.1.5 introduced
+ * as a real module (`@deepseek-ai/dsh-spill-policy` exports `./notice`). A
+ * declaration then survived the prune and `pruned-payload.spec.ts` failed,
+ * which is the assertion doing its job: the rule was over-broad by
+ * construction, and any package with a module named `license`, `notice` or
+ * `copying` would have shipped its sourcemap and declaration too.
+ *
+ * Extensions rather than exact names, because the point is the KIND of file.
+ * `.md` and `.txt` are deliberately absent — `LICENSE.md` is legal text and
+ * must outrank the docs rule.
+ */
+const NOT_LEGAL_TEXT = /\.([cm]?[jt]sx?|map|pdb)$/i
+
 /** Documentation basenames. Matched by prefix so README.zh.md and README.i18n.yaml both go. */
 const DOC_BASENAMES = /^(readme|changelog|changes|history|contributing|authors|code[-_]of[-_]conduct|security|governance|maintainers)/i
 
@@ -52,7 +69,7 @@ export function pruneReason(relPath, target) {
 
   // Legal text and package.json outrank every rule below: package.json is how
   // the resolver finds anything at all, and the licences must ship.
-  if (KEEP_BASENAMES.test(basename)) return undefined
+  if (KEEP_BASENAMES.test(basename) && !NOT_LEGAL_TEXT.test(basename)) return undefined
 
   // sharp's wasm build is the last link in its loader's fallback chain
   // (dist/sharp.cjs tries `@img/sharp-wasm32/sharp.node` only after the native
@@ -125,12 +142,28 @@ export function entryPointPaths(stageDir) {
     if (path.includes('*')) subtrees.add(path.split('*')[0])
     else exact.add(path)
   }
-  /** Walk an exports subtree, skipping `types` conditions — declarations are not runtime entries. */
+  /**
+   * Walk an exports subtree, skipping `types` conditions — declarations are not
+   * runtime entries.
+   *
+   * `types@<5.2` and friends are the same condition with a TypeScript version
+   * range attached, and matching `types` exactly missed all of them. `@lexical`
+   * ships twelve packages whose exports read
+   *
+   *     "types@<5.2": "./dist/typescript-too-old.d.ts",
+   *     "types":      "./dist/index.d.ts",
+   *
+   * so the guard protected a declaration whose entire purpose is to fail a
+   * build with a helpful message. Twelve files is nothing; the reason to fix it
+   * is that `pruned-payload.spec.ts` asserts NO declaration ships, so this
+   * failed the contract suite on a 0.1.2 pin and would have on any pin that
+   * pulled a package using the qualified form.
+   */
   const walkExports = (node, dir) => {
     if (typeof node === 'string') return keep(dir, node)
     if (node === null || typeof node !== 'object') return
     for (const [key, value] of Object.entries(node)) {
-      if (key === 'types') continue
+      if (key === 'types' || key.startsWith('types@')) continue
       walkExports(value, dir)
     }
   }

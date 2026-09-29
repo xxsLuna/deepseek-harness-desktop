@@ -118,7 +118,7 @@ function isEmptyEntryList(text) {
  * boots exactly this way, and every primitive used here is exported for it.
  * @returns the root config to boot, and the loaded profile.
  */
-function prepareProfile() {
+async function prepareProfile() {
   // Two heals into the same flat fallback directory. The BFS walks
   // `dependencies` AND `peerDependencies` from the anchor's manifest, and our
   // packages are copied in BESIDE the dsh tree rather than depended on by it —
@@ -131,8 +131,14 @@ function prepareProfile() {
   // resolving once the root config lives in the profile, and the client-module
   // scan caches an unresolvable name as "not a client package" with no log line.
   // A row named in `cordis.patch.yml` must be named there too.
-  healProfilesModuleFallback(installAnchor, home)
-  healProfilesModuleFallback(desktopAnchor, home)
+  //
+  // One options object and a promise, both since 0.1.2: this used to be
+  // `(anchor, home)` positionally and synchronous. Passing the old shape put
+  // the anchor where the options go, so `readModuleFallbackManifest` was
+  // handed an undefined path and the sidecar died before any row loaded —
+  // which looked like a broken profile rather than a moved signature.
+  await healProfilesModuleFallback({ installAnchor, home })
+  await healProfilesModuleFallback({ installAnchor: desktopAnchor, home })
 
   const dir = resolveProfileDir(PROFILE, home)
   // Seeded EMPTY, and left that way. The three app-owned layers (dsh-base,
@@ -164,7 +170,7 @@ function prepareProfile() {
 /** @type {{ rootConfig: string, profile: import('@deepseek-ai/dsh-app-boot').Profile } | undefined} */
 let anchored
 try {
-  anchored = prepareProfile()
+  anchored = await prepareProfile()
 } catch (error) {
   console.warn(`${NAME}: plugin profile unavailable, continuing with no installed plugins: ${String(error)}`)
 }
@@ -246,21 +252,55 @@ function requireUpstreamRows(ids, why) {
 const overlays = []
 
 // The home layer is applied for CLI parity, but it must not be able to revert
-// the decisions this surface is BUILT on: re-enabling `webserver`/`connection`
-// would bind a real TCP port and mount a WebSocket carrier the app scheme
-// cannot serve, and re-enabling `directory-picker` restores an OS chooser this
+// the decisions this surface is BUILT on: re-enabling `webserver` would bind a
+// real TCP port, and re-enabling `directory-picker` restores an OS chooser this
 // process cannot bring to the front (or fails boot on a duplicate service).
 // Everything else in the home layer still applies.
-const DISABLED_UPSTREAM_ROWS = ['web-startup', 'webserver', 'web-runtime', 'connection', 'client-hmr', 'directory-picker']
+const DISABLED_UPSTREAM_ROWS = ['web-startup', 'webserver', 'web-runtime', 'client-hmr', 'directory-picker']
 requireUpstreamRows(
   DISABLED_UPSTREAM_ROWS,
-  'This app requires them off: webserver/connection would bind a real TCP port and mount a WebSocket '
-  + 'carrier the app scheme cannot serve, and directory-picker restores an OS chooser this process '
-  + 'cannot bring to the front. Refusing to boot rather than starting with them on.',
+  'This app requires them off: webserver would bind a real TCP port, and directory-picker restores '
+  + 'an OS chooser this process cannot bring to the front. Refusing to boot rather than starting '
+  + 'with them on.',
 )
 for (const id of DISABLED_UPSTREAM_ROWS) {
   overlays.push({ id, disabled: true })
 }
+
+// `connection` is re-asserted the other way round, and it used to be in the
+// list above. That is the fix for a break this app shipped: standing in for the
+// row meant disabling it, and disabling it took upstream's client module out of
+// the browser module table — `dsh-client-modules` builds that table from
+// MOUNTED rows only — while `@dsh-desktop/connection` still required it. Every
+// client plugin failed at boot behind one `missed the module table`.
+//
+// So the row is upstream's, and what this surface is built on is that it stays
+// ON: `@dsh-desktop/bundle` itself waits on host `ctx.connection` for the
+// browser-session URL, and the page's whole RPC plane is that plugin. A home
+// overlay turning it off would strand the sidecar with entries pending on a
+// service nothing provides. Only the physical carrier is ours, and that arrives
+// as `globalThis.__DSH_TRANSPORT__` on the page rather than as a row at all.
+//
+// The trust fence rides along for the same reason it is in the patch: with the
+// row upstream's, `trustedHosts` is the one connection option this surface
+// depends on, and a home file widening it is not a preference.
+requireUpstreamRows(
+  ['connection'],
+  'This app requires it ON, with the desktop carrier override installed on the page: it provides '
+  + 'host ctx.connection, which the desktop runtime waits for, and the browser RPC plane. Refusing '
+  + 'to boot rather than starting with a transport that cannot carry anything.',
+)
+// `inject` and `config` are replaced rather than merged. Upstream's row reads
+// `inject: [webRuntime]` and `trustedHosts: !!js ctx.webRuntime.trustedHosts`,
+// and `web-runtime` is disabled above — so carrying either through would leave
+// the row pending on a service nothing provides, with a config expression that
+// has no `ctx.webRuntime` to read.
+overlays.push({
+  id: 'connection',
+  disabled: false,
+  inject: [],
+  config: { trustedHosts: [] },
+})
 
 // Agent presets ship inside the dsh package and are pointed at by the
 // launcher, not by any bundle — without this overlay no preset exists and

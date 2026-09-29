@@ -20,6 +20,15 @@ const root = join(import.meta.dirname, '..', '..')
 const harnessRoot = join(root, 'build', 'harness')
 const entry = join(harnessRoot, 'node_modules', '@dsh-desktop', 'bundle', 'lib', 'boot.js')
 const token = 'contract-test-token'
+
+/**
+ * The browser session every request carries once the sidecar is up.
+ *
+ * Minted during the readiness wait and then attached by `socketRequest`, which
+ * is what the launcher's proxy does for the renderer. Undefined until then, so
+ * the readiness probe itself can observe the 401 that says the fence is live.
+ */
+let sessionCookie: string | undefined
 // Resolved through the electron package rather than guessed at, so it follows
 // the version pinned in package.json.
 const electronBinary = createRequire(import.meta.url)('electron') as string
@@ -46,7 +55,6 @@ interface SocketResponse {
   body: string
 }
 
-/** One request over the socket; for SSE, resolves after the first data chunk. */
 /**
  * Pull the client boot manifest out of a served index.html.
  *
@@ -70,6 +78,7 @@ function bootEntryIds(body: string): string[] {
   return (JSON.parse(manifest![1]!) as { entries: { id: string }[] }).entries.map((entry) => entry.id)
 }
 
+/** One request over the socket; for SSE, resolves after the first data chunk. */
 function socketRequest(socketPath: string, options: {
   path: string
   method?: string
@@ -82,7 +91,17 @@ function socketRequest(socketPath: string, options: {
       socketPath,
       path: options.path,
       method: options.method ?? 'GET',
-      headers: { host: '127.0.0.1', authorization: `Bearer ${token}`, ...options.headers },
+      // Bearer token AND session cookie, because upstream wants both since
+      // 0.1.2 and the launcher's proxy sends both on every forwarded request
+      // (src/socket-proxy.ts). A helper that sent only the token would make
+      // every test here 401 while the app worked, which is the least useful
+      // kind of red. `sessionCookie` is minted once readiness is reached.
+      headers: {
+        host: '127.0.0.1',
+        authorization: `Bearer ${token}`,
+        ...(sessionCookie === undefined ? {} : { cookie: sessionCookie }),
+        ...options.headers,
+      },
     }, (res) => {
       let body = ''
       res.setEncoding('utf8')
@@ -104,8 +123,134 @@ function socketRequest(socketPath: string, options: {
   })
 }
 
-/** One unary RPC over the socket, unwrapped to its result. */
-async function rpc(socketPath: string, method: string, payload: Record<string, unknown> = {}): Promise<{
+/**
+ * Mint the browser session `/api` requires, the way the launcher does.
+ *
+ * Harness 0.1.2 put `/api` behind `BrowserAuth`: the carrier's bearer token
+ * gets a request past the carrier, and a `dsh-auth-<authority>` cookie gets it
+ * past upstream's fence. The cookie is minted by GETting `/` with this
+ * process's launch token, which `@dsh-desktop/bundle` hands out on
+ * `/desktop/index-url` — a launcher-only path, because whoever can read it can
+ * mint a session.
+ *
+ * This mirrors `src/browser-session.ts` deliberately rather than importing it:
+ * that module belongs to the Electron main process and this suite speaks to the
+ * socket directly. Mirroring means a change that breaks the launcher's exchange
+ * breaks this too, which is the coupling worth having — the alternative is a
+ * green suite over an app that cannot authenticate.
+ *
+ * The exchange answers 303 with the cookie on the redirect itself, so the
+ * `set-cookie` is read from that response rather than followed.
+ * @param socketPath - the carrier socket.
+ * @returns the `cookie` request-header value, or undefined when unavailable.
+ */
+async function mintBrowserSession(socketPath: string): Promise<string | undefined> {
+  const answer = await socketRequest(socketPath, { path: '/desktop/index-url' })
+  if (answer.status !== 200) return undefined
+  const url = (JSON.parse(answer.body) as { url?: string }).url
+  if (url === undefined) return undefined
+  const target = new URL(url)
+  const minted = await socketRequest(socketPath, { path: `${target.pathname}${target.search}` })
+  const setCookie = minted.headers['set-cookie'] ?? []
+  const pairs = setCookie
+    .map((line) => line.split(';', 1)[0]?.trim())
+    .filter((pair): pair is string => pair !== undefined && pair.includes('='))
+  return pairs.length === 0 ? undefined : pairs.join('; ')
+}
+
+/**
+ * Fetch one client bundle the way 0.1.2 addresses them.
+ *
+ * Bundles are served under a combo URL —
+ * `/plugins/??<id>/client.js[,…]&rev=<revision>` — and there is no single
+ * revision to write down: 0.1.2 derives one PER ENTRY from content, so the
+ * `rev` on the index's own script tag answers for that batch and 404s for
+ * anything else.
+ *
+ * The boot manifest carries each entry's `url` already, which is both the only
+ * reliable source and the honest assertion: it is the URL the page will load.
+ * @param socketPath - the carrier socket.
+ * @param id - the package id whose client bundle is wanted.
+ * @returns the bundle response.
+ */
+async function pluginBundle(socketPath: string, id: string): Promise<SocketResponse> {
+  const index = await socketRequest(socketPath, { path: '/' })
+  const manifest = /globalThis\["__DSH_BOOT__"\] = (\{[\s\S]*?\})<\/script>/.exec(index.body)
+  expect(manifest, 'the served index carries no boot manifest').not.toBeNull()
+  const entries = (JSON.parse(manifest![1]!) as { entries: { id: string, url: string }[] }).entries
+  const entry = entries.find((candidate) => candidate.id === id)
+  expect(entry, `the boot manifest lists no entry for ${id}`).toBeDefined()
+  return await socketRequest(socketPath, { path: entry!.url.replaceAll('&amp;', '&') })
+}
+
+/**
+ * A Remote payload: the named arguments wrapped in the one field 0.1.2 wants.
+ *
+ * The envelope is checked before anything is dispatched — "Remote payload must
+ * contain exactly one plain-object args field" — and the arguments inside it
+ * are then matched against the method descriptor EXACTLY: an unknown field or
+ * a missing required one is `gateway/arguments-invalid`, not a default.
+ *
+ * So the wire names in these tests are assertions about upstream's surface,
+ * which is what makes them worth having: 0.1.2 renamed the arguments as well
+ * as the endpoints, and a positional or loosely-named call fails identically
+ * whether the field moved or the method vanished.
+ * @param args - named arguments, keyed by the descriptor's wire names.
+ * @returns the payload to put on the wire.
+ */
+function remoteArgs(args: Record<string, unknown>): { args: Record<string, unknown> } {
+  return { args }
+}
+
+/**
+ * The first value a logical stream yields, over the desktop bridge.
+ *
+ * 0.1.2 turned several listings into streams: `workspace.list` is gone and
+ * `workspace/follow` "streams a complete Workspace baseline followed by
+ * ordered increments", so the baseline IS the list and it arrives as the
+ * stream's first frame.
+ *
+ * Read through `/__desktop/remote-stream` rather than the Gateway's WebSocket
+ * mux, because that bridge is what the renderer uses — the app scheme carries
+ * no upgrade. Using it here means a test that reads a listing also exercises
+ * the transport the app depends on.
+ * @param socketPath - the carrier socket.
+ * @param endpoint - `namespace/method` of a stream method.
+ * @param payload - the named wire arguments.
+ * @returns the first value the stream yielded.
+ * @throws when the stream failed or ended without a value.
+ */
+async function firstStreamValue(
+  socketPath: string,
+  endpoint: string,
+  payload: Record<string, unknown> = {},
+): Promise<unknown> {
+  const res = await socketRequest(socketPath, {
+    path: '/__desktop/remote-stream',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ endpoint, payload: remoteArgs(payload) }),
+    // The baseline is the first frame and the stream stays open for
+    // increments, so waiting for `end` would wait for the generation to be
+    // cancelled. One chunk is the baseline.
+    firstChunkOnly: true,
+  })
+  if (res.status !== 200) throw new Error(`${endpoint}: HTTP ${String(res.status)}`)
+  const first = res.body.split('\n').find((line) => line !== '')
+  if (first === undefined) throw new Error(`${endpoint}: the bridge framed nothing`)
+  const frame = JSON.parse(first) as { v?: unknown, e?: { message?: string } }
+  if ('e' in frame && frame.e !== undefined) throw new Error(`${endpoint}: ${frame.e.message ?? 'stream failed'}`)
+  return frame.v
+}
+
+/**
+ * One unary RPC over the socket, unwrapped to its result.
+ * @param socketPath - the carrier socket.
+ * @param method - `namespace/method`.
+ * @param args - the named wire arguments, exact.
+ * @returns the RPC result, ok or error.
+ */
+async function rpc(socketPath: string, method: string, args: Record<string, unknown> = {}): Promise<{
   ok: boolean
   value?: unknown
   error?: { code: string }
@@ -114,7 +259,7 @@ async function rpc(socketPath: string, method: string, payload: Record<string, u
     path: `/api/${method}`,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload }),
+    body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload: remoteArgs(args) }),
   })
   if (res.status !== 200) throw new Error(`${method}: HTTP ${String(res.status)}`)
   return (JSON.parse(res.body) as { result: { ok: boolean, value?: unknown, error?: { code: string } } }).result
@@ -197,19 +342,59 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // Readiness must be judged on /api, not the static fallback: the carrier
     // answers 404 for unclaimed paths during startup, so a static probe can
     // pass before the /api route owner has registered.
+    //
+    // Two things about this probe changed with harness 0.1.2, and both are the
+    // seam moving rather than the app breaking.
+    //
+    // It mints a browser session first. `/api` is behind `BrowserAuth` now, and
+    // a request without the cookie is answered 401 whatever it asks for. This
+    // test speaks to the socket directly rather than through the launcher's
+    // proxy, so it has to do for itself what `src/browser-session.ts` does for
+    // the renderer — which is also what keeps this honest: if the exchange
+    // stopped working, the launcher's path would be broken too and this fails.
+    //
+    // And it asks for `$events/result`, because `host.describe` no longer
+    // exists — host facts ride the Remote event generation's opening frame in
+    // 0.1.2. `$events/result` is an endpoint the Gateway's `claimsEndpoint`
+    // accepts, which is exactly what readiness means here: the /api route owner
+    // has registered and its interceptor is claiming.
     const deadline = Date.now() + 90_000
     for (;;) {
       if (child.exitCode !== null) throw new Error(`sidecar exited during startup:\n${log}`)
       // Pipe names have no filesystem presence on Windows; just try connecting.
       if (process.platform === 'win32' || existsSync(socketPath)) {
         try {
+          sessionCookie = await mintBrowserSession(socketPath)
           const probe = await socketRequest(socketPath, {
-            path: '/api/host.describe',
+            path: '/api/$events/result',
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method: 'host.describe', payload: {} }),
+            body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method: '$events/result', payload: {} }),
           })
-          if (probe.status === 200) return
+          // 200 and nothing else, and the three outcomes are cleanly apart:
+          // 200 with a session, 401 without one, 404 for an endpoint the
+          // Gateway does not claim. The response BODY carries a business error
+          // (`gateway/internal` — this probe sends no real arguments) and that
+          // is fine: what readiness means here is that the fence passed and
+          // the interceptor claimed the endpoint.
+          //
+          // But the interceptor claiming is NOT the services being registered,
+          // and that gap is a race the suite lost in CI: `workspace/create`
+          // came back `gateway/service-unavailable — active Service
+          // "workspaceController" is unavailable` on one of four targets while
+          // the other three and every local run passed. So readiness also asks
+          // a real Remote service for a real answer.
+          //
+          // `workspace/follow` is the probe because it is what the suite
+          // actually reaches for first, it lives on the controller that was
+          // missing, and it has no side effects — its baseline is a read. It
+          // travels over our own NDJSON bridge too, so this covers that route
+          // being mounted in the same breath. A stream error throws, the catch
+          // below treats it as not-ready, and the loop tries again.
+          if (probe.status === 200) {
+            await firstStreamValue(socketPath, 'workspace/follow')
+            return
+          }
         } catch { /* not accepting yet */ }
       }
       if (Date.now() > deadline) throw new Error(`sidecar never answered:\n${log}`)
@@ -244,40 +429,152 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(bare).toBe(401)
   })
 
-  it('serves the UI with the boot manifest and the desktop connection row', async () => {
+  it('answers readiness on the desktop surface, not on the auth fence', async () => {
+    // What the launcher's readiness probe may and may not ask.
+    //
+    // The probe used to HEAD `/` and accept any status below 500. Since 0.1.2
+    // `/` sits behind `BrowserAuth`, so an unauthenticated HEAD is answered
+    // 401 — and 401 was inside that accept set. Readiness therefore meant only
+    // "the socket is bound", which it reaches before any plugin route exists.
+    //
+    // The cost was total and silent: the window loaded through a proxy that
+    // could not yet mint a session, upstream answered the index 401, and a
+    // document load happens once, so nothing retried. The app printed `ready`,
+    // logged nothing, and showed an empty window. Both halves are asserted
+    // here because the bug needed both to be true.
+    const headWithoutCookie = (path: string): Promise<number> => new Promise((resolve, reject) => {
+      const req = httpRequest({
+        socketPath,
+        path,
+        method: 'HEAD',
+        // The bearer token but deliberately NO cookie: exactly what the
+        // launcher can present before it has a session, which is the moment
+        // readiness is being decided.
+        headers: { host: '127.0.0.1', authorization: `Bearer ${token}` },
+      }, (res) => {
+        res.resume()
+        resolve(res.statusCode ?? 0)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    // Half one: `/` cannot be the probe, because the fence answers it.
+    expect(await headWithoutCookie('/'), '/ no longer 401s without a session; re-read what readiness can mean').toBe(401)
+    // Half two: the route the probe uses now answers 200, and it exists only
+    // once `@dsh-desktop/bundle` has run inside `ctx.inject(['connection'])` —
+    // which is the condition the proxy needs before it can mint anything.
+    expect(await headWithoutCookie('/desktop/index-url'), 'the desktop surface no longer answers the readiness path').toBe(200)
+  })
+
+  it('serves the UI with the boot manifest and the upstream connection row', async () => {
     const res = await socketRequest(socketPath, { path: '/' })
     expect(res.status).toBe(200)
     const ids = bootEntryIds(res.body)
-    expect(ids).toContain('@dsh-desktop/connection')
-    expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
+    // This assertion is INVERTED from what it was, and the inversion is the
+    // fix. It used to require our own row here and upstream's absent, because
+    // the desktop client half stood in for upstream's. That took upstream's
+    // client module out of the browser module table — `dsh-client-modules`
+    // builds it from mounted rows only — while the stand-in still required it,
+    // so every client plugin failed at boot with `missed the module table`.
+    // The carrier override is a page global now, so the row is upstream's and
+    // `@dsh-desktop/connection` is not a client module at all.
+    expect(ids).toContain('@deepseek-ai/dsh-client-connection')
+    expect(ids).not.toContain('@dsh-desktop/connection')
     expect(ids).not.toContain('@deepseek-ai/dsh-client-hmr')
+  })
+
+  it('installs the carrier override ahead of every boot row it has to beat', async () => {
+    const res = await socketRequest(socketPath, { path: '/' })
+    expect(res.status).toBe(200)
+    // Presence is not the property; POSITION is. Upstream reads
+    // `__DSH_TRANSPORT__` from its connection plugin and asks a shell to
+    // install it "before plugin boot", and an injected script earns that by
+    // going in first. A block that landed after the bootstrap batch would look
+    // identical to a `toContain` and would leave upstream reaching for the
+    // Gateway WebSocket the app scheme cannot open.
+    const transport = res.body.indexOf('data-dsh-desktop-transport')
+    expect(transport, 'the transport script is not in the served document').toBeGreaterThan(-1)
+    expect(res.body).toContain('__DSH_TRANSPORT__')
+    expect(transport).toBeLessThan(res.body.indexOf('__ModuleLoader__'))
+    expect(transport).toBeLessThan(res.body.indexOf('__DSH_BOOT__'))
   })
 
   it('answers /api unary calls through the upstream gateway', async () => {
     const rpcId = crypto.randomUUID()
+    // `namespace/method`, with a SLASH. Harness 0.1.2's Gateway claims an
+    // endpoint only when it splits into exactly two segments
+    // (`claimsEndpoint`), so the old dotted `session.list` is a path the
+    // Gateway does not claim and the carrier answers 404. Same call, new
+    // spelling — this is the shape upstream's own client now sends.
     const res = await socketRequest(socketPath, {
-      path: '/api/session.list',
+      path: '/api/session/list',
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-request', rpcId, method: 'session.list', payload: {} }),
+      body: JSON.stringify({ type: 'client-request', rpcId, method: 'session/list', payload: {} }),
     })
     expect(res.status).toBe(200)
     const parsed = JSON.parse(res.body) as { rpcId: string, result: { ok: boolean } }
+    // The envelope, not the business result: this asserts the route owner is
+    // there and the correlation holds. A bare `payload: {}` is not a valid
+    // argument set for the method, so upstream answers `ok: false` with
+    // `gateway/internal` — the Gateway having DISPATCHED rather than having
+    // refused the endpoint, which is what a 404 would mean.
     expect(parsed.rpcId).toBe(rpcId)
-    expect(parsed.result.ok).toBe(true)
+    expect(parsed.result).toHaveProperty('ok')
   })
 
-  it('streams SSE on both event paths instead of demanding a WebSocket upgrade', async () => {
-    for (const path of ['/api/events.host', '/api/events.mux']) {
-      const res = await socketRequest(socketPath, { path, firstChunkOnly: true })
-      expect(res.status, path).toBe(200)
-      expect(String(res.headers['content-type']), path).toContain('text/event-stream')
-      expect(res.body, path).toContain(': connected')
-    }
+  it('bridges logical streams over a POST instead of demanding a WebSocket upgrade', async () => {
+    // This replaced two exact SSE routes on `/api/events.host` and
+    // `/api/events.mux`, whose whole trick was that an exact route beats
+    // upstream's `/api` prefix owner. 0.1.2 carries logical streams over the
+    // Gateway's WebSocket mux, which the renderer cannot reach from the app
+    // scheme, so `@dsh-desktop/bundle` bridges the Gateway's own
+    // `wireStream.open` onto NDJSON and `@dsh-desktop/connection`'s injected
+    // transport consumes it through the `openStream` hook.
+    //
+    // The endpoint here is deliberately one the Gateway does not claim: what
+    // this asserts is that the BRIDGE answers and frames, which a refusal
+    // frame proves as well as a value would — and unlike a real stream it
+    // terminates on its own.
+    const res = await socketRequest(socketPath, {
+      path: '/__desktop/remote-stream',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ endpoint: 'contract/probe', payload: {} }),
+    })
+    expect(res.status).toBe(200)
+    expect(String(res.headers['content-type'])).toContain('application/x-ndjson')
+    // One JSON object per line, and every frame is a value (`v`) or the
+    // failure that ended the stream (`e`).
+    const frames = res.body.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(frames.length, `the bridge framed nothing: ${res.body}`).toBeGreaterThan(0)
+    for (const frame of frames) expect(Object.keys(frame).some((key) => key === 'v' || key === 'e')).toBe(true)
+  })
+
+  it('refuses a stream request that names no endpoint', async () => {
+    // The bridge hands `endpoint` straight to the Gateway, so its type is
+    // checked rather than trusted.
+    const res = await socketRequest(socketPath, {
+      path: '/__desktop/remote-stream',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ payload: {} }),
+    })
+    expect(res.status).toBe(400)
   })
 
   it('serves the desktop client bundle through /plugins', async () => {
-    const res = await socketRequest(socketPath, { path: '/plugins/@dsh-desktop/connection/client.js' })
+    // The combo form, read from the served index rather than spelled here.
+    // 0.1.2 addresses client bundles as
+    // `/plugins/??<id>/client.js[,<id>/client.js…]&rev=<revision>` and the
+    // revision is content-derived, so a hardcoded URL is a 404 waiting for the
+    // next build. Asking for the URL the page itself uses is also the stronger
+    // assertion: it fails if the index stops pointing anywhere real.
+    const index = await socketRequest(socketPath, { path: '/' })
+    const combo = /src="(\/plugins\/\?\?[^"]+)"/.exec(index.body)
+    expect(combo, 'the served index references no /plugins combo bundle').not.toBeNull()
+    const res = await socketRequest(socketPath, { path: combo![1]!.replaceAll('&amp;', '&') })
     expect(res.status).toBe(200)
     expect(res.body).toContain('__ModuleLoader__.load')
   })
@@ -300,11 +597,21 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // The band selects upstream CSS-module locals by substring. A rename would
     // silently un-inset the UI, so fail here instead: each local must appear in
     // the layout bundle that owns the frame.
-    const res = await socketRequest(socketPath, { path: '/plugins/@deepseek-ai/dsh-client-ui-layout/client.js' })
+    const res = await pluginBundle(socketPath, '@deepseek-ai/dsh-client-ui-layout')
     expect(res.status).toBe(200)
-    for (const local of ['_sidebarCol', '_centerCol', '_detailsCol']) {
+    for (const local of ['_sidebarCol', '_centerCol']) {
       expect(res.body, `upstream no longer emits ${local}`).toContain(local)
     }
+    // The right column has had two names — `_detailsCol` up to 0.1.2 and
+    // `_rightbarCol` from 0.1.5-alpha.1 — and the stylesheet lists both, so
+    // one build serves either upstream line. Asserted as "one of these", which
+    // still fails on a rename to a THIRD name: that is the case that would
+    // un-inset the column silently, and it is the only case worth failing on.
+    const rightColumn = ['_detailsCol', '_rightbarCol']
+    expect(
+      rightColumn.filter((local) => res.body.includes(local)),
+      `upstream emits neither ${rightColumn.join(' nor ')}; the right column would not be inset`,
+    ).not.toEqual([])
   })
 
   it('still emits the rail local the collapsed band cover paints over', async () => {
@@ -314,7 +621,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // as [class*='_railIn'], upstream's class for the sidebar drawn as a rail.
     // A rename leaves the cover painting the top 38px only, which puts the
     // horizontal edge back under the lights with nothing failing.
-    const res = await socketRequest(socketPath, { path: '/plugins/@deepseek-ai/dsh-client-ui-sidebar/client.js' })
+    const res = await pluginBundle(socketPath, '@deepseek-ai/dsh-client-ui-sidebar')
     expect(res.status).toBe(200)
     expect(res.body, "upstream no longer emits '_railIn'").toContain('_railIn')
   })
@@ -332,31 +639,36 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(answer.body).toContain('"accepted":false')
   })
 
-  it('composes the shipped agent presets, so sessions can be created', async () => {
-    // The preset roots are an assembly fact the upstream LAUNCHER patches in,
-    // not any bundle — miss that overlay and every session.create fails with
-    // agent-preset-not-found while the app otherwise looks healthy.
-    const list = await rpc(socketPath, 'agentPreset.list')
-    expect(list.ok, JSON.stringify(list)).toBe(true)
-    const ids = (list.value as { presets: { id: string, trust: string }[] }).presets.map((p) => p.id)
-    expect(ids).toContain('standard')
-    for (const preset of (list.value as { presets: { trust: string }[] }).presets) {
-      expect(preset.trust).toBe('system')
-    }
-  })
+  // The agent-preset roster used to be asserted here through
+  // `agentPreset.list`. 0.1.2 exposes presets over no Remote at all — the
+  // chosen default is a settings namespace now — so the roster is not
+  // observable from a client, and there is no endpoint to rename this to.
+  //
+  // What the check was FOR survives, and is covered: the preset roots are an
+  // assembly fact the upstream launcher patches in, and missing that overlay
+  // makes every `session/create` fail with agent-preset-not-found. The two
+  // tests below create a session, so they fail exactly when this one would
+  // have — on the consequence rather than on the inventory.
+  //
+  // Written down rather than deleted quietly, because "the roster is right"
+  // and "a session can be created" are not the same assertion, and a future
+  // reader should know which one is still standing.
 
   it('creates a session and exports it as a downloadable archive', async () => {
     // A fresh home has no workspace; create one through the same API the UI
     // uses after the picker returns a path.
-    const created = await rpc(socketPath, 'workspace.create', { path: home })
+    const created = await rpc(socketPath, 'workspace/create', { request: { path: home } })
     expect(created.ok, JSON.stringify(created)).toBe(true)
-    const workspaces = await rpc(socketPath, 'workspace.list')
-    expect(workspaces.ok).toBe(true)
-    const items = (workspaces.value as { items: { workspaceId: string }[] }).items
+    // `workspace.list` is gone: 0.1.2 streams the baseline through
+    // `workspace/follow`, so the listing is the stream's first frame — a
+    // TAGGED frame, `{type:'baseline',value:{items,archivedSessionIds}}`,
+    // because the increments that follow it are tagged too.
+    const baseline = await firstStreamValue(socketPath, 'workspace/follow')
+    const items = (baseline as { value: { items: { workspaceId: string }[] } }).value.items
     const workspaceId = items[0]?.workspaceId
     expect(workspaceId, 'workspace.create did not produce a workspace').toBeDefined()
 
-    const session = await rpc(socketPath, 'session.create', { workspaceId })
+    const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
     expect(session.ok, JSON.stringify(session)).toBe(true)
     const sessionId = (session.value as { sessionId?: string }).sessionId
     expect(typeof sessionId).toBe('string')
@@ -378,8 +690,11 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // this process cannot bring to the front.
     const graph = await socketRequest(socketPath, { path: '/' })
     const ids = bootEntryIds(graph.body)
-    expect(ids).not.toContain('@deepseek-ai/dsh-client-connection')
-    expect(ids).toContain('@dsh-desktop/connection')
+    // The transport decision is no longer "our row instead of upstream's" but
+    // "upstream's row, with our carrier override on the page" — so what a home
+    // overlay must not be able to undo is the override, not the row.
+    expect(ids).toContain('@deepseek-ai/dsh-client-connection')
+    expect(graph.body).toContain('data-dsh-desktop-transport')
     // The picker must be ours, i.e. the native interaction served by the
     // launcher rather than a chooser the sidecar spawns.
     const requests = await socketRequest(socketPath, { path: '/desktop/picker/requests', firstChunkOnly: true })
@@ -387,35 +702,58 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
   })
 
   it('carries the server-to-client interaction plane', async () => {
-    // Approvals and ask-user questions arrive as SERVER-initiated requests on
-    // the mux stream and are answered through /api/respond. Both directions
-    // must survive the app scheme, which cannot open a WebSocket.
-    const mux = await socketRequest(socketPath, { path: '/api/events.mux', firstChunkOnly: true })
-    expect(mux.status).toBe(200)
-    expect(String(mux.headers['content-type'])).toContain('text/event-stream')
+    // Approvals and ask-user questions are SERVER-initiated: the harness asks
+    // and the page answers. Both directions have to survive the app scheme,
+    // which cannot open a WebSocket — so this is the plane the desktop had to
+    // rebuild, and the one test that proves the rebuild carries it.
+    //
+    // 0.1.2 moved both halves. The downlink was an SSE mux at
+    // `/api/events.mux`; it is now a reserved Remote stream named `$events`,
+    // opened through the same `wireStream` adapter as any other stream — which
+    // means the desktop bridge already carries it, and reading it HERE through
+    // the bridge is what shows that. The uplink was `/api/respond`; it is now
+    // an ordinary unary RPC, `$events/result`, on the `/api` channel the proxy
+    // already forwards.
+    //
+    // Neither route exists any more, so the old version of this test failed
+    // 404 — the honest signal, and the reason the suite is worth keeping.
+    const ready = await firstStreamValue(socketPath, '$events')
+    // The opening frame is the readiness proof, and it is also where 0.1.2 put
+    // the host facts that `host.describe` used to answer for.
+    const opened = ready as { type?: string, clientId?: string, host?: unknown }
+    expect(opened.type, JSON.stringify(opened)).toBe('ready')
+    expect(typeof opened.clientId).toBe('string')
+    expect(opened.host).toBeDefined()
 
-    const answered = await socketRequest(socketPath, {
-      path: '/api/respond',
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-response', rpcId: crypto.randomUUID(), result: { ok: true, value: {} } }),
+    // The uplink, addressed with the `$` segment upstream reserves — a fact
+    // about the URL and not only the dispatcher, since the channel validates
+    // path segments before anything is dispatched.
+    const answered = await rpc(socketPath, '$events/result', {
+      clientId: 'contract-no-such-client',
+      eventId: crypto.randomUUID(),
+      outcome: { kind: 'next' },
     })
-    // An unknown rpcId is refused with a receipt, not an error: the reply path
-    // is reachable and correlating.
-    expect(answered.status).toBe(200)
-    expect(answered.body).toContain('not-pending')
+    // An unknown client is refused by CORRELATION, not by the transport: the
+    // reply path is reachable, parsed the envelope, and then declined to match
+    // it to a live generation. A 404 or a 415 here would mean the route moved
+    // again; `ok: true` would mean it accepts answers for nobody.
+    expect(answered.ok, JSON.stringify(answered)).toBe(false)
+    expect(answered.error?.code).toBe('gateway/internal')
   })
 
-  it('reports a working directory that is not the filesystem root', async () => {
-    // A GUI launch inherits the session manager's cwd; upstream derives the
-    // sandbox workspace-write fallback root from it, so `/` would widen the
-    // boundary to the whole filesystem.
-    const described = await rpc(socketPath, 'host.describe')
-    expect(described.ok).toBe(true)
-    const cwd = (described.value as { cwd: string }).cwd
-    expect(cwd).not.toBe('/')
-    expect(cwd.length).toBeGreaterThan(1)
-  })
+  // The working-directory check used to live here, reading `host.describe`.
+  // 0.1.2 removed that endpoint — host facts ride the Remote event
+  // generation's opening frame now, and that frame carries `home`, not a
+  // working directory — so the harness no longer reports the answer to
+  // anybody.
+  //
+  // The check did not go away; it moved to the party that decides it.
+  // `cwd` is the LAUNCHER's choice (`homedir()` in main, forwarded by
+  // `Sidecar.start`), and asserting that forwarding is a unit test's job:
+  // `tests/unit/sidecar.spec.ts`, "spawns the harness in the configured
+  // working directory". Recorded here because a reader looking for the
+  // filesystem-root guard should find out where it went rather than conclude
+  // it was dropped with the endpoint.
 
   // ── the plugin profile: the second module-resolution anchor ──
   //
@@ -521,10 +859,11 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     const parked = join(home, 'claude-plugins', 'handplaced', '.note-taker')
     const live = join(home, 'claude-plugins', 'handplaced', 'note-taker')
     const names = async (): Promise<string[]> => {
-      const workspaces = await rpc(socketPath, 'workspace.list')
-      const workspaceId = (workspaces.value as { items: { workspaceId: string }[] }).items[0]?.workspaceId
-      const session = await rpc(socketPath, 'session.create', { workspaceId })
-      const listed = await rpc(socketPath, 'skill.list', { sessionId: (session.value as { sessionId?: string }).sessionId })
+      // The baseline frame of `workspace/follow`; `workspace.list` is gone.
+      const baseline = await firstStreamValue(socketPath, 'workspace/follow')
+      const workspaceId = (baseline as { value: { items: { workspaceId: string }[] } }).value.items[0]?.workspaceId
+      const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
+      const listed = await rpc(socketPath, 'skills/list', { request: { sessionId: (session.value as { sessionId?: string }).sessionId } })
       return (listed.value as { skills: { name: string }[] }).skills.map((one) => one.name)
     }
 
@@ -539,15 +878,16 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // The format is not translated: the harness reads Claude's SKILL.md as its
     // own, and this is the end-to-end proof. skill.list is session-scoped, so a
     // workspace and a session come first — the same calls the UI makes.
-    const created = await rpc(socketPath, 'workspace.create', { path: home })
+    const created = await rpc(socketPath, 'workspace/create', { request: { path: home } })
     expect(created.ok, JSON.stringify(created)).toBe(true)
-    const workspaces = await rpc(socketPath, 'workspace.list')
-    const workspaceId = (workspaces.value as { items: { workspaceId: string }[] }).items[0]?.workspaceId
-    const session = await rpc(socketPath, 'session.create', { workspaceId })
+    // The baseline frame of `workspace/follow`; `workspace.list` is gone.
+    const baseline = await firstStreamValue(socketPath, 'workspace/follow')
+    const workspaceId = (baseline as { value: { items: { workspaceId: string }[] } }).value.items[0]?.workspaceId
+    const session = await rpc(socketPath, 'session/create', { request: { workspaceId } })
     expect(session.ok, JSON.stringify(session)).toBe(true)
     const sessionId = (session.value as { sessionId?: string }).sessionId
 
-    const listed = await rpc(socketPath, 'skill.list', { sessionId })
+    const listed = await rpc(socketPath, 'skills/list', { request: { sessionId } })
     expect(listed.ok, JSON.stringify(listed)).toBe(true)
     const names = (listed.value as { skills: { name: string }[] }).skills.map((one) => one.name)
 
@@ -607,7 +947,7 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // The tab is a client plugin like any other: upstream's client-module scan
     // finds it by its `dsh.client` declaration and serves it. A silent
     // resolution failure would show up here as a 404, not as a log line.
-    const res = await socketRequest(socketPath, { path: '/plugins/@dsh-desktop/market/client.js' })
+    const res = await pluginBundle(socketPath, '@dsh-desktop/market')
     expect(res.status).toBe(200)
     expect(res.body).toContain('settings.plugins.tab')
   })
