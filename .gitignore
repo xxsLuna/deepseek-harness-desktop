@@ -3,10 +3,13 @@ dist/
 build/
 out/
 spike/
-# Every client bundle build-client.mjs generates. A glob, not a line per
+# Every browser bundle build-client.mjs generates. Globs, not a line per
 # package: the per-package list did not cover a new one, and the artifact
-# landed in a commit before anyone noticed.
+# landed in a commit before anyone noticed. Two names because there are two
+# output forms — a client module (`client.js`) and a page script the node half
+# injects (`transport.js`).
 packages/*/lib/client.js
+packages/*/lib/transport.js
 *.log
 .DS_Store
 dev-overrides.css

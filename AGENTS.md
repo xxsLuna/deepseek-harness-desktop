@@ -227,6 +227,207 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### A removed throw is a silent break, and existence tests do not see it
+
+The sidebar stopped remembering its collapsed state in `0.1.5`. Nothing failed:
+the preference was still written (`dsh-desktop.sidebar-collapsed` = `true`, in
+`localStorage` on `dsh://app`), the plugin still loaded, and
+`tests/contract/layout-surface.spec.ts` was green throughout.
+
+`@dsh-desktop/layout-memory` restored by calling `ctx.layout.toggleSidebar()`
+once and treating a throw as "not ready yet" — upstream's own
+`panel actions not wired (root entry not mounted)`. **0.1.5 deleted that guard**
+(`attachPanels` is gone; the controller now takes the store's actions in its
+constructor), so the call always succeeds and the retry loop never runs.
+
+That alone would be harmless if the toggle were unconditional. It is not:
+
+```
+toggleSidebar: (d) => {
+  if (d.layoutInfo.viewportWidth < 1024) d.layoutInfo.narrowExpanded = !d.layoutInfo.narrowExpanded
+  else d.layoutInfo.sidebar = d.layoutInfo.sidebar === 0 ? 280 : 0
+},
+setViewportWidth: (d, width) => {
+  if (d.layoutInfo.viewportWidth < 1024 !== width < 1024) d.layoutInfo.narrowExpanded = false
+},
+```
+
+The axis depends on a width that is not settled when a plugin first runs, so an
+early toggle flips `narrowExpanded` — and the first real resize across 1024
+**clears it**. The restore succeeded, the preference was read, and the window
+still opened expanded.
+
+**Why the contract suite missed it, which is the part worth keeping.** That file
+asserted the attribute exists, is rendered `|| void 0`, and that `toggleSidebar`
+is on the face. All three were still true. What changed was WHEN the lever
+becomes effective and WHICH field it moves — behaviour, not surface — and an
+existence test cannot see behaviour. It now also pins the width-dependent axis,
+the reset, and the ABSENCE of the readiness throw, so bringing the guard back
+is visible too.
+
+The restore is a bounded reconcile loop now: toggle while the DOM disagrees,
+stop once agreement has held long enough that the reset cannot still be coming,
+and give up rather than flap. It asks upstream for no promise about timing.
+`tests/unit/layout-reconcile.spec.ts` drives that rule against those two actions
+transcribed verbatim — the simulation fails on the old one-toggle logic with the
+sidebar expanded, which is how it was checked.
+
+### Attaching to the PARENT console is a claim about the process tree
+
+The console flash came back in `0.1.5`: a window per command again. The fix
+that closed it the first time gives every process a console without showing
+one — attach to the parent's, allocate-and-hide only as a fallback — and
+`AllocConsole` is the visible path, so whoever takes it flashes. The ACL runner
+is a fresh process per command, so the runner taking it is a flash per command.
+
+`HARNESS_DESKTOP_SPAWN_TRACE` said which, once the app was launched the way a
+user launches it. **Launch method is part of the measurement here:** started
+from a shell the launcher inherits that console and nothing reproduces. Start
+it from `wscript` (a GUI host, no console) and the real behaviour appears.
+
+Adding `ppid` to every trace line is what actually solved it:
+
+```
+pid 31400 ppid 46196 | attached to the parent console   (the sidecar)
+pid 28972 ppid 46696 | AttachConsole(parent) failed     (the ACL runner)
+```
+
+**46696 is neither the sidecar nor anything that loads the helper.** Upstream
+puts a short-lived process between the sidecar and the runner; it owns no
+console, so the runner's parent attach fails and it allocates. The old fix was
+never wrong about mechanism — it was wrong about the tree, and the tree is
+upstream's to change.
+
+`AttachConsole` takes an arbitrary pid, so the fix is to stop asking about the
+parent: the process that owns the console publishes its pid in
+`HARNESS_DESKTOP_CONSOLE_PID`, and anything below attaches to it directly. An
+intermediate that never loads the helper still passes the variable down. **Not
+`DSH_`-prefixed** — `scrubbedParentEnv` drops that whole prefix, which is the
+same trap the trace switch fell into.
+
+The launcher now takes the console before it spawns anything
+(`src/hidden-console.ts`), so the one allocation is at app startup where a
+single flash is indistinguishable from the app opening. `windowsHide` on the
+sidecar spawn is dropped only when the launcher actually owns a hidden console
+— `present` is a terminal launch and handing that one down would put every
+harness subprocess in the user's terminal.
+
+Two instrument failures cost a round each, both worth remembering:
+
+- **`GetLastError` through koffi is not readable.** koffi makes its own calls
+  between bindings and clobbers the thread's last error. It reported
+  `ERROR_ACCESS_DENIED` ("this process already has a console") for a process
+  whose `AllocConsole` then SUCCEEDED — a contradiction that reads as a result.
+  `process.ppid`, read from Node, answered it instead.
+- **Verifying by hand cannot produce the shape on demand.** This was checked
+  manually twice and both fixes were wrong, because the failing shape needs an
+  intermediate process that only appears when the harness runs a real command.
+  `tests/contract/hidden-console.spec.ts` builds the shape itself — owner,
+  intermediate that never loads the helper, grandchild that does — and asserts
+  the grandchild joins rather than allocates. It was checked against the broken
+  build first; it fails there with the production line.
+
+### A slot must be declared before anything registers into it
+
+`0.1.5-desktop-alpha0.1.1` fixed the module-table break and landed on the next
+one, in the same dialog:
+
+```
+failed to apply loader entry ... (@dsh-desktop/settings):
+slot "settings.section" is not declared (a parent entry's children table must
+declare it)
+```
+
+`0.1.5` made the slot registry declarative. A slot exists only once a parent
+entry's `children` table declares it, and `slots.register` on an undeclared name
+**throws** — out of `apply`, so the whole plugin dies with it.
+`slots.inject(name, mount)` is the wait: it runs the mount when the declaration
+arrives. Every upstream settings section is written that way.
+
+`@dsh-desktop/market` had already been refitted to `slots.inject`.
+`@dsh-desktop/settings` had not, and that is the whole bug.
+
+**Why no suite could see it, which is the part worth keeping.** A client plugin's
+`apply` runs in the RENDERER. `tests/contract/sidecar.spec.ts` boots the real
+tree and proves what the sidecar serves — it never applies a client plugin, so
+this class of failure is structurally invisible to it, and the served bundle
+still contains every string a grep would look for. The only thing that can catch
+it is executing the bundle against a stub host, and the stub that existed
+(`market-client-bundle.spec.ts`) had a `register` that accepted anything. **A
+stub more permissive than the real host certifies the pattern that is about to
+break.**
+
+`tests/unit/client-slot-registration.spec.ts` closes it: the stub's `register`
+throws on an undeclared name exactly as the registry does, and it runs over
+every built bundle whose module asks for the `slots` service rather than over a
+named package — so the next client plugin is covered by existing. It was checked
+against the broken build before the fix went back in; it fails there with the
+production message.
+
+### A disabled row has no client module, and nothing says so
+
+`0.1.5-desktop-alpha0.1.0` opened to **"Failed to load plugins"** with
+`failed to import loader entry … (@dsh-desktop/connection): client-modules:
+require("@deepseek-ai/dsh-client-connection/client") missed the module table`.
+Every client plugin failed behind that one. Written down because three separate
+gates were green while it was true, and because the fix inverts an assertion
+that had looked obviously right for the life of the project.
+
+The refit onto `__DSH_TRANSPORT__` kept the shape the old design had: disable
+upstream's `connection` row, insert `desktop-connection` in its place, and have
+our client half `export { inject, apply }` from upstream's `/client`. Upstream's
+client bundles are **module-host factories**, not ESM, so that re-export could
+not be bundled and was correctly left external — which compiles it to a runtime
+`require` answered by the browser module table. And `dsh-client-modules` builds
+that table from `ctx.loader.entries()` with `entry.disabled` as a `continue`.
+**The row we disabled to make room was the only thing that would have put that
+module in the table.** `arriveGraphRow` skips a missing row in silence, so the
+failure surfaced only when the factory ran, in the renderer, on a user's machine.
+
+What made it invisible, in order:
+
+- `npm run build` is clean — esbuild's job ends at "left it external".
+- `npm test` was clean — nothing read what a bundle requires.
+- `npm run test:contract` was clean, and worse than clean: `sidecar.spec.ts`
+  **asserted the broken state**, requiring `@dsh-desktop/connection` in the boot
+  graph and upstream's client-connection absent. That assertion described the
+  old design faithfully and outlived it.
+- The sidecar log shows nothing. The failure is in the renderer.
+
+The fix is to stop standing in for the row. Upstream's `connection` is composed
+again (`inject: []` and a literal `trustedHosts`, because its own row reads both
+off `webRuntime` — a row this app disables), and `@dsh-desktop/connection` is
+node-only: it injects the transport at the top of the served `<head>`, which is
+what upstream's "before plugin boot" asks for and settles the ordering by
+position rather than by argument. `boot.js` re-asserts the row ON, where it used
+to re-assert it off.
+
+Three guards now hold it, and the split is deliberate:
+
+- `tests/unit/client-externals.spec.ts` — every specifier a built bundle
+  requires is a seed word or is declared in that package's `dsh.client`. Catches
+  the drift without a staged tree.
+- `tests/contract/sidecar.spec.ts` — the served boot graph carries upstream's
+  row, ours is not a client module, and the transport script precedes
+  `__ModuleLoader__` and `__DSH_BOOT__` in the document. Position, not presence.
+- `tests/contract/upstream-rows.spec.ts` — `connection` moved from the disabled
+  list to the reconfigured one, so a rename still fails by name.
+
+A fourth place had to move, and it is worth knowing it exists: **`scripts/
+verify-payload.mjs` runs only after `electron-builder`**, so neither local suite
+reaches it. It carried the literal list `['connection', 'settings', 'market'] +
+lib/client.js` and failed all five targets on a file no longer built — after
+unit and contract had gone green on every one of them. It now derives the check
+from each staged manifest's `exports` map, which cannot go stale and picked up
+`layout-memory/client` and the `claude-plugins` subpaths that the list had never
+covered.
+
+The general lesson, which is not about connection: **externalising a specifier
+is a claim that some MOUNTED row answers it.** Disabling a row and requiring its
+module are the same decision made twice, in two files, in opposite directions.
+And a hardcoded roster of this repo's own packages is a second place to
+remember — every one of them that could be derived from a manifest now is.
+
 ### What 0.1.2 broke, and where each seam went
 
 Six seams, measured on 2026-09-04 against staged `0.1.2-alpha.5` and confirmed
@@ -241,9 +442,11 @@ had moved, not a feature that had gone.
   its `/client` and imported `RpcId`/`serverResponseSchema` from its `/api`, so
   the build died in esbuild before anything booted. Replaced by
   `globalThis.__DSH_TRANSPORT__`, upstream's own carrier-override seam: the
-  package now installs `fetch`/`openStream` hooks and re-exports upstream's
-  client half instead of reimplementing it. 291 lines became 164. This is the
-  break worth studying — a declared export was never the seam.
+  package now installs `fetch`/`openStream` hooks instead of reimplementing the
+  client half. 291 lines became 164, and then 129. This is the break worth
+  studying — a declared export was never the seam.
+
+  **The first fix for it was wrong, and it shipped.** See below.
 - **The renderer's downlink had no carrier.** The Gateway's WebSocket mux is
   unreachable from the app scheme, and the two exact `/api/events.*` routes that
   used to shadow it were shadowing, not composing. Bridged at
@@ -455,8 +658,23 @@ channel's version in `package.json` and its own entry in the matching
 The realignment problem itself has not gone away — GitHub replays commits onto
 `main` with new SHAs and leaves `dev` pointing at the originals, so `dev` ends up
 with commits that are not ancestors of `main` while the trees are otherwise
-identical, and the next `dev -> main` PR re-applies the same changes. Rebase
-`dev` onto `main` and keep its own version cut on top, rather than resetting.
+identical, and the next `dev -> main` PR re-applies the same changes.
+
+**Do not rebase `dev` to fix that.** This paragraph said to, one release ago,
+and it was wrong the moment the develop channel had a release: a tag points into
+`dev`'s history, and rebasing gives that commit a new SHA and orphans the one
+`v0.1.1-desktop-dev0.2.0` names. The released tag must stay an ancestor of the
+branch it was cut from — that is the invariant `verify-tag-on-channel-branch`
+checks at push time, and the only thing tying a published release to a branch
+afterwards.
+
+Cherry-pick onto the channel branch instead, or merge, keeping its own version
+cut. Both preserve the tag's ancestry; a rebase cannot. Check it afterwards
+rather than assuming:
+
+```sh
+git merge-base --is-ancestor v<version> origin/<branch>
+```
 
 **A fix on one branch does not reach the others.** Nothing enforces
 forward-merging, and this bit on day one: the first develop cut found a real
@@ -464,6 +682,37 @@ bug in `appendPublished` (an empty list produced `[, 'x']`, an elision) that
 `main` still carried. Cherry-pick such a fix to every branch, or the channel
 whose users most need it ships without it. This is the open question the channel
 design names and does not answer.
+
+### Check a channel branch's fix parity BEFORE you tag it
+
+The paragraph above says to cherry-pick. It did not say to verify, and the
+alpha channel's first release was tagged carrying **three** shipped fixes it had
+never received — the junction delete that empties the app's own `node_modules`,
+the artifact-name fix without which every update download 404s, and the EPIPE
+guard that stops a log line about an update from crashing the app. The branch
+had been seeded from a commit predating all three.
+
+Nothing caught it. Each channel branch runs its own CI over its own tree, so a
+missing fix is a test that is simply not present — a green build on that branch
+says the code on it works, never that the code on it is complete. The alpha
+branch had no `verify-feed` step at all, so the gate for one of the three was
+absent along with the fix it guards.
+
+Compare the trees instead of trusting the history, because a cherry-pick that
+replays under a new SHA makes ancestry useless here:
+
+```sh
+# From the channel branch, against the branch that has the fixes.
+git diff --stat <other-branch> HEAD -- . \r
+  ':!package.json' ':!package-lock.json' ':!harness.json' \r
+  ':!tests/unit/version-scheme.spec.ts'
+```
+
+Every path it lists is either a deliberate divergence or a gap. There should be
+none left but the version records; anything else needs a reason you can say out
+loud. `git merge-base --is-ancestor <sha> <branch>` answers a different and
+less useful question — it said all three were "missing" from `dev` too, which
+was false: they were there under replayed SHAs.
 
 **Publish the draft promptly — do not sit on it.** The tag appears in
 `releases.atom` the moment it is pushed, while the assets stay draft-private.

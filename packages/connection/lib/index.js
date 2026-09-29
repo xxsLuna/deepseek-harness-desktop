@@ -1,36 +1,48 @@
 // @ts-check
 /**
- * @dsh-desktop/connection node half — delegates to the upstream
- * `@deepseek-ai/dsh-client-connection` apply: the /api route on the carrier,
- * the browser-trust fence, the privileged-method pin, and host-side
- * `ctx.connection` (required by the API gateway) all stay upstream code.
- * Only the browser half differs: this package's `./client` bundle provides
- * the SSE carrier, replacing the upstream WebSocket one that cannot connect
- * from the app scheme.
+ * @dsh-desktop/connection — installs the desktop carrier override on the
+ * served page, and nothing else.
+ *
+ * This row used to stand in for upstream's `connection` row: the node half
+ * delegated to upstream's `apply` and the browser half re-exported upstream's,
+ * with the upstream row disabled in `cordis.patch.yml` to make room. That is
+ * gone, and the reason is written where it can be acted on —
+ * `src/transport.ts` — because it is the kind of break that reads as a build
+ * problem and is not one: upstream's client bundles are in module-host factory
+ * form, so re-exporting one compiles to a runtime require against the browser
+ * module table, and `dsh-client-modules` builds that table only from MOUNTED
+ * loader rows. Disabling the row removed the module we were requiring.
+ *
+ * So upstream's `connection` row is composed again, with its own config, and
+ * this row does the one thing upstream leaves to a shell: put
+ * `globalThis.__DSH_TRANSPORT__` on the page before plugin boot. Node-only —
+ * there is no `dsh.client` here any more and no `./client` export, so this
+ * package is not in the browser module table at all.
+ *
+ * The other half of the transport is `@dsh-desktop/bundle`, which answers the
+ * `/__desktop/remote-stream` bridge the injected `openStream` posts to. The
+ * two are one contract; `tests/contract/sidecar.spec.ts` is what holds them
+ * together.
  */
-export { Config, inject } from '@deepseek-ai/dsh-client-connection'
-import { apply as upstreamApply } from '@deepseek-ai/dsh-client-connection'
+import { injectTransport, transportBlock } from './inject.js'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-connection'
 
+export const inject = ['webServer']
+
 /**
- * Mount the upstream node half unchanged.
+ * Tap the served index with the transport install.
  *
- * `async`, and the promise is awaited rather than dropped — since 0.1.2
- * upstream's apply is itself async and builds `HostConnectionService` AFTER an
- * `await BrowserAuth.create(...)`. A wrapper that returns synchronously lets
- * cordis close the fiber's active window first, so the Service constructor
- * reaches `ctx.provide` on a dead context and the sidecar dies at boot with
- * `cannot create effect on inactive context` — a cordis error naming neither
- * upstream's apply nor this delegation.
- *
- * The general rule this is an instance of: a delegation wrapper has to forward
- * whatever the callee returns, because that value is how the framework learns
- * the plugin is still initialising.
+ * The block is built once — it is the same bytes on every response — while the
+ * tap itself re-runs per index response, which is what makes the install
+ * survive a reload.
  * @param {import('@deepseek-ai/cordis').Context} ctx - plugin context.
- * @param {Parameters<typeof upstreamApply>[1]} config - upstream connection config.
  */
-export async function apply(ctx, config) {
-  await upstreamApply(ctx, config)
+export function apply(ctx) {
+  const block = transportBlock()
+  ctx.effect(
+    () => ctx.webServer.tapIndex((html) => injectTransport(html, block)),
+    'desktop-connection: transport index tap',
+  )
 }

@@ -117,8 +117,8 @@ describe.skipIf(!existsSync(harnessRoot))('pruned payload', () => {
     // Two legitimate states, an order of magnitude apart: a full stage matches
     // ~20,000 files, and an already-pruned one matches a handful. Not zero,
     // because `npm run build` re-runs `stage-harness --local-only` and copies
-    // this repo's own packages back in — `@dsh-desktop/connection/src/client.ts`
-    // is the build input for its `lib/client.js` bundle and reappears with it.
+    // this repo's own packages back in — `@dsh-desktop/connection/src/transport.ts`
+    // is the build input for its injected `lib/transport.js` and reappears with it.
     // CI prunes after building, so the shipped tree never carries them.
     // The pruned state is covered by the sourcemap/declaration assertion above;
     // this one gates the full state, so the two together cover both orders.
@@ -153,7 +153,7 @@ describe.skipIf(!existsSync(harnessRoot))('pruned payload', () => {
     for (const entry of [
       'node_modules/@deepseek-ai/dsh/lib/bin.js',
       'node_modules/@dsh-desktop/bundle/lib/boot.js',
-      'node_modules/@dsh-desktop/connection/lib/client.js',
+      'node_modules/@dsh-desktop/connection/lib/transport.js',
       'node_modules/@dsh-desktop/chrome/lib/desktop-chrome.css',
       'node_modules/@deepseek-ai/dsh-base/cordis.patch.yml',
     ]) {
