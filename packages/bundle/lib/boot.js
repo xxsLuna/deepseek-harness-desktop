@@ -16,14 +16,16 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  PluginPackages,
   boot,
-  healProfilesModuleFallback,
+  createRuntimeResolution,
   initProfile,
   installFailLoud,
   loadLayeredEnv,
   loadOptionalPatches,
   loadOverlayPatches,
   loadProfile,
+  removeLinkProjections,
   resolveProfileDir,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
@@ -116,30 +118,9 @@ function isEmptyEntryList(text) {
  *
  * This is upstream's own mechanism rather than an invention — `dsh --profile`
  * boots exactly this way, and every primitive used here is exported for it.
- * @returns the root config to boot, and the loaded profile.
+ * @returns the root config, the loaded profile, and the resolution to install.
  */
 async function prepareProfile() {
-  // Two heals into the same flat fallback directory. The BFS walks
-  // `dependencies` AND `peerDependencies` from the anchor's manifest, and our
-  // packages are copied in BESIDE the dsh tree rather than depended on by it —
-  // so the dsh closure alone links the upstream roster and none of ours, and
-  // every `@dsh-desktop/*` row would then fail to resolve from the profile.
-  //
-  // COUPLING, and a silent one: the sibling `@dsh-desktop/*` entries in this
-  // package's `peerDependencies` are what the second heal walks. They look like
-  // dead weight — nothing installs this package — but removing one stops its row
-  // resolving once the root config lives in the profile, and the client-module
-  // scan caches an unresolvable name as "not a client package" with no log line.
-  // A row named in `cordis.patch.yml` must be named there too.
-  //
-  // One options object and a promise, both since 0.1.2: this used to be
-  // `(anchor, home)` positionally and synchronous. Passing the old shape put
-  // the anchor where the options go, so `readModuleFallbackManifest` was
-  // handed an undefined path and the sidecar died before any row loaded —
-  // which looked like a broken profile rather than a moved signature.
-  await healProfilesModuleFallback({ installAnchor, home })
-  await healProfilesModuleFallback({ installAnchor: desktopAnchor, home })
-
   const dir = resolveProfileDir(PROFILE, home)
   // Seeded EMPTY, and left that way. The three app-owned layers (dsh-base,
   // dsh-web-app, this bundle) stay app-owned and are loaded below; the profile's
@@ -161,13 +142,67 @@ async function prepareProfile() {
     throw new Error(`${NAME}: ${rootConfig} is not an empty entry list after being rewritten`)
   }
 
-  return { rootConfig, profile: loadProfile(NAME, PROFILE, installAnchor, home) }
+  // Every profile this app has ever written carries the link farm the 0.1.5
+  // backend built — `<profile>/.dsh-module-fallback/node_modules` plus a
+  // symlink per package into it — and 0.1.7 neither writes nor reads it. Left
+  // behind it is hundreds of junctions pointing into an app tree that an
+  // update replaces, which is the exact shape that once emptied 271 packages
+  // when a plugin removal walked through one. Upstream named the cleanup after
+  // the release that made the mess ("the link backend of the dsh 0.1.5
+  // releases"), so this is its migration and not our invention. It only
+  // unlinks symlinks whose target is inside that directory, and a profile
+  // without it is untouched — so it is a no-op from the second boot onwards.
+  removeLinkProjections(dir)
+
+  const profile = loadProfile(NAME, PROFILE, installAnchor, home)
+
+  // TWO anchors, and the reason is unchanged from the link-farm era: the walk
+  // follows `dependencies` and `peerDependencies` from ONE manifest, and our
+  // packages are copied in BESIDE the dsh tree rather than depended on by it.
+  // The dsh closure alone carries the upstream roster and none of ours, so
+  // every `@dsh-desktop/*` row would fail to resolve once the root config
+  // lives in the profile.
+  //
+  // COUPLING, and a silent one: the sibling `@dsh-desktop/*` entries in this
+  // package's `peerDependencies` are what the second walk follows. They look
+  // like dead weight — nothing installs this package — but removing one stops
+  // its row resolving, and the client-module scan caches an unresolvable name
+  // as "not a client package" with no log line. A row named in
+  // `cordis.patch.yml` must be named there too.
+  //
+  // The union is taken over `entries` alone, and the dsh-anchored resolution
+  // supplies every other field: `profilesDir`, `profileDir`, `linkedRoots` and
+  // `localPackageNames` describe the PROFILE, which both calls see identically,
+  // so a second copy of them would be the same answer twice. `entries` is the
+  // only part that differs per anchor. Ours are installation scope because they
+  // ship inside the app payload, which is what the second call already labels
+  // them; the spread keeps whatever upstream adds to the shape next.
+  const [upstreamResolution, desktopResolution] = await Promise.all([
+    createRuntimeResolution({ installAnchor, profile, home }),
+    createRuntimeResolution({ installAnchor: desktopAnchor, profile, home }),
+  ])
+  const named = new Set(upstreamResolution.entries.map((entry) => entry.name))
+  const resolution = Object.freeze({
+    ...upstreamResolution,
+    entries: Object.freeze([
+      ...upstreamResolution.entries,
+      ...desktopResolution.entries.filter((entry) => !named.has(entry.name)),
+    ]),
+  })
+
+  return { rootConfig, profile, resolution }
 }
 
 // A profile that cannot be prepared costs the plugin marketplace, not the app.
 // Falling back to the app-owned root config is exactly what shipped before any
 // of this existed, and booting with no installed plugins beats not booting.
-/** @type {{ rootConfig: string, profile: import('@deepseek-ai/dsh-app-boot').Profile } | undefined} */
+/**
+ * @type {{
+ *   rootConfig: string,
+ *   profile: import('@deepseek-ai/dsh-app-boot').Profile,
+ *   resolution: Awaited<ReturnType<typeof createRuntimeResolution>>,
+ * } | undefined}
+ */
 let anchored
 try {
   anchored = await prepareProfile()
@@ -198,11 +233,10 @@ const layers = [
   ...(loadOptionalPatches(NAME, join(home, 'cordis.patch.yml')) ?? []),
 ]
 
-// Resolve the composed rows the way the upstream launcher does, so the two
-// overlays it appends can be applied on the same terms. A patch layer carries
-// both top-level rows and `- insert:` groups, and the rows we need to patch
-// (agent-presets, the telemetry row) are inserted ones — scanning only the top
-// level silently finds nothing.
+// A patch layer carries both top-level rows and `- insert:` groups, and every
+// row this composition asks about is an inserted one — scanning only the top
+// level silently finds nothing, which is a guard that passes by looking in the
+// wrong place.
 /**
  * Index patch rows by id, following `- insert:` groups as well as top-level rows.
  * @param entries - patch layer entries.
@@ -218,7 +252,11 @@ function indexRows(entries) {
   return map
 }
 
-const rows = indexRows(layers)
+// Only the UPSTREAM index survives. There used to be one over the composed
+// layers too, read by the `agent-presets` overlay to carry the row's own config
+// across; that overlay is gone (see above) and nothing else needs the composed
+// view. The distinction the comment below draws still matters: "does upstream
+// still have a row called X" cannot be answered by a layer we write.
 const upstreamRows = indexRows(upstreamLayers)
 
 /**
@@ -302,22 +340,28 @@ overlays.push({
   config: { trustedHosts: [] },
 })
 
-// Agent presets ship inside the dsh package and are pointed at by the
-// launcher, not by any bundle — without this overlay no preset exists and
-// every session.create fails with `agent-preset-not-found`.
-requireUpstreamRows(
-  ['agent-presets'],
-  'Without this overlay no preset exists and every session.create fails with agent-preset-not-found, '
-  + 'which is an app that opens and can do nothing.',
-)
-const presetRoot = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
-overlays.push({
-  id: 'agent-presets',
-  config: {
-    ...rows.get('agent-presets')?.config ?? {},
-    roots: [{ path: `${presetRoot}/`, trust: 'system' }],
-  },
-})
+// There was an `agent-presets` overlay here, pointing the row's `roots` at
+// `<dsh>/config/agent-presets`, and a guard saying that without it no preset
+// exists and every session.create fails. 0.1.7 renamed the row to
+// `agent-preset-registry`, and neither half of that was portable:
+//
+// - The row no longer takes `roots`. Presets are declared rows now, not
+//   directories a registry scans; its whole Config is `default`,
+//   `selectedDefault` and `modeSelectionEnabled`.
+// - The overlay had ALREADY been dead for some time. `<dsh>/config/
+//   agent-presets` is absent from the staged tree on 0.1.5 and 0.1.7 alike,
+//   and a missing root was skipped with an ENOENT that produced an empty list
+//   — so the configured root contributed nothing, while `includeShippedRoot`
+//   (default true) supplied the presets the app actually used. The guard's
+//   claim was true when it was written and stopped being true without anything
+//   failing, which is the failure mode this repo keeps pinning in tests.
+//
+// So it is deleted rather than renamed. `tests/contract/upstream-rows.spec.ts`
+// requires `agent-preset-registry` to exist — a dependency, not a patch — and
+// refuses the old id coming back; `tests/contract/sidecar.spec.ts` creates a
+// session against the real sidecar, which is what fails with
+// `agent-preset-not-found` when no preset exists. That is the assertion the old
+// comment asserted in prose and nothing ever checked.
 
 // Same opt-out the CLI honours: any non-empty value disables the row.
 if ((process.env.DSH_TELEMETRY_DISABLED ?? '') !== '') {
@@ -386,9 +430,20 @@ if (Number.isInteger(parentPid) && parentPid > 0) {
  * The host setup every boot attempt performs.
  * @param hostCtx - the context being prepared.
  */
-const prepare = (hostCtx) => {
+const prepare = async (hostCtx) => {
   current = hostCtx
   hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
+  // Here rather than anywhere else, because `prepare` is the one point upstream
+  // documents as after the Loader is installed and before any config-tree entry
+  // mounts — and the interception has to be in place before the first row is
+  // imported by name. `dsh --profile` installs it from its own prepare for the
+  // same reason.
+  //
+  // Guarded because the profile is optional: when `prepareProfile` threw we boot
+  // the app-owned root config with no installed plugins, every row resolves from
+  // the payload as it always did, and mounting the service with no resolution
+  // would install an interception that routes nothing.
+  if (anchored !== undefined) await hostCtx.plugin(PluginPackages, { resolution: anchored.resolution })
   provideCmdline(hostCtx, { args: [], exit: (code) => void shutdown(code) })
 }
 
