@@ -75,7 +75,7 @@ async function macFeedForChannel(channel: string): Promise<string | undefined> {
 type AutoUpdater = (typeof import('electron-updater'))['autoUpdater']
 
 /** What a manual check learned, from whichever event answered first. */
-type ManualOutcome = 'available' | 'up-to-date' | { failed: string }
+type ManualOutcome = { available: string } | 'up-to-date' | { failed: string }
 
 /**
  * What a manual check reports back to whoever asked for it.
@@ -87,11 +87,34 @@ type ManualOutcome = 'available' | 'up-to-date' | { failed: string }
  * than a slow one.
  */
 export interface UpdateCheckResult {
-  state: 'up-to-date' | 'downloading' | 'available' | 'unsupported' | 'failed'
+  state: 'up-to-date' | 'available' | 'unsupported' | 'failed'
   /** One line for the page; the dialog says the same thing at more length. */
   message: string
   /** The version found, when the check found one. */
   version?: string
+}
+
+/** What the launcher supplies that the updater cannot decide for itself. */
+export interface UpdaterOptions {
+  /**
+   * How the app comes down before the installer takes over.
+   *
+   * The sidecar's stop, not `app.quit()`: `quitAndInstall` spawns the installer
+   * and only then quits, so the harness has to be out of the install directory
+   * already. See the ordering note in `applyUpdate`.
+   */
+  readonly shutdown?: () => Promise<void>
+  /**
+   * Whether an available update may put a dialog on screen.
+   *
+   * False for the packaged smoke. That gate runs the real updater against the
+   * real feed on a CI runner, and assigning a channel sets `allowDowngrade`, so
+   * a build newer than its channel's newest release is offered that release and
+   * `update-available` fires. A modal with nobody to answer it hangs the gate
+   * until its timeout and reports `exit null` — while the check itself is worth
+   * keeping, because it is what surfaced an EPIPE crash on an updater log line.
+   */
+  readonly offerInteractively?: boolean
 }
 
 /**
@@ -110,6 +133,19 @@ let wiring: Promise<AutoUpdater> | undefined
  * which is what the Desktop Settings copy promises.
  */
 let reportManual: ((outcome: ManualOutcome) => void) | undefined
+
+/**
+ * How an available update is offered, and how a downloaded one is applied.
+ * Both injected by {@link startUpdater}.
+ *
+ * Module-level for the same reason as `readChannel` below: the listeners are
+ * attached to a memoised process singleton, while these two close over the
+ * window (to parent a dialog) and over the sidecar (to shut it down). Left
+ * undefined, an update is simply never offered — which is what a launcher that
+ * never calls `startUpdater` should do.
+ */
+let offerUpdate: ((version: string) => void) | undefined
+let applyUpdate: (() => void) | undefined
 
 /**
  * How the channel preference is read, injected by {@link startUpdater}.
@@ -143,14 +179,36 @@ let readChannel: () => UpdateChannel = () => 'auto'
 async function autoUpdaterOnce(): Promise<AutoUpdater> {
   wiring ??= (async () => {
     const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
-    autoUpdater.autoDownload = true
+    // OFF, and this is the whole shape of the update flow.
+    //
+    // With it on, a check downloaded ~100MB unasked and the only thing the app
+    // could then say was "it installs when you quit" — because the install
+    // rode `autoInstallOnAppQuit`, whose handler calls `install(true, false)`.
+    // That second argument is `isForceRunAfter`, so the app installed and did
+    // NOT come back: the user quit, waited, and had to launch it again by hand.
+    //
+    // Off, the sequence is the one a desktop app is expected to have: ask,
+    // download on consent, then install and relaunch. `quitAndInstall(true,
+    // true)` is what passes `isForceRunAfter` through (BaseUpdater.js:13-16).
+    autoUpdater.autoDownload = false
+    // Still on, as the fallback for the gap between a consented download
+    // finishing and the relaunch: if the user quits inside it, the update is
+    // already on disk and this installs it rather than discarding the work.
+    // Harmless once `quitAndInstall` has run — its handler sees
+    // `quitAndInstallCalled` and stands down instead of installing twice.
     autoUpdater.autoInstallOnAppQuit = true
     autoUpdater.on('error', (error) => {
       console.warn('[updater]', error.message)
       reportManual?.({ failed: error.message })
     })
-    autoUpdater.on('update-available', () => reportManual?.('available'))
+    autoUpdater.on('update-available', (info) => {
+      reportManual?.({ available: info.version })
+      offerUpdate?.(info.version)
+    })
     autoUpdater.on('update-not-available', () => reportManual?.('up-to-date'))
+    // Only reachable after a consented `downloadUpdate()`, since autoDownload
+    // is off above.
+    autoUpdater.on('update-downloaded', () => { applyUpdate?.() })
     return autoUpdater
   })()
   let updater: AutoUpdater
@@ -188,7 +246,10 @@ export function startUpdater(
   enabled: () => boolean = () => true,
   win?: BrowserWindow,
   channel: () => UpdateChannel = () => 'auto',
+  options: UpdaterOptions = {},
 ): { stop: () => void, checkNow: () => Promise<UpdateCheckResult> } {
+  const shutdown = options.shutdown ?? (async () => {})
+  const offerInteractively = options.offerInteractively ?? true
   // Read per check, like `enabled`: both are preferences the user changes while
   // the app is running, and neither may be captured.
   readChannel = channel
@@ -198,6 +259,74 @@ export function startUpdater(
   // on a headless runner, and how this was found).
   const ask = async (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
     (win === undefined || win.isDestroyed() ? dialog.showMessageBox(options) : dialog.showMessageBox(win, options))
+  /**
+   * Offered once per run, so a four-hourly check cannot nag. A manual check
+   * clears it, because asking again is exactly what the user just requested.
+   */
+  let offered = false
+
+  offerUpdate = (version) => {
+    if (!offerInteractively || offered) return
+    offered = true
+    void (async () => {
+      const { response } = await ask({
+        type: 'info',
+        message: `DeepSeek Harness ${version} is available`,
+        // The restart is stated before the download starts, not after. It is
+        // the part that costs the user something: the harness sidecar goes
+        // down with the app, so anything running in it ends.
+        detail: 'It downloads in the background, then the app restarts to finish installing. Any running session ends, so finish what you are doing first.',
+        buttons: ['Download and restart', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      if (response !== 0) {
+        // Declined, so let a later check offer it again rather than going
+        // quiet until the next launch.
+        offered = false
+        return
+      }
+      try {
+        await (await autoUpdaterOnce()).downloadUpdate()
+      } catch (error) {
+        offered = false
+        console.warn('[updater]', error)
+        void ask({
+          type: 'warning',
+          message: 'Could not download the update',
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
+  }
+
+  applyUpdate = () => {
+    void (async () => {
+      const updater = await autoUpdaterOnce()
+      // The sidecar goes down FIRST, and the order is load-bearing.
+      // `quitAndInstall` spawns the installer and only then quits the app
+      // (BaseUpdater.js:13-23), so without this the NSIS installer would be
+      // rewriting the install directory while the harness is still running out
+      // of it — holding open the very files being replaced.
+      //
+      // The old path got this for free and by accident: the install rode the
+      // quit handler, and main's `before-quit` already tears the sidecar down
+      // before it exits. Taking the install off that handler means taking the
+      // ordering on deliberately.
+      try {
+        await shutdown()
+      } catch (error) {
+        // A sidecar that will not stop is not a reason to abandon an update
+        // that is already downloaded; the installer waits for the app anyway.
+        console.warn('[updater]', error)
+      }
+      // `true, true` — silent, and run afterwards. The second argument is the
+      // one the quit handler hardcodes to false, and the only reason the app
+      // used to stay closed.
+      updater.quitAndInstall(true, true)
+    })()
+  }
+
   const mode = updateMode({
     platform: process.platform,
     packaged: app.isPackaged,
@@ -260,7 +389,10 @@ export function startUpdater(
 
   const checkAuto = async (): Promise<void> => {
     try {
-      await (await autoUpdaterOnce()).checkForUpdatesAndNotify()
+      // `checkForUpdates`, not `…AndNotify`: that variant only notifies when
+      // autoDownload produced a download promise, which is now never. It
+      // would degrade to this call silently and leave the name lying.
+      await (await autoUpdaterOnce()).checkForUpdates()
     } catch (error) {
       console.warn('[updater]', error)
       reportManual?.({ failed: error instanceof Error ? error.message : String(error) })
@@ -279,6 +411,10 @@ export function startUpdater(
    * @returns nothing; it reports through a dialog.
    */
   const checkAutoManual = async (): Promise<UpdateCheckResult> => {
+    // The user asked, so they get the offer even if this run already declined
+    // one. Without this, "Check now" after a Later would report the version
+    // and never put the button back.
+    offered = false
     const outcome = await new Promise<ManualOutcome>((resolve) => {
       const expiry = setTimeout(() => { resolve({ failed: 'The update check did not answer.' }) }, MANUAL_CHECK_TIMEOUT_MS)
       reportManual = (answer) => {
@@ -292,15 +428,16 @@ export function startUpdater(
       void ask({ type: 'info', message: 'DeepSeek Harness is up to date', detail: `Version ${app.getVersion()}.` })
       return { state: 'up-to-date', message: `Up to date — version ${app.getVersion()}.` }
     }
-    if (outcome === 'available') {
-      // autoDownload is on and autoInstallOnAppQuit applies it, so the work is
-      // already under way. Say that rather than implying a click is needed.
-      void ask({
-        type: 'info',
-        message: 'A new version is downloading',
-        detail: 'It installs when you quit DeepSeek Harness.',
-      })
-      return { state: 'downloading', message: 'A new version is downloading; it installs when you quit.' }
+    if (typeof outcome === 'object' && 'available' in outcome) {
+      // No dialog here. `offerUpdate` already put one on screen from the same
+      // event, and this used to add a second — it announced a download that
+      // autoDownload had started unasked. The consent dialog is now the whole
+      // conversation; this only answers the settings page's inline line.
+      return {
+        state: 'available',
+        message: `Version ${outcome.available} is available.`,
+        version: outcome.available,
+      }
     }
     void ask({ type: 'warning', message: 'Could not check for updates', detail: outcome.failed })
     return { state: 'failed', message: outcome.failed }

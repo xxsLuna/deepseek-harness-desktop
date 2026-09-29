@@ -29,6 +29,14 @@ class FakeChild extends EventEmitter implements SidecarProcess {
   }
 }
 
+/** A stand-in that ignores every signal, the way a wedged process does. */
+class DeafChild extends FakeChild {
+  /** Records the signal and does nothing else — no exit, ever. */
+  override kill(signal: NodeJS.Signals): void {
+    this.signals.push(signal)
+  }
+}
+
 interface HarnessOptions {
   /** Readiness answer; the default is an immediate yes. */
   readonly probe?: () => Promise<boolean>
@@ -36,18 +44,20 @@ interface HarnessOptions {
   readonly onSpawn?: (child: FakeChild) => void
   /** Payload probe; the default says the staged tree is intact. */
   readonly exists?: (path: string) => boolean
+  /** The stand-in to spawn; the default one dies on SIGTERM. */
+  readonly child?: () => FakeChild
 }
 
 /** A Sidecar wired to stub processes and a stub readiness probe. */
 function harness(options: HarnessOptions = {}) {
   const children: FakeChild[] = []
-  const launches: { command: string, args: string[], env: NodeJS.ProcessEnv }[] = []
+  const launches: { command: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string }[] = []
   const exits: (number | null)[] = []
   const logs: string[] = []
 
   const spawn: SidecarSpawn = (command, args, spawnOptions) => {
-    launches.push({ command, args, env: spawnOptions.env ?? {} })
-    const child = new FakeChild()
+    launches.push({ command, args, env: spawnOptions.env ?? {}, cwd: spawnOptions.cwd as string | undefined })
+    const child = options.child?.() ?? new FakeChild()
     children.push(child)
     options.onSpawn?.(child)
     return child
@@ -105,6 +115,21 @@ describe('Sidecar.start', () => {
     expect(h.launches[0]!.env.ELECTRON_RUN_AS_NODE).toBe('1')
   })
 
+  it('spawns the harness in the configured working directory', async () => {
+    // A GUI launch inherits the session manager's cwd, often `/`, and upstream
+    // derives the sandbox workspace-write fallback root from it — so `/` would
+    // widen that boundary to the whole filesystem. main passes `homedir()`.
+    //
+    // Asserted here because the harness stopped reporting it: the contract
+    // suite used to read `host.describe`, which 0.1.2 removed. The launcher is
+    // the only party that ever decided the answer, so this is where the guard
+    // belongs now.
+    const h = harness()
+    await h.sidecar.start()
+    expect(h.launches[0]?.cwd).toBe('/home/user')
+    expect(h.launches[0]?.cwd).not.toBe('/')
+  })
+
   it('reports a crash so main can bring the harness back', async () => {
     const h = harness()
     await h.sidecar.start()
@@ -138,6 +163,24 @@ describe('Sidecar.stop', () => {
     await h.sidecar.stop()
     expect(h.children[0]!.signals).toEqual(['SIGTERM'])
     expect(h.exits).toEqual([])
+  })
+
+  it('gives up on a process that outlives SIGKILL, instead of hanging', async () => {
+    // `stop()` used to await the child's exit with nothing behind it, so a
+    // process that ignored both signals hung the promise forever. Two callers
+    // make that fatal: main's before-quit is `stop().finally(() => app.exit(0))`
+    // so the app could not be quit at all, and the updater awaits this before
+    // `quitAndInstall`, so a downloaded update would never install.
+    //
+    // A short grace keeps the test quick; the point is that it resolves and
+    // that both signals were sent before it did.
+    const h = harness({ child: () => new DeafChild() })
+    await h.sidecar.start()
+    await h.sidecar.stop(20)
+    expect(h.children[0]!.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    // And the next start is not blocked by the one that would not die.
+    await h.sidecar.start()
+    expect(h.children).toHaveLength(2)
   })
 
   it('still reports a crash after one stop/start cycle', async () => {

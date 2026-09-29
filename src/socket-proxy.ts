@@ -14,6 +14,7 @@
 import { request as httpRequest } from 'node:http'
 import { Readable } from 'node:stream'
 import type { SidecarAddress } from './socket-path.js'
+import { BrowserSession } from './browser-session.js'
 
 /** The renderer's origin under the standard+secure dsh scheme. */
 export const APP_ORIGIN = 'dsh://app'
@@ -79,20 +80,42 @@ export function isTrustedRendererRequest(req: Request): boolean {
 }
 
 /**
+ * Whether a 401 is worth one retry with a freshly minted browser session.
+ *
+ * A 401 is not a failed load. Chromium reports `did-fail-load` for transport
+ * errors, so the launcher's bounded reload never sees an HTTP status — a 401
+ * document renders as a page and nothing retries it, which for the index is a
+ * blank window for the rest of the app's life. That is exactly what the
+ * readiness bug looked like (`src/sidecar.ts`). Readiness no longer produces
+ * one, and this covers what that analysis cannot: the cookie's own 30-day
+ * expiry, and a credentials record rotated under a running app.
+ *
+ * Only without a body. A request body is a stream already piped to the sidecar
+ * and cannot be replayed, so a retry would send an empty one — worse than the
+ * 401 it replaced. The fatal case is a document load, which carries no body, so
+ * the restriction costs nothing that matters.
+ *
+ * Retrying at most once is the CALLER's structure, not a flag here: one re-mint
+ * either fixes it or the session is not the problem, and a predicate that could
+ * say yes twice is a loop waiting to happen.
+ * @param status - the sidecar's response status.
+ * @param hasBody - whether the request carried a body.
+ * @returns true when the caller should re-mint and send the request again.
+ */
+export function shouldRetryUnauthorized(status: number, hasBody: boolean): boolean {
+  return status === 401 && !hasBody
+}
+
+/**
  * Build the protocol handler bound to one sidecar address.
  * @param address - socket path and bearer token.
  * @returns the handler for protocol.handle('dsh', ...).
  */
 export function createSocketProxy(address: SidecarAddress): (req: Request) => Promise<Response> {
-  return async (req) => {
-    if (!isTrustedRendererRequest(req)) {
-      return new Response('forbidden', { status: 403 })
-    }
-    const url = new URL(req.url)
-    if (isHostOnlyPath(decodeURIComponent(url.pathname))) {
-      return new Response('forbidden', { status: 403 })
-    }
+  const session = new BrowserSession(address)
 
+  /** One forward over the socket, with the session cookie of the moment. */
+  const forward = async (req: Request, url: URL): Promise<Response> => {
     const headers: Record<string, string> = {}
     req.headers.forEach((value, name) => {
       const lower = name.toLowerCase()
@@ -101,6 +124,15 @@ export function createSocketProxy(address: SidecarAddress): (req: Request) => Pr
     })
     headers.host = '127.0.0.1'
     headers.authorization = `Bearer ${address.token}`
+    // Upstream's `/api` fence wants a browser session on top of the carrier
+    // token (harness 0.1.2's BrowserAuth). The launcher holds the one session
+    // and replays it here, for the same reason it injects the token above: the
+    // renderer is a window, not a browser that followed a printed URL, and the
+    // cookie is a credential for the sidecar rather than page state. See
+    // browser-session.ts. Any cookie the page sent is replaced, never merged —
+    // this header is the launcher's to state.
+    const cookie = await session.cookieHeader()
+    if (cookie !== undefined) headers.cookie = cookie
 
     return await new Promise<Response>((resolve, reject) => {
       const upstream = httpRequest({
@@ -129,5 +161,24 @@ export function createSocketProxy(address: SidecarAddress): (req: Request) => Pr
           .on('error', reject)
       }
     })
+  }
+
+  return async (req) => {
+    if (!isTrustedRendererRequest(req)) {
+      return new Response('forbidden', { status: 403 })
+    }
+    const url = new URL(req.url)
+    if (isHostOnlyPath(decodeURIComponent(url.pathname))) {
+      return new Response('forbidden', { status: 403 })
+    }
+
+    const hasBody = req.body !== null
+    const answer = await forward(req, url)
+    if (!shouldRetryUnauthorized(answer.status, hasBody)) return answer
+    // Cancelled, not dropped: the body is a live socket stream, and abandoning
+    // it would hold the connection open for a response nobody will read.
+    await answer.body?.cancel()
+    session.reset()
+    return await forward(req, url)
   }
 }

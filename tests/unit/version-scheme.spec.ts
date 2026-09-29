@@ -44,7 +44,7 @@ const PRE_SCHEME = ['0.1.0-rc.6', '0.1.0-rc.6-2', '0.1.0-rc.6-3', '0.1.0-rc.7-1'
  * package.json and skip its own entry — adding the current version used to fail
  * the reachability check, since nothing is newer than itself.
  */
-const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0', '0.1.1-desktop-v0.2.1', '0.1.1-desktop-v0.2.2', '0.1.1-desktop-v0.2.3', '0.1.1-desktop-v0.2.4', '0.1.1-desktop-v0.2.5', '0.1.1-desktop-v0.2.6']
+const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.8.1', '0.1.1-desktop-v0.2.0', '0.1.1-desktop-v0.2.1', '0.1.1-desktop-v0.2.2', '0.1.1-desktop-v0.2.3', '0.1.1-desktop-v0.2.4', '0.1.1-desktop-v0.2.5', '0.1.1-desktop-v0.2.6', '0.1.5-desktop-v0.3.0']
 
 /**
  * The same, per channel, and separate on purpose.
@@ -59,8 +59,8 @@ const PUBLISHED: readonly string[] = ['0.1.0-desktop-v0.8.0', '0.1.0-desktop-v0.
  * `scripts/release-version.mjs` writes into whichever list matches the channel
  * it was given.
  */
-const PUBLISHED_DEV: readonly string[] = []
-const PUBLISHED_ALPHA: readonly string[] = []
+const PUBLISHED_DEV: readonly string[] = ['0.1.1-desktop-dev0.2.0', '0.1.1-desktop-dev0.2.1', '0.1.1-desktop-dev0.2.2']
+const PUBLISHED_ALPHA: readonly string[] = ['0.1.2-desktop-alpha0.5.0', '0.1.5-desktop-alpha0.1.0', '0.1.5-desktop-alpha0.1.1', '0.1.5-desktop-alpha0.1.2', '0.1.5-desktop-alpha0.1.3', '0.1.5-desktop-alpha0.1.4', '0.1.5-desktop-alpha0.2.0', '0.1.6-desktop-alpha0.2.0']
 
 /** Every channel's list, by the identifier its versions carry. */
 const PUBLISHED_BY_CHANNEL: Record<string, readonly string[]> = {

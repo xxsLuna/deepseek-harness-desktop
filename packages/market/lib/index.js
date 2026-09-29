@@ -32,7 +32,6 @@ import { dirname, join, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readProfileManifest, resolveProfileDir, writeProfileManifest } from '@deepseek-ai/dsh-app-boot'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { MARKETPLACE_FILE, parseCatalog } from './catalog.js'
 import { DEFAULT_CATALOG, fetchCatalogText, fetchTarball, isAllowedSource } from './fetch.js'
@@ -84,8 +83,16 @@ export const inject = ['webServer']
 /** The profile the desktop app boots; `@dsh-desktop/bundle` owns the name. */
 const PROFILE = 'desktop'
 
-/** Settings section holding the trusted-source list. */
-const NS = settingsNamespace('desktop-market')
+/**
+ * Settings section holding the trusted-source list.
+ *
+ * A plain string, not a call. `settingsNamespace()` used to brand this at
+ * runtime; upstream moved the validation into the type of `settings.register`,
+ * whose `ns` parameter is `Namespace & SettingsNamespaceInput<Namespace>` — so
+ * a literal that is not a lowercase hyphenated identifier now fails to compile
+ * instead of throwing on boot. Nothing to call, and one less import.
+ */
+const NS = 'desktop-market'
 
 /**
  * The trusted-source list.
