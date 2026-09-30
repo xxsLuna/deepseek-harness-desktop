@@ -614,6 +614,26 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     ).not.toEqual([])
   })
 
+  it('still anchors the right panel by the attribute the band inset corrects', async () => {
+    // The column inset is `padding-top`, which moves FLOW content. This panel is
+    // absolutely positioned against the column, so it ignores that padding and
+    // its collapse button lands under our title controls — the band has a rule
+    // keyed on `data-sidebar-right-panel` to put it back.
+    //
+    // Two things have to stay true for that rule to work, and each fails
+    // silently on its own: the attribute has to still be what the panel carries
+    // (a rename leaves the rule matching nothing), and the panel has to still be
+    // positioned (if upstream ever puts it in flow, `top` stops applying and the
+    // column's padding does the job instead — at which point the rule is dead
+    // weight that should go, rather than a fix that is quietly doing nothing).
+    const res = await pluginBundle(socketPath, '@deepseek-ai/dsh-client-ui-sidebar-right')
+    expect(res.status).toBe(200)
+    expect(res.body, "upstream no longer emits 'data-sidebar-right-panel'")
+      .toContain('data-sidebar-right-panel')
+    expect(res.body, 'the right panel is no longer positioned, so the band rule has nothing to correct')
+      .toMatch(/position:\s*(absolute|fixed)/)
+  })
+
   it('still emits the rail local the collapsed band cover paints over', async () => {
     // On macOS the traffic lights overhang a collapsed sidebar, so the band
     // cover has to reach the element that actually paints the rail's fill —
