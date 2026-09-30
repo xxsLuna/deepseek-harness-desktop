@@ -60,6 +60,45 @@
 }
 
 /*
+ * Inset the right sidebar's panel, which the rule above cannot reach.
+ *
+ * `padding-top` insets a column's FLOW content. The panel is not flow content:
+ * upstream anchors it with `position:absolute; top:0; bottom:0; right:0`
+ * against the rightbar column, deliberately — its own comment says the panel
+ * "is positioned against the column's right edge, which never moves, so it can
+ * hang over the centre when there is no track". An absolutely positioned child
+ * resolves `top` against its containing block's PADDING box, and a padding box
+ * starts where the padding does, at the window top. So the column moved and
+ * the panel did not, and the panel's first control — its collapse button, at
+ * y=8 — sat under our own title controls.
+ *
+ * Measured rather than reasoned about: a probe with the panel's exact
+ * geometry, placed in the real column in a running window, reported
+ * `top: 0` / button at `y: 8` against a 38px band, and `top: 38` / `y: 46`
+ * with this rule.
+ *
+ * Matched by upstream's own data attribute, not by the hashed local. The panel
+ * carries `data-sidebar-right-panel` in both of its states, and an attribute
+ * upstream names itself survives a CSS-module rehash; `[class*="_panel"]`
+ * would not, and would also catch any other module's panel. Both states need
+ * it — docked is `absolute; top:0`, fullscreen is `fixed; inset:0`, and `top`
+ * is the one declaration that corrects either.
+ *
+ * NOTE, and it is the better fix when someone has room for it: upstream ships
+ * a whole `[data-windows-titlebar]` mode that does this properly — the frame
+ * takes `padding-top: var(--dsh-windows-titlebar-height)`, draws its own drag
+ * strip, and repositions the sidebar toggle and the fullscreen panel. Nothing
+ * in the tree DEFINES that variable; it is read in six places and set nowhere,
+ * a hook left for a host that draws a Windows title bar, which is exactly this
+ * app. Adopting it would retire the column-padding approach and this rule with
+ * it. It is not a drop-in — the macOS band cover, the nav buttons and the rail
+ * fade are all built on the current mechanism — so it is its own change.
+ */
+[data-sidebar-right-panel] {
+  top: var(--dsh-title-band) !important;
+}
+
+/*
  * The strip has to BE the hit target: app-region is read from the hit-tested
  * element, so pointer-events:none hands the test to the column underneath —
  * which has no drag region — and window dragging stops working (measured, not
