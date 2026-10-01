@@ -139,12 +139,19 @@ export function createDesktopHost(deps: DesktopHostDeps) {
         popupAppMenu(win, at.x, at.y)
         return new Response(null, { status: 204 })
       }
+      // Both gated on the index rather than on `canGoBack`/`canGoForward`, for
+      // the reason `navigationWays` records: the back predicate answers false
+      // at every index here, so asking it meant this route accepted the click
+      // and then did nothing. `goToOffset` moves by position, which is the same
+      // thing the index test just checked.
       case 'chrome/back': {
-        if (win.webContents.navigationHistory.canGoBack()) win.webContents.navigationHistory.goBack()
+        const history = win.webContents.navigationHistory
+        if (history.getActiveIndex() > 0) history.goToOffset(-1)
         return new Response(null, { status: 204 })
       }
       case 'chrome/forward': {
-        if (win.webContents.navigationHistory.canGoForward()) win.webContents.navigationHistory.goForward()
+        const history = win.webContents.navigationHistory
+        if (history.getActiveIndex() < history.length() - 1) history.goToOffset(1)
         return new Response(null, { status: 204 })
       }
       case 'chrome/scheme': {
@@ -195,6 +202,35 @@ export function applyOverlayScheme(win: BrowserWindow, light: boolean): void {
 }
 
 /**
+ * Which ways a history of `length` entries, sitting at `index`, can move.
+ *
+ * Derived from the position rather than asked of Electron, and that is a fix
+ * rather than a preference. **`navigationHistory.canGoBack()` answers false at
+ * every index on Electron 44**, measured against the real binary with the rest
+ * of the same object correct beside it:
+ *
+ *     entries=3 index=2 back=false forward=false
+ *     entries=3 index=1 back=false forward=true
+ *     entries=3 index=0 back=false forward=true
+ *
+ * `length()`, `getActiveIndex()` and `canGoForward()` all track exactly; only
+ * `canGoBack()` does not see same-document entries. Since this app's history is
+ * ENTIRELY same-document — upstream's UI is one page and
+ * `@dsh-desktop/session-history` records session moves with `pushState` — that
+ * one wrong answer kept the back control dimmed and inert for every history
+ * this window will ever have.
+ *
+ * Pure so the rule can be tested without a window, which is the only way to
+ * hold it: the broken version produced no error, just a button that never lit.
+ * @param index - the active entry's index, from `getActiveIndex()`.
+ * @param length - the number of entries, from `length()`.
+ * @returns the space-separated ways, as the band's CSS reads them.
+ */
+export function navigationWays(index: number, length: number): string {
+  return [index > 0 ? 'back' : '', index < length - 1 ? 'forward' : ''].join(' ').trim()
+}
+
+/**
  * Publish which way the window can navigate, as a root attribute the band CSS
  * keys off. Written from main for the same reason the fullscreen state is:
  * only the launcher knows, and no preload ships.
@@ -202,7 +238,7 @@ export function applyOverlayScheme(win: BrowserWindow, light: boolean): void {
  */
 export function publishNavigation(win: BrowserWindow): void {
   const history = win.webContents.navigationHistory
-  const ways = [history.canGoBack() ? 'back' : '', history.canGoForward() ? 'forward' : ''].join(' ').trim()
+  const ways = navigationWays(history.getActiveIndex(), history.length())
   void win.webContents.executeJavaScript(
     `document.documentElement.dataset.dshNav = ${JSON.stringify(ways)}`,
   ).catch(() => { /* renderer not ready yet; did-finish-load republishes */ })

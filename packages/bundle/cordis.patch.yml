@@ -127,6 +127,16 @@
     - id: desktop-layout-memory
       name: '@dsh-desktop/layout-memory'
 
+    # Records each session the user lands on as a real history entry, so the
+    # band's back and forward controls have something to walk. Its own row for
+    # the same reason layout-memory is: chrome owns the band the LAUNCHER
+    # freed, and this owns a page behaviour upstream does not have. No client
+    # bundle in the roster touches the history API, so opening a session moved
+    # React state and nothing else — `history.length` stayed at 1 and the
+    # controls were dimmed because there was genuinely nowhere to go.
+    - id: desktop-session-history
+      name: '@dsh-desktop/session-history'
+
     # directoryPicker with the `native` interaction, delegated over the carrier
     # socket to the launcher's window-owned Electron dialog. Replaces the
     # disabled auto-chooser row above.

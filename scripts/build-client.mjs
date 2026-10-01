@@ -75,6 +75,15 @@ const BUNDLES = [
     entry: 'client.ts',
     external: [],
   },
+  {
+    // Same shape as layout-memory: no React and no upstream imports. It reads
+    // one binding source and calls one method, both off injected services, so
+    // there is nothing to keep external.
+    dir: 'session-history',
+    id: '@dsh-desktop/session-history',
+    entry: 'client.ts',
+    external: [],
+  },
 ]
 
 for (const bundle of BUNDLES) {
