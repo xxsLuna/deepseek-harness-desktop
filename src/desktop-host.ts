@@ -26,6 +26,7 @@
  */
 import type { BrowserWindow } from 'electron'
 import { popupAppMenu } from './menu.js'
+import { navigationWays } from './navigation-ways.js'
 import { desktopHostAction } from './socket-proxy.js'
 import { desktopSettingsView, type DesktopSettingsStore, type DesktopSettingsViewInput } from './settings-host.js'
 import type { UpdateCheckResult } from './updater.js'
@@ -199,35 +200,6 @@ export function createDesktopHost(deps: DesktopHostDeps) {
 export function applyOverlayScheme(win: BrowserWindow, light: boolean): void {
   if (process.platform !== 'win32') return
   win.setTitleBarOverlay({ color: '#00000000', symbolColor: light ? '#1f1f1f' : '#e6e6e6' })
-}
-
-/**
- * Which ways a history of `length` entries, sitting at `index`, can move.
- *
- * Derived from the position rather than asked of Electron, and that is a fix
- * rather than a preference. **`navigationHistory.canGoBack()` answers false at
- * every index on Electron 44**, measured against the real binary with the rest
- * of the same object correct beside it:
- *
- *     entries=3 index=2 back=false forward=false
- *     entries=3 index=1 back=false forward=true
- *     entries=3 index=0 back=false forward=true
- *
- * `length()`, `getActiveIndex()` and `canGoForward()` all track exactly; only
- * `canGoBack()` does not see same-document entries. Since this app's history is
- * ENTIRELY same-document — upstream's UI is one page and
- * `@dsh-desktop/session-history` records session moves with `pushState` — that
- * one wrong answer kept the back control dimmed and inert for every history
- * this window will ever have.
- *
- * Pure so the rule can be tested without a window, which is the only way to
- * hold it: the broken version produced no error, just a button that never lit.
- * @param index - the active entry's index, from `getActiveIndex()`.
- * @param length - the number of entries, from `length()`.
- * @returns the space-separated ways, as the band's CSS reads them.
- */
-export function navigationWays(index: number, length: number): string {
-  return [index > 0 ? 'back' : '', index < length - 1 ? 'forward' : ''].join(' ').trim()
 }
 
 /**
