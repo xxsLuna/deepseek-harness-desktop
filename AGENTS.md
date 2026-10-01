@@ -437,7 +437,8 @@ remember — every one of them that could be derived from a manifest now is.
 
 ### What 0.1.7 broke, and the Electron pin it cost
 
-Five things, measured against staged `0.1.7-alpha.2`. Four are seams that
+Five things, measured against staged `0.1.7-alpha.2` and confirmed unchanged on
+`0.2.0-rc.2`, which is what ships. Four are seams that
 moved; the fifth is a pin, and it is the one to read before bumping Electron
 again.
 
@@ -463,7 +464,8 @@ to the addon, while upstream's OWN `cordis-plugin-loader` tries
 (`requireInternal` in its `lib/index.js`). The launcher already passes that
 flag, and all five internals plus every interface `internalModules()` type-checks
 were verified present that way on this exact runtime. Until that lands, the pin
-is the only lever.
+is the only lever, and `package.json` holds `electron` at an EXACT `44.0.0`:
+a caret would resolve 44.5.1 and the app would refuse to boot.
 
 The four seams:
 
