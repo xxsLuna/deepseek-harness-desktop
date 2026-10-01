@@ -169,6 +169,13 @@ async function mintBrowserSession(socketPath: string): Promise<string | undefine
  *
  * The boot manifest carries each entry's `url` already, which is both the only
  * reliable source and the honest assertion: it is the URL the page will load.
+ *
+ * Those urls became RELATIVE in 0.1.7 — `plugins/??<id>/client.js&rev=…` with
+ * no leading slash. A browser resolves that against the document's base and
+ * reaches the same place; a raw request line does not, and every bundle came
+ * back 400. So the leading slash is restored here rather than assumed, and
+ * either shape works, because the channels carry different pins and this file
+ * has to run against both.
  * @param socketPath - the carrier socket.
  * @param id - the package id whose client bundle is wanted.
  * @returns the bundle response.
@@ -180,7 +187,8 @@ async function pluginBundle(socketPath: string, id: string): Promise<SocketRespo
   const entries = (JSON.parse(manifest![1]!) as { entries: { id: string, url: string }[] }).entries
   const entry = entries.find((candidate) => candidate.id === id)
   expect(entry, `the boot manifest lists no entry for ${id}`).toBeDefined()
-  return await socketRequest(socketPath, { path: entry!.url.replaceAll('&amp;', '&') })
+  const url = entry!.url.replaceAll('&amp;', '&')
+  return await socketRequest(socketPath, { path: url.startsWith('/') ? url : `/${url}` })
 }
 
 /**
@@ -571,10 +579,16 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     // revision is content-derived, so a hardcoded URL is a 404 waiting for the
     // next build. Asking for the URL the page itself uses is also the stronger
     // assertion: it fails if the index stops pointing anywhere real.
+    //
+    // The leading slash is optional in the pattern because 0.1.7 made these
+    // urls RELATIVE — `plugins/??…` — which a browser resolves against the
+    // document base and a raw request line does not. Matching both keeps this
+    // file running against either pin, which it has to: the channels carry
+    // different ones.
     const index = await socketRequest(socketPath, { path: '/' })
-    const combo = /src="(\/plugins\/\?\?[^"]+)"/.exec(index.body)
+    const combo = /src="\/?(plugins\/\?\?[^"]+)"/.exec(index.body)
     expect(combo, 'the served index references no /plugins combo bundle').not.toBeNull()
-    const res = await socketRequest(socketPath, { path: combo![1]!.replaceAll('&amp;', '&') })
+    const res = await socketRequest(socketPath, { path: `/${combo![1]!.replaceAll('&amp;', '&')}` })
     expect(res.status).toBe(200)
     expect(res.body).toContain('__ModuleLoader__.load')
   })
