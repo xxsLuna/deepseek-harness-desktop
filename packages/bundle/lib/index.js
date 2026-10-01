@@ -206,7 +206,23 @@ export function apply(ctx, config) {
         })
         const write = (frame) => new Promise((resolve) => { res.write(`${JSON.stringify(frame)}\n`, () => resolve()) })
         try {
-          const values = await gatewayCtx.typertGateway.wireStream.open(opened.endpoint, opened.payload, control.signal)
+          // Five parameters since 0.1.7, and the signal moved to the LAST one:
+          // `open(endpoint, payload, uplink, peer, signal)`. Called with the
+          // old three, the signal landed in `uplink` and `$events` — which is
+          // special-cased to `releaseUplink(uplink)` and then read the signal —
+          // refused with `signals[0] is not of type AbortSignal`. That names
+          // the slot rather than the call, which is why it reads like an
+          // upstream fault instead of a moved argument.
+          //
+          // `uplink` and `peer` are both undefined on purpose. `uplink` is the
+          // client-to-server half of a duplex stream and this bridge has none:
+          // one POST carries one logical downlink, which is the whole reason it
+          // needs no multiplexing. `peer` identifies a remote caller across the
+          // WebSocket mux; this is a local host transport, so there is no peer
+          // to name and upstream's own in-process path passes none either.
+          const values = await gatewayCtx.typertGateway.wireStream.open(
+            opened.endpoint, opened.payload, undefined, undefined, control.signal,
+          )
           for await (const value of values) {
             if (control.signal.aborted) break
             await write({ v: value })

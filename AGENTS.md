@@ -435,63 +435,70 @@ module are the same decision made twice, in two files, in opposite directions.
 And a hardcoded roster of this repo's own packages is a second place to
 remember — every one of them that could be derived from a manifest now is.
 
-### 0.1.7 is BLOCKED on Electron, and the blocker is one missing fallback
+### What 0.1.7 broke, and the Electron pin it cost
 
-Measured 2026-09-29 against staged `0.1.7-alpha.2`. Two seams broke and one of
-them cannot be closed here. **Do not take a 0.1.7 pin to any channel until the
-upstream half lands** — the refit itself is written and correct, on
-`refit/0.1.7-alpha`, and it is not merged because it cannot boot.
+Five things, measured against staged `0.1.7-alpha.2`. Four are seams that
+moved; the fifth is a pin, and it is the one to read before bumping Electron
+again.
 
-**The closable one: `agent-presets` → `agent-preset-registry`.** A rename, same
-`config: {default: standard}`. The overlay that pointed the row's `roots` at
-`<dsh>/config/agent-presets` is DELETED rather than renamed, for two reasons
-worth keeping: 0.1.7's registry has no `roots` option at all (presets are
-declared rows now), and the overlay had already been dead for releases — that
-path is absent from the staged tree on `0.1.5` too, a missing root is skipped
-with an ENOENT that yields an empty list, and `includeShippedRoot` (default
-true) was supplying the presets the whole time. Its comment claimed that without
-it "every session.create fails with agent-preset-not-found". That claim is now a
-test (`sidecar.spec.ts` creates a session) instead of a sentence.
+**The pin: Electron 43.4.0 → 44.0.0, and it is tied to an addon's table.**
+0.1.7 reaches Node's internals only through `node-addon-require-builtin`, which
+fingerprints the EXACT V8 build. The prebuilt binary knows three:
+`15.0.245.13-electron.0`, `15.2.124.13-electron.0` and `15.4.80-electron.0`.
+Against Electron's own release data those are 43.0.0/43.1.0, **44.0.0**, and
+45-alpha/46-nightly — nothing else. Our 43.4.0 reports `15.0.245.28` and was
+refused, so `PluginPackages` could not install its interception and the sidecar
+died before any row loaded.
 
-**The blocking one: the profile link farm became an in-process interception.**
-`healProfilesModuleFallback` is gone. 0.1.7 runs the same BFS in memory
-(`createRuntimeResolution`) and hands it to the `PluginPackages` service, which
-installs it over Node's ESM and CJS resolvers; `removeLinkProjections` is the
-migration upstream wrote for the directory the 0.1.5 backend left behind. All of
-that is a better design and the refit uses it.
+44.0.0 is the newest STABLE Electron the addon accepts, so the bump goes
+FORWARD rather than back. The cost is that it accepts exactly one release:
+44.1.0 moves V8 to `15.2.124.18`, and later patches to `.19` and `.28`. **Do not
+bump Electron past 44.0.0 without checking that table first** — the failure is
+a refusal at boot, not a compile error, and it reads like an upstream fault
+because the message names a V8 build and not the call.
 
-It cannot install on Electron. `installRuntimeInterception` calls
-`internalModules()`, which goes STRAIGHT to `node-addon-require-builtin`, and
-that addon fingerprints the **exact V8 build**:
+The proper fix is upstream's, and it is small: `internalModules()` goes straight
+to the addon, while upstream's OWN `cordis-plugin-loader` tries
+`--expose-internals` first and treats the addon as the fallback
+(`requireInternal` in its `lib/index.js`). The launcher already passes that
+flag, and all five internals plus every interface `internalModules()` type-checks
+were verified present that way on this exact runtime. Until that lands, the pin
+is the only lever.
 
-```
-unsupported Electron runtime fingerprint: Node 24.18.1, V8 15.0.245.28-electron.0
-  (supported Electron versions: 43.0.0, 44.0.0, 45.0.0-alpha.6)
-```
+The four seams:
 
-The three fingerprints in the prebuilt `.node` are `15.0.245.13-electron.0`,
-`15.2.124.13-electron.0` and `15.4.80-electron.0`. Per Electron's own release
-data, `15.0.245.13` is **43.0.0 and 43.1.0 only** — 43.1.1 is `.15`, 43.3.0 is
-`.23`, our 43.4.0 is `.28`, and 43.5.0 onwards is `.31`. So "supports Electron
-43" means two June patch releases. Pinning back to 43.1.0 would satisfy it and
-is the wrong trade: it forfeits every Electron security patch since, to an
-allowlist that will age out again on the next one.
+- **`healProfilesModuleFallback` became an in-process interception.**
+  `createRuntimeResolution` runs the same BFS in memory and `PluginPackages`
+  installs it over Node's ESM and CJS resolvers. `removeLinkProjections` is the
+  migration upstream wrote for the directory the 0.1.5 link backend left behind,
+  and `packages/bundle/lib/boot.js` calls it once per boot. Two anchors still,
+  unioned over `entries` alone — our packages are copied in BESIDE the dsh tree
+  rather than depended on by it.
+- **`settings.register(ns, schema, {base})` is gone.** There is no namespace
+  registry; a plugin's own `Config` is the form, read with `describe()` and
+  written with `update(<entry id>, patch)`. A field must be `volatile()` or
+  `write` refuses the entry outright. `@dsh-desktop/market` folded its sources
+  schema into `Config` and `NS` stopped being a namespace: it is the row id.
+- **`dsh.bundle.patch` became a list.** `dsh-web-app` declares FIVE files — its
+  own plus `presets/{standard,ptc,minimal,cordis}.patch.yml` — because an agent
+  preset is a composed row now (`name: '@deepseek-ai/dsh-agent-preset'`) rather
+  than a directory the registry scanned. Reading only `cordis.patch.yml` left
+  the registry empty and every `session/create` failed with
+  `agent-preset/not-found: Unknown agent preset: standard, available: []`.
+  `bundlePatchPaths` is upstream's resolver for the declaration; use it rather
+  than naming the file.
+- **`wireStream.open` takes five arguments, and the signal moved last:**
+  `(endpoint, payload, uplink, peer, signal)`. Called with the old three, the
+  signal landed in `uplink`, and `$events` — which releases the uplink and then
+  reads the signal — refused with `signals[0] is not of type AbortSignal`. That
+  message names the slot, not the call.
 
-**What makes this a missing fallback rather than an incompatibility:**
-`@deepseek-ai/cordis-plugin-loader` needs the same internals and reaches them
-fine, because its `requireInternal(id)` tries `--expose-internals` FIRST and
-treats the addon as the fallback, swallowing failures. `dsh-app-boot` does not.
-The launcher already passes `--expose-internals` (`src/sidecar.ts`), and it was
-verified on this exact runtime — Electron 43.4.0, Node 24.18.1, V8
-`15.0.245.28-electron.0`, under `ELECTRON_RUN_AS_NODE` — that all five internal
-modules `internalModules()` wants load that way, and that every interface it
-then type-checks (`resolveSync`, `getOrCreateModuleJob`, `Module._resolveFilename`,
-`getCjsConditions`, `getDefaultConditions`, `defaultResolve`) is present.
-
-So the upstream ask is for `internalModules()` to use the two-strategy helper
-that upstream's own loader already uses. Nothing has to be invented and nothing
-here can substitute: writing the link farm ourselves would be copying the
-internal that 0.1.7 deliberately retired, which is the mistake `0.1.2` taught.
+This is also the bump that vindicated a comment. The `agent-presets` overlay
+deleted here was provably dead on 0.1.5 — its configured root had not existed
+for releases — but its comment's CLAIM, that without a preset every
+`session/create` fails, was true and had never been tested. Turning that
+sentence into a `session/create` in `tests/contract/sidecar.spec.ts` is what
+caught the patch-list change. Delete dead code; keep what it asserted.
 
 ### What 0.1.2 broke, and where each seam went
 

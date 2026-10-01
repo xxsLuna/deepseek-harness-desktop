@@ -84,41 +84,46 @@ export const inject = ['webServer']
 const PROFILE = 'desktop'
 
 /**
- * Settings section holding the trusted-source list.
+ * This row's id, which is also the key `settings` writes its config under.
  *
- * A plain string, not a call. `settingsNamespace()` used to brand this at
- * runtime; upstream moved the validation into the type of `settings.register`,
- * whose `ns` parameter is `Namespace & SettingsNamespaceInput<Namespace>` — so
- * a literal that is not a lowercase hyphenated identifier now fails to compile
- * instead of throwing on boot. Nothing to call, and one less import.
+ * It used to be a settings NAMESPACE, a name this plugin chose for a section of
+ * its own. 0.1.7 removed that registry: `SettingsForms.update(ns, …)` resolves
+ * `ns` against the profile's entries (`entries().find((row) => row.options.id
+ * === ns)`), so the string has to be the row's id in `cordis.patch.yml`. It
+ * already was one, which is why this is a comment rather than a rename — but
+ * the two are now the SAME fact, and changing the row id changes where the
+ * user's trusted sources are stored.
  */
 const NS = 'desktop-market'
 
 /**
- * The trusted-source list.
+ * This row's config, and since 0.1.7 the user's settings section as well.
  *
- * The default catalog is seeded through the registration's `base` layer rather
- * than hard-coded into the read path, which is what makes it removable: `base`
- * resolves below the user layer, so a user who deletes it writes that deletion
- * into their own layer and it survives the app changing the default. A
+ * There used to be TWO schemas here: this one for the row, and a `SourcesSchema`
+ * registered as a settings namespace of its own through
+ * `settings.register(ns, schema, {base})`. That call is gone — 0.1.7 replaced
+ * the namespace registry with a model where a plugin's OWN `Config` is the
+ * form, read through `settings.describe()` and written through
+ * `settings.update(<entry id>, patch)`, both keyed by the row's id. So the two
+ * schemas become one and `NS` stops being a namespace name: it is the row id,
+ * which it already happened to be.
+ *
+ * `sources` is `volatile`, and that is not decoration. `SettingsForms.write`
+ * refuses an entry whose schema has no volatile form — "Plugin entry has no
+ * volatile fields" — so the marker is what makes the field user-editable at
+ * all. The default lives in the schema rather than in the read path, which is
+ * what keeps the shipped catalog REMOVABLE: a user who deletes it writes `[]`
+ * into their own layer, and that survives the app changing its default. A
  * marketplace nobody can un-register is not registered, it is baked in.
- */
-const SourcesSchema = z.object({
-  sources: z.array(z.string()).default([]).description('Catalog index URLs. HTTPS only.'),
-})
-
-/**
- * This ROW's config — distinct from `SourcesSchema` above, which is the user
- * settings section. `Config` is what the boot entry passes down through the
- * patch row; the settings namespace is what the user edits.
  *
  * `failed` is only ever non-empty on a safe-mode boot: the boot entry drops
  * every installed plugin and retries when the tree would not load, then names
  * them here so the tab can say which ones were disabled and offer to remove
- * them. Nothing else can surface that — a user staring at a plugin that
- * silently stopped working has nowhere else to look.
+ * them. It is NOT volatile — nobody edits a casualty list.
  */
 export const Config = z.object({
+  sources: z.array(z.string()).default([DEFAULT_CATALOG]).volatile()
+    .description('Catalog index URLs. HTTPS only.'),
   failed: z.array(z.string()).default([]).description('Installed plugins a safe-mode boot disabled.'),
 })
 
@@ -160,9 +165,10 @@ function json(res, status, body) {
 }
 
 /**
- * Mount the marketplace: one settings namespace and the renderer's routes.
+ * Mount the marketplace: the renderer's routes, over this row's own config.
  * @param {Context} ctx - plugin context.
- * @param {{ failed: string[] }} config - this row's config; carries the safe-mode casualty list.
+ * @param {{ sources: string[], failed: string[] }} config - this row's config: the
+ *   user's trusted catalog sources, and the safe-mode casualty list.
  */
 export function apply(ctx, config) {
   const home = resolveDshHome()
@@ -235,19 +241,35 @@ export function apply(ctx, config) {
     }
   }
 
-  /** @returns the extra sources the user has trusted, beyond the default. */
+  /**
+   * The sources this app will read a catalog from.
+   *
+   * Read from this row's OWN config now, not from a settings namespace. The
+   * schema's default seeds the shipped catalog, so an unconfigured install gets
+   * one and a user who clears the list keeps it cleared. The array guard stays:
+   * config arrives validated, but this route is the one place a wrong shape
+   * would mean fetching nothing with no error.
+   * @returns the catalog index URLs, in the order the user put them.
+   */
   function trustedSources() {
-    const configured = scope?.get()?.sources
-    return Array.isArray(configured) ? configured : [DEFAULT_CATALOG]
+    return Array.isArray(config.sources) ? config.sources : [DEFAULT_CATALOG]
   }
 
-  /** @type {{ get: () => { sources: string[] }, update: (patch: object) => Promise<void> } | undefined} */
-  let scope
+  /**
+   * `settings`, when it is mounted — it stays OPTIONAL.
+   *
+   * This used to register a namespace here and keep the handle. 0.1.7 has no
+   * registry to register with: the service reads this plugin's own `Config` and
+   * writes back to the row by id, so there is nothing to set up and the only
+   * thing worth holding is whether the service is there at all. Still
+   * `ctx.inject` rather than a static `inject` entry, for the same reason as
+   * before: a desktop build without the settings row must still serve the
+   * marketplace, read-only.
+   * @type {{ update: (ns: string, patch: object, expectedRevision?: number) => Promise<void> } | undefined}
+   */
+  let settings
   ctx.inject(['settings'], (/** @type {any} */ settingsCtx) => {
-    // `settings` is an optional service, so this is ctx.inject rather than a
-    // static entry in `inject`: the registration rides the injected fiber, and
-    // disposing this plugin takes the namespace with it.
-    scope = settingsCtx.settings.register(NS, SourcesSchema, { base: { sources: [DEFAULT_CATALOG] } })
+    settings = settingsCtx.settings
   })
 
   /**
@@ -814,7 +836,10 @@ export function apply(ctx, config) {
    * @param {Response} res - the response.
    */
   async function sources(req, res) {
-    if (scope === undefined) return json(res, 503, { ok: false, message: 'the settings service is not mounted' })
+    // Reading needs no settings service: the list is this row's own config.
+    // Only WRITING does, so the 503 moved below the GET — a desktop build
+    // without the settings row now serves the marketplace read-only instead of
+    // refusing to describe itself.
     if (req.method !== 'POST') return json(res, 200, { sources: trustedSources() })
     const body = await readJson(req)
     const next = body === undefined ? undefined : body.sources
@@ -834,8 +859,23 @@ export function apply(ctx, config) {
     // keys, and make every install ambiguous against itself. Order is kept —
     // it is the order the user added them in.
     const unique = next.filter((source, index) => next.indexOf(source) === index)
-    await scope.update({ sources: unique })
-    json(res, 200, { ok: true, sources: trustedSources() })
+    // The service check is HERE, below the validation, and the order is the
+    // point: whether a URL is acceptable is a property of the URL, not of
+    // whether this build can store it. Checking first answered 503 to a
+    // non-HTTPS source that should have been refused 422 on its own terms —
+    // which tells the caller to retry later rather than to fix their input.
+    if (settings === undefined) return json(res, 503, { ok: false, message: 'the settings service is not mounted' })
+    // No expected revision. The parameter is upstream's optimistic-concurrency
+    // check for the settings UI, where two forms can race over one entry; this
+    // route is a whole-list replace from a single tab, and passing a stale
+    // revision would fail the write with a conflict the caller cannot resolve.
+    // `write` skips the check when it is undefined.
+    await settings.update(NS, { sources: unique })
+    // `unique` rather than a re-read: the write lands in the profile patch and
+    // the entry reloads, so `config` in this closure is still the old value
+    // until that happens. Answering with what was just stored is both correct
+    // and what the tab needs to render.
+    json(res, 200, { ok: true, sources: unique })
   }
 
   const routes = [
