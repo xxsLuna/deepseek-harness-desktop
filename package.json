@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "0.1.6-desktop-alpha0.2.1",
+  "version": "0.1.7-desktop-alpha0.2.0",
   "description": "Unofficial desktop app for DeepSeek Harness",
   "private": true,
   "license": "MIT",
@@ -29,7 +29,7 @@
   "devDependencies": {
     "@types/node": "26.2.0",
     "@types/react": "~18.3.1",
-    "electron": "^44.0.0",
+    "electron": "44.0.0",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
     "react": "18.3.1",

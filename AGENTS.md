@@ -463,7 +463,8 @@ to the addon, while upstream's OWN `cordis-plugin-loader` tries
 (`requireInternal` in its `lib/index.js`). The launcher already passes that
 flag, and all five internals plus every interface `internalModules()` type-checks
 were verified present that way on this exact runtime. Until that lands, the pin
-is the only lever.
+is the only lever, and `package.json` holds `electron` at an EXACT `44.0.0`:
+a caret would resolve 44.5.1 and the app would refuse to boot.
 
 The four seams:
 
