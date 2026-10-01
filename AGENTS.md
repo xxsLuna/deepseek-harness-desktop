@@ -234,6 +234,48 @@ done
 `rows.has(...)`, so a rename skips the overlay and `DSH_TELEMETRY_DISABLED`
 **fails open** — telemetry stays on with the opt-out set.
 
+### Two halves have to agree before a control can work
+
+The band's back and forward buttons never moved, and neither half of them was
+wrong on its own — which is why it survived so long. Both halves were missing
+the same fact.
+
+**The page left no trail.** No client bundle in the upstream roster calls
+`pushState`, `replaceState` or `location.assign`, and none touches the hash.
+Opening a session moves React state and nothing else, so `history.length`
+stayed at 1 for the life of the window. `@dsh-desktop/session-history` is the
+missing half: it records each session the user lands on as a real entry
+(`ctx.uiSession.current` to read, `ctx.uiWorkspace.openSession` to put one
+back), which is what the launcher's own comment had been waiting for — "a
+pushState is what a single-page UI would move through".
+
+**And `canGoBack()` lies.** Measured from main on Electron 44, with the rest of
+the same object correct beside it:
+
+```
+entries=3 index=2 back=false forward=false
+entries=3 index=1 back=false forward=true
+entries=3 index=0 back=false forward=true
+```
+
+`length()`, `getActiveIndex()` and `canGoForward()` all track exactly. Only
+`canGoBack()` fails to count same-document entries — and this app's history is
+ENTIRELY same-document, so the back control would have stayed dimmed and inert
+for every history this window can ever have. `navigationWays(index, length)`
+derives both ways from the position instead, and the routes gate on the same
+test with `goToOffset` rather than `goBack`/`goForward`.
+
+Two things worth keeping from how this was found:
+
+- **The symptom pointed at neither cause.** A dimmed button says "nowhere to
+  go", which was true, and stayed true after the trail existed — because the
+  second half was broken too. Fixing either alone would have looked like the
+  fix had not worked.
+- **A pure function is where a platform lie gets pinned.** `canGoBack()`
+  produced no error and no log line, just a control that never lit.
+  `tests/unit/navigation-ways.spec.ts` holds the rule and carries the measured
+  table, so an Electron bump that fixes or further breaks it fails by name.
+
 ### A removed throw is a silent break, and existence tests do not see it
 
 The sidebar stopped remembering its collapsed state in `0.1.5`. Nothing failed:
