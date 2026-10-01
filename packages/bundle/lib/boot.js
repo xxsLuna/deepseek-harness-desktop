@@ -16,8 +16,10 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  PROFILE_PATCH_FILENAME,
   PluginPackages,
   boot,
+  bundlePatchPaths,
   createRuntimeResolution,
   initProfile,
   installFailLoud,
@@ -61,8 +63,35 @@ if (!process.env.DSH_DESKTOP_SOCKET || !process.env.DSH_DESKTOP_TOKEN) {
 }
 
 const require = createRequire(import.meta.url)
-/** Resolve a bundle's patch file beside its exported package.json. */
-const bundlePatch = (pkg) => join(dirname(require.resolve(`${pkg}/package.json`)), 'cordis.patch.yml')
+/**
+ * Resolve a bundle's patch files, in the order the bundle declares them.
+ *
+ * This used to be one hard-coded `cordis.patch.yml` beside the package.json,
+ * and that was right for exactly as long as a bundle had one patch. 0.1.7
+ * ships `dsh-web-app` with FIVE — its own, plus `presets/standard`, `ptc`,
+ * `minimal` and `cordis` — because an agent preset became a composed row
+ * (`name: '@deepseek-ai/dsh-agent-preset'`) rather than a directory the preset
+ * registry scanned. Reading only the first file left the registry with nothing
+ * to list, and every `session/create` failed with
+ * `agent-preset/not-found: Unknown agent preset: standard, available: []`.
+ *
+ * `dsh.bundle.patch` is the declaration and `bundlePatchPaths` is upstream's
+ * own resolver for it, so this asks the package rather than guessing: a string
+ * stays one file, a list is applied in order, and a bundle that adds a sixth
+ * file is picked up without a change here.
+ * @param {string} pkg - the bundle's package name.
+ * @returns {string[]} absolute patch file paths, in application order.
+ */
+const bundlePatches = (pkg) => {
+  const manifestPath = require.resolve(`${pkg}/package.json`)
+  const { dsh } = require(manifestPath)
+  const bundle = dsh?.bundle
+  // A bundle that declares nothing still has the conventional file; upstream's
+  // resolver would throw on an absent `patch`, and this path has to keep
+  // working against the older pins the other channels carry.
+  if (bundle?.patch === undefined) return [join(dirname(manifestPath), PROFILE_PATCH_FILENAME)]
+  return bundlePatchPaths(dirname(manifestPath), bundle)
+}
 
 const home = resolveDshHome()
 const environment = loadLayeredEnv(NAME, home)
@@ -215,8 +244,8 @@ try {
 // composition" — and only the first one can be answered by a layer we do not
 // write. See requireUpstreamRows below.
 const upstreamLayers = [
-  ...loadOverlayPatches(NAME, bundlePatch('@deepseek-ai/dsh-base')),
-  ...loadOverlayPatches(NAME, bundlePatch('@deepseek-ai/dsh-web-app')),
+  ...bundlePatches('@deepseek-ai/dsh-base').flatMap((file) => loadOverlayPatches(NAME, file)),
+  ...bundlePatches('@deepseek-ai/dsh-web-app').flatMap((file) => loadOverlayPatches(NAME, file)),
 ]
 
 const layers = [
