@@ -11,7 +11,42 @@
  * why the decision lives in a pure function rather than inside the effect.
  */
 import { describe, expect, it } from 'vitest'
-import { historyAction, ownEntry, sessionIdOf } from '../../packages/session-history/src/client.js'
+import {
+  currentSessionSource,
+  historyAction,
+  ownEntry,
+  sessionIdOf,
+} from '../../packages/session-history/src/client.js'
+
+describe('currentSessionSource', () => {
+  const store = { getSnapshot: () => undefined, subscribe: () => () => {} }
+
+  it('takes the adapter, which is the name both pins have', () => {
+    // `0.1.5` keeps the binding private behind `adapter.current`; `0.1.7` also
+    // promotes it to `uiSession.current`. Reading only the promoted name found
+    // nothing on `0.1.5` — silently, which is the failure this package is about.
+    expect(currentSessionSource({ adapter: { current: store } })).toBe(store)
+  })
+
+  it('falls back to the promoted name', () => {
+    expect(currentSessionSource({ current: store })).toBe(store)
+  })
+
+  it('prefers the adapter when a pin exposes both', () => {
+    // They are the same object on 0.1.7. Preferring the adapter means the
+    // common path is the one exercised on every channel.
+    const promoted = { getSnapshot: () => 'promoted', subscribe: () => () => {} }
+    expect(currentSessionSource({ adapter: { current: store }, current: promoted })).toBe(store)
+  })
+
+  it('finds nothing when neither name is a store', () => {
+    // A pin that moves this again should leave the controls as they were
+    // rather than throw into a composition that would reject whole.
+    expect(currentSessionSource({})).toBeUndefined()
+    expect(currentSessionSource({ adapter: {} })).toBeUndefined()
+    expect(currentSessionSource({ current: { getSnapshot: () => undefined } as never })).toBeUndefined()
+  })
+})
 
 describe('historyAction', () => {
   it('replaces for the first session, because that is where the user already is', () => {
