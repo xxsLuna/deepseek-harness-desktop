@@ -17,7 +17,7 @@
  * that fix can be held.
  */
 import { describe, expect, it } from 'vitest'
-import { navigationWays } from '../../src/desktop-host.js'
+import { navigationWays } from '../../src/navigation-ways.js'
 
 describe('navigationWays', () => {
   it('offers nothing for a history of one', () => {
