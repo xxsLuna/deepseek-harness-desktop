@@ -17,6 +17,7 @@
     "@dsh-desktop/layout-memory": "*",
     "@dsh-desktop/market": "*",
     "@dsh-desktop/picker": "*",
+    "@dsh-desktop/session-history": "*",
     "@dsh-desktop/settings": "*"
   }
 }
