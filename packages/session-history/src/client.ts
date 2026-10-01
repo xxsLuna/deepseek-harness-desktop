@@ -33,10 +33,12 @@
  *
  * ## The two seams this uses
  *
- * - `ctx.uiSession.current` — upstream's binding source for the session being
- *   shown. `{ value, getSnapshot(), subscribe(listener) }`, and it is the same
- *   source the renderer's own session adapter reads, so it changes exactly when
- *   the visible session does.
+ * - `ctx.uiSession.adapter.current` — upstream's store for the session being
+ *   shown, the same one the renderer's own session adapter reads, so it changes
+ *   exactly when the visible session does. `0.1.7` also promotes it to
+ *   `uiSession.current`; `0.1.5` keeps the binding private behind the adapter.
+ *   `currentSessionSource` takes whichever this pin has, because the channels
+ *   carry different ones.
  * - `ctx.uiWorkspace.openSession(sessionId)` — upstream's own lever for showing
  *   a session, the one the sidebar and the conversation hero call.
  *
@@ -73,16 +75,41 @@ interface SessionEntry {
   readonly sessionId: string
 }
 
+/** A store of the shape upstream's binding sources and adapters both use. */
+interface BindingSource {
+  getSnapshot: () => unknown
+  subscribe: (listener: () => void) => () => void
+}
+
 /** The slice of the client context this plugin uses. */
 interface SessionHistoryContext {
-  uiSession: {
-    current: {
-      getSnapshot: () => unknown
-      subscribe: (listener: () => void) => () => void
-    }
-  }
+  uiSession: { adapter?: { current?: BindingSource }, current?: BindingSource }
   uiWorkspace: { openSession: (sessionId: string) => void }
   effect: (execute: () => () => void, label?: string) => unknown
+}
+
+/**
+ * The current-session store, under whichever name this pin exposes it.
+ *
+ * `adapter.current` first because it is the one BOTH lines have: `0.1.5` builds
+ * the adapter in the constructor and keeps the binding itself private
+ * (`this.currentBinding`), while `0.1.7` promotes it to `this.current` and
+ * points the adapter at the same object. Reading only `current` found nothing
+ * on `0.1.5` — and found it silently, which is this package's whole subject.
+ *
+ * Both are tried rather than one being chosen, because the channels carry
+ * different pins by design and this plugin ships to all of them from one
+ * source. The name that is absent costs nothing; the one that is there answers.
+ * @param uiSession - upstream's session service.
+ * @returns the store to read and subscribe to, or undefined when neither name
+ *   is present — in which case this plugin does nothing rather than throwing
+ *   into a composition that would reject whole.
+ */
+export function currentSessionSource(uiSession: SessionHistoryContext['uiSession']): BindingSource | undefined {
+  for (const candidate of [uiSession.adapter?.current, uiSession.current]) {
+    if (typeof candidate?.getSnapshot === 'function' && typeof candidate.subscribe === 'function') return candidate
+  }
+  return undefined
 }
 
 /**
@@ -163,6 +190,12 @@ export function historyAction(options: {
  */
 export function apply(ctx: SessionHistoryContext): void {
   ctx.effect(() => {
+    const source = currentSessionSource(ctx.uiSession)
+    // Nothing to record against. Returning quietly is the right failure here:
+    // the band's controls stay as they were, which is what they did before this
+    // package existed, and the rest of the app is untouched.
+    if (source === undefined) return () => {}
+
     let disposed = false
 
     // Set while this plugin is the one changing the session, so the change it
@@ -177,7 +210,7 @@ export function apply(ctx: SessionHistoryContext): void {
 
     const record = (): void => {
       if (disposed || restoring) return
-      const shown = sessionIdOf(ctx.uiSession.current.getSnapshot())
+      const shown = sessionIdOf(source.getSnapshot())
       const action = historyAction({ shown, recorded: ownEntry(history.state)?.sessionId })
       if (action === 'none' || shown === undefined) return
       try {
@@ -199,7 +232,7 @@ export function apply(ctx: SessionHistoryContext): void {
       if (disposed) return
       const entry = ownEntry(event.state)
       if (entry === undefined) return
-      if (sessionIdOf(ctx.uiSession.current.getSnapshot()) === entry.sessionId) return
+      if (sessionIdOf(source.getSnapshot()) === entry.sessionId) return
       restoring = true
       try {
         ctx.uiWorkspace.openSession(entry.sessionId)
@@ -219,7 +252,7 @@ export function apply(ctx: SessionHistoryContext): void {
     // Otherwise the first push would be the second session while the first had
     // no entry of its own, and walking back would land on a bare document.
     record()
-    const unsubscribe = ctx.uiSession.current.subscribe(record)
+    const unsubscribe = source.subscribe(record)
     addEventListener('popstate', walked)
 
     return () => {
