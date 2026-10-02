@@ -149,3 +149,36 @@ after "the dsh 0.1.5 releases" is how you know it is meant for this app.
 **What it also fixed:** that link farm is the shape that once emptied 271
 packages when a plugin removal walked through one of its junctions. Asserting
 the directory is *absent* is now worth a test of its own.
+
+---
+
+## 8. A row grew a gate, and nothing failed at all (0.1.7)
+
+`dsh-base` started composing `settings`, `config-editor`, `plugin-manager` and
+`hmr` with `disabled: !!js "!ctx.get('profileContext')"`, and `dsh-web-app`
+gated `ui-sidebar-browser` on `?.name !== 'desktop'`. `profileContext` is
+provided by upstream's own profile boot — the entry this surface replaces, so
+the app inherited every gate and none of the thing they gate on.
+
+**Symptom:** none. This is the only entry in this list with no failure to
+recognise. The bump went green, the release shipped, the app opened, the
+sidecar logged `dsh-desktop: ready`. A user found it days later on the Models
+page: `Loading the provider directory failed: settings service is absent`.
+
+**Why every existing test missed it:** `upstream-rows.spec.ts` asks whether the
+rows this app *patches* still exist — these were neither patched nor missing.
+`sidecar.spec.ts` asks whether the boot succeeds — it did. A gated-off row is
+indistinguishable from a healthy composition unless something *calls* the
+service.
+
+**Fix shape:** provide the service from `prepare` in
+`packages/bundle/lib/boot.js`, inside the profile guard, with the fields
+upstream's own object carries. Replacing an entry means inheriting what it
+provided — that is the general rule, and this is the second time it has cost
+something (`web-startup` is the entry; 0.1.2's `connection` was the first).
+
+**What to do on the next bump:** `tests/contract/upstream-gates.spec.ts` now
+extracts every `ctx.get('…')` out of every `!!js` expression in the upstream
+patch files and fails on a name this app has not answered. If it fails, open
+the row, work out what the gate protects, and either provide the service or
+record what being without it costs. Do not add the name to make it pass.
