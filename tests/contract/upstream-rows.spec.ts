@@ -37,6 +37,9 @@ const UPSTREAM_PATCHES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
  * @param file - path to a cordis.patch.yml.
  * @returns the ids it declares.
  */
+/** Package name to row id, filled by {@link rowIds} as it walks. */
+const names = new Map<string, string>()
+
 function rowIds(file: string): string[] {
   const require = createRequire(join(modules, 'index.js'))
   const yaml = require('js-yaml') as {
@@ -61,8 +64,9 @@ function rowIds(file: string): string[] {
       return
     }
     if (node === null || typeof node !== 'object') return
-    const row = node as { id?: unknown, insert?: unknown }
+    const row = node as { id?: unknown, name?: unknown, insert?: unknown }
     if (typeof row.id === 'string') ids.push(row.id)
+    if (typeof row.id === 'string' && typeof row.name === 'string') names.set(row.name, row.id)
     if (row.insert !== undefined) walk(row.insert)
   }
   walk(entries)
@@ -90,11 +94,6 @@ describe.skipIf(!existsSync(modules))('upstream patch rows', () => {
     ['web-runtime', 'replaced by the desktop runtime row'],
     ['client-hmr', 'dev-only, and it 404s against the app scheme'],
     ['directory-picker', 'replaced by the launcher-backed picker'],
-    // Gated on `profileContext`, so they were off by accident until this surface
-    // provided it. Their endpoint defaults to upstream's own collector and they
-    // cannot validate without DSH_CLIENT_VERSION, so they are now off on purpose.
-    ['desktop-product-telemetry', 'reports to an upstream collector by default'],
-    ['product-analytics', 'the browser half of the same, and it waits on that service'],
     // Reconfigured rather than disabled.
     //
     // `connection` is here rather than above ON PURPOSE, and the move is the
@@ -121,5 +120,26 @@ describe.skipIf(!existsSync(modules))('upstream patch rows', () => {
     // brings the old id back, the deletion deserves re-reading rather than
     // silently continuing to do nothing.
     expect(declared.has('agent-presets')).toBe(false)
+  })
+
+  it('still gives the product-analytics packages the ids this app disables', () => {
+    // Keyed by PACKAGE name, not by id, and the difference is the point. These
+    // two rows arrived in 0.2.0 and are absent on an older pin, so the list
+    // above would fail a channel that is simply behind. What must never happen
+    // is upstream MOVING them: the disable in packages/bundle/cordis.patch.yml
+    // is keyed by id, so a rename turns it into a silent no-op — and these are
+    // the rows whose endpoint defaults to upstream's own collector.
+    //
+    // boot.js refuses to start in that case. This names the package instead of
+    // reporting "the sidecar did not start".
+    const expected = {
+      '@deepseek-ai/dsh-host-product-telemetry-otel': 'desktop-product-telemetry',
+      '@deepseek-ai/dsh-client-product-analytics': 'product-analytics',
+    }
+    for (const [pkg, id] of Object.entries(expected)) {
+      const found = names.get(pkg)
+      if (found === undefined) continue
+      expect(found, pkg).toBe(id)
+    }
   })
 })
