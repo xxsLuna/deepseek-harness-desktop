@@ -167,8 +167,13 @@ function json(res, status, body) {
 /**
  * Mount the marketplace: the renderer's routes, over this row's own config.
  * @param {Context} ctx - plugin context.
- * @param {{ sources: string[], failed: string[] }} config - this row's config: the
- *   user's trusted catalog sources, and the safe-mode casualty list.
+ * Inferred from `Config` rather than written out, and that is not tidiness:
+ * the hand-written type said `sources: string[]`, which is what a volatile
+ * field is NOT. It arrives as a `Volatile<string[]>` reference, so the read
+ * below silently missed and the typecheck agreed with it. Deriving the type
+ * from the schema is what makes the compiler notice next time.
+ * @param {ReturnType<typeof Config>} config - this row's config: the user's
+ *   trusted catalog sources, and the safe-mode casualty list.
  */
 export function apply(ctx, config) {
   const home = resolveDshHome()
@@ -244,15 +249,26 @@ export function apply(ctx, config) {
   /**
    * The sources this app will read a catalog from.
    *
-   * Read from this row's OWN config now, not from a settings namespace. The
-   * schema's default seeds the shipped catalog, so an unconfigured install gets
-   * one and a user who clears the list keeps it cleared. The array guard stays:
-   * config arrives validated, but this route is the one place a wrong shape
-   * would mean fetching nothing with no error.
+   * Read from this row's OWN config, not from a settings namespace — and
+   * through `.get()`, which is the part that was wrong. A `volatile` field does
+   * not arrive as its value: `Schema.resolve` wraps it with cosmokit's
+   * `createVolatile`, so what lands here is a frozen `{ get() }` REFERENCE that
+   * the settings runtime updates in place, with no fiber reload. That is the
+   * whole point of the marker — a saved setting takes effect without
+   * restarting the row that owns it.
+   *
+   * Read as an array it never matched, so this always fell through to the
+   * fallback. The shipped catalog looked right, which is why nothing noticed; a
+   * user's saved list was invisible, and so was a deliberately emptied one. The
+   * schema default is wrapped too, so the reference is always there and the
+   * fallback is now only a wrong-shape guard — this route is the one place a
+   * wrong shape would mean fetching nothing with no error.
    * @returns the catalog index URLs, in the order the user put them.
    */
   function trustedSources() {
-    return Array.isArray(config.sources) ? config.sources : [DEFAULT_CATALOG]
+    const held = config.sources
+    const value = typeof held?.get === 'function' ? held.get() : held
+    return Array.isArray(value) ? value : [DEFAULT_CATALOG]
   }
 
   /**

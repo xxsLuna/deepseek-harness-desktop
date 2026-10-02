@@ -182,3 +182,30 @@ extracts every `ctx.get('…')` out of every `!!js` expression in the upstream
 patch files and fails on a name this app has not answered. If it fails, open
 the row, work out what the gate protects, and either provide the service or
 record what being without it costs. Do not add the name to make it pass.
+
+**And providing it is only half.** A gate is off for a reason, and opening it
+runs code that has never run on this surface. All of this came out of that one
+line, in this order, each found by the test before it:
+
+1. `dsh-hmr` threw `Profile HMR requires application readiness` — upstream's
+   profile boot also provides `appReady`, through `provideCmdline`'s documented
+   `ready` option.
+2. The first settings write killed the sidecar, exit 0, nothing logged.
+   `ConfigEditor.edit` rebuilds the composition from `dsh.profile.bundles` and
+   replaces the live entry list with it; this app seeded that list EMPTY, so the
+   rebuild removed every app row. The app-owned layers are named in the profile
+   now and `boot.js` composes with `readProfilePatches`, like upstream.
+3. Two newly-ungated rows (`desktop-product-telemetry`, `product-analytics`)
+   could not validate and, worse, default to upstream's own collector. Disabled
+   explicitly — which preserves the shipped behaviour rather than changing it.
+   Inactive entries are not cosmetic either: `reconcileProfilePatches` refuses a
+   write that introduces one, so they break every save.
+4. The saved value then did not read back. A `volatile` config field arrives as
+   a `{ get() }` reference the runtime updates in place, not as its value, and
+   the reader was treating it as an array — so it always fell through to the
+   default. The hand-written JSDoc type agreed with the bug; inferring it from
+   the schema is what makes the compiler disagree.
+
+**The lesson to carry:** when a bump hands you a gate, budget for what is behind
+it. Opening one is not a one-line fix, and every step above was found by a test
+that called the service rather than by reading the diff.

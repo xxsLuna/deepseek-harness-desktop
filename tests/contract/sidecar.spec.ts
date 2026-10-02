@@ -844,15 +844,33 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(meaningful).toBe('[]')
   })
 
-  it('seeds the profile with no bundles of its own', () => {
-    // The three app-owned layers (dsh-base, dsh-web-app, @dsh-desktop/bundle)
-    // stay app-owned and are loaded by boot.js directly. The profile's list
-    // holds ONLY what a user installed, so an app update and a user's plugin
-    // set can never fight over one list.
+  it('names its own layers in the profile, because the profile IS the composition', () => {
+    // This assertion used to be the opposite — `toEqual([])` — and the comment
+    // on it argued that keeping the app-owned layers out of the list stopped an
+    // app update and a user's plugin set fighting over one list. That was a real
+    // benefit, and it cost more than it was worth.
+    //
+    // Upstream rebuilds the composition from this list on every settings write:
+    // `ConfigEditor.edit` calls `readProfilePatches`, which reads exactly this
+    // field, and hands the result to `reconcileProfilePatches`, which REPLACES
+    // the root Include entry's patch list with it. With the list empty, the
+    // first save removed every app row, closed the carrier socket and exited the
+    // sidecar with code 0 — no error, nothing written, the save lost. The write
+    // assertion further down is the one that would catch it coming back; this
+    // one names the cause.
+    //
+    // The three come first and in composition order; anything a user installed
+    // follows them. That one of them failing to RESOLVE is now fatal rather than
+    // skipped is held in boot.js, and the whole of this suite is its test: a
+    // skipped app-owned bundle would leave a tree with no rows and no error.
     const manifest = JSON.parse(
       readFileSync(join(home, 'profiles', 'desktop', 'package.json'), 'utf8'),
-    ) as { dsh?: { profile?: { bundles?: unknown } } }
-    expect(manifest.dsh?.profile?.bundles).toEqual([])
+    ) as { dsh?: { profile?: { bundles?: string[] } } }
+    expect(manifest.dsh?.profile?.bundles).toEqual([
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+      '@dsh-desktop/bundle',
+    ])
   })
 
   it('writes no link farm for the profile', () => {
@@ -1003,6 +1021,32 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     })
     expect(res.status).toBe(422)
     expect(res.body).toContain('HTTPS only')
+  })
+
+  it('stores a marketplace source through the settings service', async () => {
+    // The settings WRITE path, which had never run in this app before the
+    // `profileContext` fix. With the row gated off this route answered 503, so
+    // the suite only ever exercised the refusals above — both of which are
+    // reached before the service is consulted and so passed either way.
+    //
+    // Asserted all the way to the file, not just to the status code: the write
+    // goes through `config-editor`, which persists into the profile patch at
+    // `profileContext.patchPath`. That is the field this app now has to supply,
+    // and `boot.js` reads the same file back as a layer — so this is also what
+    // makes a saved setting survive a restart.
+    const added = 'https://example.com/marketplace.json'
+    const stored = await socketRequest(socketPath, {
+      path: '/market/sources',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sources: [added] }),
+    })
+    expect(stored.status, stored.body).toBe(200)
+
+    const after = await socketRequest(socketPath, { path: '/market/sources' })
+    expect((JSON.parse(after.body) as { sources: string[] }).sources).toEqual([added])
+    const patch = readFileSync(join(home, 'profiles', 'desktop', 'cordis.patch.yml'), 'utf8')
+    expect(patch).toContain(added)
   })
 
   it('refuses to install a plugin no trusted source lists', async () => {

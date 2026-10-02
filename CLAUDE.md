@@ -84,6 +84,28 @@ every specifier we import is one upstream declares. It cannot see coupling
 shape, and it was green throughout the incident above. This paragraph is the
 part a reviewer has to hold.
 
+### The composition must be reproducible from the profile
+
+The desktop surface boots its own tree, but it does not get to compose that
+tree however it likes. Upstream rebuilds the composition from the profile on
+every settings write — `ConfigEditor.edit` calls `readProfilePatches`, which
+reads `dsh.profile.bundles`, and hands the result to
+`reconcileProfilePatches`, which replaces the live entry list with it. A
+composition that cannot be rebuilt from the profile is therefore not merely
+unusual: the first save tears it down, with no error and nothing written.
+
+So the app-owned layers (`dsh-base`, `dsh-web-app`, `@dsh-desktop/bundle`) are
+named in the profile manifest, first and in composition order, and `boot.js`
+composes with `readProfilePatches` exactly as `dsh --profile` does. Anything
+added to the composition has to go somewhere that function reads: a bundle in
+that list, the profile's own patch file, the home layer, or `context.overlays`
+— which is the seat this surface uses for the overrides nothing may revert.
+
+`tests/contract/sidecar.spec.ts` holds both halves: that the three are named
+in the manifest, and that a settings write persists and survives a restart.
+The second is the one that matters, because the first can be true while the
+composition still diverges.
+
 ### What genuinely cannot be a plugin
 
 The Electron launcher in `src/`. It is the process that *spawns* the harness,

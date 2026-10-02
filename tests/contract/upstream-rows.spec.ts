@@ -90,6 +90,11 @@ describe.skipIf(!existsSync(modules))('upstream patch rows', () => {
     ['web-runtime', 'replaced by the desktop runtime row'],
     ['client-hmr', 'dev-only, and it 404s against the app scheme'],
     ['directory-picker', 'replaced by the launcher-backed picker'],
+    // Gated on `profileContext`, so they were off by accident until this surface
+    // provided it. Their endpoint defaults to upstream's own collector and they
+    // cannot validate without DSH_CLIENT_VERSION, so they are now off on purpose.
+    ['desktop-product-telemetry', 'reports to an upstream collector by default'],
+    ['product-analytics', 'the browser half of the same, and it waits on that service'],
     // Reconfigured rather than disabled.
     //
     // `connection` is here rather than above ON PURPOSE, and the move is the
