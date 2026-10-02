@@ -482,7 +482,8 @@ remember — every one of them that could be derived from a manifest now is.
 Five things, measured against staged `0.1.7-alpha.2` and confirmed unchanged on
 `0.2.0-rc.2`, which is what ships. Four are seams that
 moved; the fifth is a pin, and it is the one to read before bumping Electron
-again.
+again. A sixth got past the bump entirely and shipped — it is below, under
+**A gate is a seam**, and it is the one to read before trusting a green bump.
 
 **The pin: Electron 43.4.0 → 44.0.0, and it is tied to an addon's table.**
 0.1.7 reaches Node's internals only through `node-addon-require-builtin`, which
@@ -543,6 +544,46 @@ for releases — but its comment's CLAIM, that without a preset every
 `session/create` fails, was true and had never been tested. Turning that
 sentence into a `session/create` in `tests/contract/sidecar.spec.ts` is what
 caught the patch-list change. Delete dead code; keep what it asserted.
+
+### A gate is a seam, and it does not fail
+
+This one shipped. `0.1.7-desktop-alpha0.2.0` went out with no settings
+service, and the first report came from a user on the Models page:
+`Loading the provider directory failed: settings service is absent`.
+
+Upstream 0.1.7 began composing rows **conditionally**:
+
+```yaml
+- id: settings
+  name: '@deepseek-ai/dsh-settings'
+  disabled: !!js "!ctx.get('profileContext')"
+```
+
+`profileContext` is provided by upstream's profile boot — `dsh --profile`'s
+own `prepare` — and that is the entry this surface replaces, so the app
+inherited five gates and none of the service. `settings`, `config-editor`,
+`plugin-manager` and `hmr` went off; `ui-sidebar-browser` went off on the
+web-app side; `deepseek-account` came up with a null platform.
+
+**Nothing failed.** Not one test, not one log line. `upstream-rows.spec.ts`
+asks whether the rows this app *patches* still exist, and these were neither
+patched nor missing. `sidecar.spec.ts` asks whether the boot succeeds, and it
+did — `dsh-desktop: ready`, on time, with the routes answering. A gated-off
+row is indistinguishable from a healthy composition unless something calls
+the service, which is why the two tests added here are the shapes they are:
+
+- `tests/contract/upstream-gates.spec.ts` parses every `!!js` expression in
+  the upstream patch files, pulls each `ctx.get('…')` out of it, and fails on
+  a name this app has not answered. A gate added in a future bump fails here,
+  by name. Do not add the name to make it pass.
+- `sidecar.spec.ts` calls `settings/describe` against the booted tree — the
+  call the Models page joins onto the provider directory. It is the only
+  assertion in the suite that can tell a mounted settings service from an
+  absent one.
+
+The general rule this is the second instance of: **replacing an entry means
+inheriting what it provided.** `web-startup` is the entry here. In 0.1.2 it
+was `connection`, and that one cost every client plugin.
 
 ### What 0.1.2 broke, and where each seam went
 
