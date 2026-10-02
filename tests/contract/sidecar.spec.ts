@@ -532,20 +532,30 @@ describe.skipIf(!existsSync(entry))('sidecar contract', () => {
     expect(parsed.result).toHaveProperty('ok')
   })
 
-  it('mounts the settings service the Models page asks for', async () => {
-    // The one gate in the composition this suite can actually see. Upstream
-    // composes `settings` with `disabled: !!js "!ctx.get('profileContext')"`,
-    // and a boot without that service is identical to a boot with it in every
-    // other way the suite looks at: the sidecar starts, the routes answer, the
-    // document serves, nothing is logged. Only a call that needs the service
-    // can tell them apart.
+  it('answers the three calls the Models page joins', async () => {
+    // The gate, in the shape a user meets it. This page loads by joining the
+    // provider directory with the settings document, and it is where
+    // `Loading the provider directory failed: settings service is absent`
+    // came from in `0.1.7-desktop-alpha0.2.0`.
     //
-    // `settings/describe` is the call the Models page joins onto the provider
-    // directory, so this is the exact path that answered `settings service is
-    // absent` in `0.1.7-desktop-alpha0.2.0`. `upstream-gates.spec.ts` holds the
-    // other half — that upstream has not added a gate nobody answered.
-    const result = await rpc(socketPath, 'settings/describe')
-    expect(result.ok, JSON.stringify(result.error)).toBe(true)
+    // It is also the only thing in this suite that can see that gate at all.
+    // A boot without the settings service is identical to a boot with it in
+    // every other way the suite looks at: the sidecar starts, the routes
+    // answer, the document serves, nothing is logged. Only a call that needs
+    // the service tells them apart.
+    //
+    // All three, rather than one standing in for the rest: any one of them
+    // failing fails the page, and they fail for different reasons.
+    // `upstream-gates.spec.ts` holds the other half — that upstream has not
+    // added a gate nobody answered.
+    for (const method of [
+      'llm/listProviders',
+      'llm/listConfigurableProviders',
+      'settings/describe',
+    ]) {
+      const result = await rpc(socketPath, method)
+      expect(result.ok, `${method}: ${JSON.stringify(result.error)}`).toBe(true)
+    }
   })
 
   it('bridges logical streams over a POST instead of demanding a WebSocket upgrade', async () => {
