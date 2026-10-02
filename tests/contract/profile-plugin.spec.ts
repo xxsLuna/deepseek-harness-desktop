@@ -47,6 +47,24 @@ const token = 'profile-plugin-token'
 /** The fixture's package name, which is also its row id and its directory. */
 const FIXTURE = 'dsh-plugin-contract-fixture'
 
+/**
+ * The layers the app owns, as `packages/bundle/lib/boot.js` writes them.
+ *
+ * Spelled out rather than imported: a copy that drifts from boot.js is the
+ * failure this asserts against, and importing the real list would make the
+ * test agree with whatever that file currently says.
+ */
+const APP_BUNDLES = [
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-web-app',
+  '@dsh-desktop/bundle',
+]
+
+/** The parts of a profile manifest this file reads. */
+interface ProfileManifest {
+  dsh?: { profile?: { bundles?: string[] } }
+}
+
 interface Installed {
   entries: { name: string, kind: string, active: boolean }[]
   failed: string[]
@@ -234,5 +252,37 @@ describe.skipIf(!existsSync(entry) || !existsSync(join(root, 'dist', 'sidecar.js
     // the string a future regression will print, and naming it here is what
     // makes the cause obvious instead of "the plugin does nothing".
     expect(bootLog).not.toContain(`Cannot find package '${FIXTURE}'`)
+  }, 180_000)
+
+  it('restores its own layers in a profile written before they were named', async () => {
+    // Every profile this app wrote before the composition moved into the
+    // profile carries a bundle list holding only the user's plugins, because
+    // the app-owned layers were assembled by hand at boot. Booting one of
+    // those has to put the three back, in front, without disturbing what the
+    // user installed — and this is the path every existing install takes
+    // exactly once, which is why it is worth a boot of its own.
+    //
+    // Done by UNWRITING them from the manifest the previous test left behind,
+    // so the fixture is already in the list and the assertion can show it
+    // survived rather than asserting against an empty one.
+    const manifestPath = join(home, 'profiles', 'desktop', 'package.json')
+    const before = JSON.parse(readFileSync(manifestPath, 'utf8')) as ProfileManifest
+    const userBundles = (before.dsh?.profile?.bundles ?? []).filter((name) => !APP_BUNDLES.includes(name))
+    expect(userBundles, 'the previous test should have left the fixture in the list').toContain(FIXTURE)
+    writeFileSync(manifestPath, `${JSON.stringify({
+      ...before,
+      dsh: { ...before.dsh, profile: { ...before.dsh?.profile, bundles: userBundles } },
+    }, null, 2)}\n`, 'utf8')
+
+    await stop()
+    await boot()
+
+    const after = JSON.parse(readFileSync(manifestPath, 'utf8')) as ProfileManifest
+    expect(after.dsh?.profile?.bundles).toEqual([...APP_BUNDLES, ...userBundles])
+
+    // Listed is not composed. The routes answering is what says the rewritten
+    // list was actually loaded, rather than written and then ignored.
+    const answer = await request('/market/installed')
+    expect(answer.status, bootLog).toBe(200)
   }, 180_000)
 })
