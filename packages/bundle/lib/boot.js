@@ -27,8 +27,11 @@ import {
   loadOptionalPatches,
   loadOverlayPatches,
   loadProfile,
+  readProfileManifest,
+  readProfilePatches,
   removeLinkProjections,
   resolveProfileDir,
+  writeProfileBundles,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -99,6 +102,35 @@ const environment = loadLayeredEnv(NAME, home)
 /** The profile this app owns under `$DSH_HOME/profiles`. */
 const PROFILE = 'desktop'
 
+/**
+ * The layers this app owns, in composition order, NAMED IN THE PROFILE.
+ *
+ * This list used to be empty, and the comment that said so was a good argument
+ * for a design 0.1.7 made unworkable. Keeping app-owned layers out of the
+ * profile's bundle list did stop an app update and an installed plugin set
+ * fighting over one list — but it also meant the running composition could not
+ * be rebuilt from the profile, and upstream now rebuilds it on every settings
+ * write: `ConfigEditor.edit` calls `readProfilePatches`, which reads exactly
+ * this list, and hands the result to `reconcileProfilePatches`, which REPLACES
+ * the root Include entry's whole patch list with it.
+ *
+ * With the list empty that rebuild held none of these three. Every app row was
+ * removed, the carrier's socket closed, and the sidecar exited 0 — no error, no
+ * log line, nothing written, the save silently lost. Measured against a real
+ * booted sidecar, not reasoned about.
+ *
+ * So the composition is the profile's now, which is what it already is for
+ * `dsh --profile` (`PROFILE_TEMPLATES.web` is this same list without the
+ * desktop overlay). The fight the old comment feared is answered by rewriting
+ * these three to the front on every boot, below: the app owns its own names and
+ * the user owns everything after them.
+ */
+const APP_BUNDLES = Object.freeze([
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-web-app',
+  '@dsh-desktop/bundle',
+])
+
 /** The dsh installation's manifest: the first anchor bundle names resolve from. */
 const installAnchor = require.resolve('@deepseek-ai/dsh/package.json')
 
@@ -151,11 +183,20 @@ function isEmptyEntryList(text) {
  */
 async function prepareProfile() {
   const dir = resolveProfileDir(PROFILE, home)
-  // Seeded EMPTY, and left that way. The three app-owned layers (dsh-base,
-  // dsh-web-app, this bundle) stay app-owned and are loaded below; the profile's
-  // bundle list holds only what the user installed. Keeping the two apart is
-  // what stops an app update and a user's plugin set from fighting over one list.
-  initProfile(dir, [])
+  initProfile(dir, [...APP_BUNDLES])
+
+  // Re-asserted on every boot rather than only at creation, and that is the
+  // migration: every profile this app has written so far carries an EMPTY list,
+  // and an app update can change what the app-owned layers are. The three are
+  // rewritten to the front in their own order, and everything after them is the
+  // user's, kept in the order the marketplace installed it. Written only when it
+  // differs, so a steady-state boot does not touch the file.
+  const manifest = readProfileManifest(NAME, dir)
+  const listed = manifest.dsh?.profile?.bundles ?? []
+  const wanted = [...APP_BUNDLES, ...listed.filter((name) => !APP_BUNDLES.includes(name))]
+  if (listed.length !== wanted.length || listed.some((name, index) => name !== wanted[index])) {
+    writeProfileBundles(dir, manifest, wanted)
+  }
 
   // Rewritten every boot, and the write is READ BACK. `tree.write()` in the
   // vendored Loader serializes the fully patch-COMPOSED entry list into this
@@ -184,6 +225,22 @@ async function prepareProfile() {
   removeLinkProjections(dir)
 
   const profile = loadProfile(NAME, PROFILE, installAnchor, home)
+
+  // `loadProfileDirectory` SKIPS a bundle it cannot resolve: it reports it and
+  // carries on, which is right for an installed plugin and catastrophic for one
+  // of these — the app would come up as a tree with no rows in it, and the only
+  // trace would be one line on stderr. Now that these three ARE the
+  // composition, their absence has to stop the boot.
+  const loadedBundles = new Set(profile.layers.map((layer) => layer.packageName))
+  const absent = APP_BUNDLES.filter((name) => !loadedBundles.has(name))
+  if (absent.length > 0) {
+    throw new Error(
+      `${NAME}: the profile did not load the app-owned bundle(s) ${absent.join(', ')}. `
+      + 'They compose this whole surface, so booting without them would open an empty '
+      + 'window with nothing in the log. Check that the staged tree still holds them '
+      + 'beside @deepseek-ai/dsh, and that each still declares dsh.bundle.patch.',
+    )
+  }
 
   // TWO anchors, and the reason is unchanged from the link-farm era: the walk
   // follows `dependencies` and `peerDependencies` from ONE manifest, and our
@@ -248,16 +305,17 @@ const upstreamLayers = [
   ...bundlePatches('@deepseek-ai/dsh-web-app').flatMap((file) => loadOverlayPatches(NAME, file)),
 ]
 
-const layers = [
+/**
+ * The composition when there is no profile to compose from.
+ *
+ * Hand-assembled, and it has to be: `readProfilePatches` reads a profile, and
+ * this is the path taken when preparing one threw. Nothing reconciles here —
+ * `profileContext` is withheld on this path, so upstream never mounts the
+ * settings service and the rebuild that needs the two to agree never runs.
+ */
+const fallbackLayers = [
   ...upstreamLayers,
   ...loadOverlayPatches(NAME, fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))),
-  // Installed plugins: each bundle's own patch layer, in the order the profile
-  // manifest lists them. After the app's own rows so a plugin can configure what
-  // the app composed; before the home layer so a machine-local override still
-  // outranks a plugin. The hard overlays below still come last, so nothing
-  // installed here can re-enable a row this surface is built on having off.
-  ...(anchored?.profile.layers.flatMap((layer) => layer.patches) ?? []),
-  ...(anchored?.profile.patches ?? []),
   // The user's home-level overrides keep working exactly as they do for the CLI.
   ...(loadOptionalPatches(NAME, join(home, 'cordis.patch.yml')) ?? []),
 ]
@@ -351,6 +409,18 @@ for (const id of DISABLED_UPSTREAM_ROWS) {
 // The trust fence rides along for the same reason it is in the patch: with the
 // row upstream's, `trustedHosts` is the one connection option this surface
 // depends on, and a home file widening it is not a preference.
+// Off because they cannot work here and must not start working by accident;
+// the patch file carries the whole reason. Named here so a rename is loud:
+// upstream warns and skips an id it cannot find, which would silently restore
+// a pair that reports to the vendor and breaks every settings write.
+requireUpstreamRows(
+  ['desktop-product-telemetry', 'product-analytics'],
+  'This app requires them off: they report to an upstream collector by default and cannot '
+  + 'validate without DSH_CLIENT_VERSION, which this launcher does not set. Two inactive '
+  + 'entries also make every settings write fail. Refusing to boot rather than starting with '
+  + 'them unaccounted for.',
+)
+
 requireUpstreamRows(
   ['connection'],
   'This app requires it ON, with the desktop carrier override installed on the page: it provides '
@@ -405,7 +475,40 @@ if ((process.env.DSH_TELEMETRY_DISABLED ?? '') !== '') {
   overlays.push({ id: 'session-telemetry-otel', disabled: true })
 }
 
-const patches = [...layers, ...overlays]
+/**
+ * What this boot tells upstream about the profile it booted from.
+ *
+ * Built HERE rather than in `prepareProfile` because `overlays` is the last
+ * patch layer and is only complete by this line — and upstream reads that
+ * field when it rebuilds the composition, so a half-filled one would rebuild
+ * into a different app than the one running.
+ *
+ * `packageManager` is absent exactly as it is in upstream's own object unless
+ * `--package-manager` was passed: `dsh-plugin-manager` falls back to its own
+ * pnpm command, and naming one here would be this app inventing a fact.
+ * @type {Record<string, unknown> | undefined}
+ */
+let profileContext = anchored === undefined ? undefined : {
+  name: PROFILE,
+  dir: anchored.profile.dir,
+  patchPath: anchored.profile.patchPath,
+  installAnchor,
+  startedBundles: anchored.profile.layers.map((layer) => layer.packageName),
+  cwd: process.cwd(),
+  home,
+  overlays,
+  telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+}
+
+// The same call upstream composes its own tree with, and that is the whole
+// point: `ConfigEditor` reconciles by calling it again, so boot and rebuild are
+// one function applied twice rather than two lists that have to be kept in
+// step by hand. Precedence is unchanged from the list this replaced — the
+// profile's bundle layers (ours first, then installed plugins), the profile's
+// own patch file, the home layer, then this surface's hard overlays last.
+const patches = profileContext === undefined
+  ? [...fallbackLayers, ...overlays]
+  : readProfilePatches(NAME, profileContext, anchored.profile)
 
 // The profile copy when there is one: its DIRECTORY is what anchors bare-name
 // resolution, which is the whole point of preparing it. Otherwise the app's own
@@ -456,12 +559,86 @@ if (Number.isInteger(parentPid) && parentPid > 0) {
 }
 
 /**
+ * `FiberState.ACTIVE`. A `const enum` in cordis’s declarations, so it has no
+ * runtime value to import and the number is the only way to say it.
+ */
+const FIBER_ACTIVE = 2
+
+/**
+ * The readiness signal `provideCmdline` takes as its optional `ready`.
+ *
+ * Upstream's profile boot builds one and commits it once the tree is up, and
+ * this surface replaces that boot — so it owes the same signal. Written out
+ * rather than imported because upstream’s is a local function in a bundled
+ * module; what is public is the OPTION, and the whole contract behind it is
+ * one `onReady`.
+ *
+ * `@deepseek-ai/dsh-hmr` is what needs it, and not optionally: its init throws
+ * `Profile HMR requires application readiness` without it. That reads like one
+ * entry failing to activate, which is why it was nearly left alone — but that
+ * entry is the one that re-applies the patch layers after a profile config
+ * write. Without it the first settings write tears the tree down: the root
+ * config this app boots from is an empty entry list by design, nothing
+ * re-composes the layers over it, every fiber is disposed, and the sidecar
+ * exits 0 with nothing in the log and nothing written to disk.
+ */
+const createAppReady = () => {
+  let ready = false
+  /** @type {Set<() => void>} */
+  const listeners = new Set()
+  return {
+    service: {
+      /**
+       * @param {() => void} listener - called once the tree is up.
+       * @returns {() => void} unsubscribe.
+       */
+      onReady(listener) {
+        if (ready) {
+          listener()
+          return () => {}
+        }
+        listeners.add(listener)
+        return () => {
+          listeners.delete(listener)
+        }
+      },
+    },
+    commit() {
+      if (ready) return
+      ready = true
+      for (const listener of [...listeners]) listener()
+      listeners.clear()
+    },
+  }
+}
+
+const appReady = createAppReady()
+/**
  * The host setup every boot attempt performs.
  * @param hostCtx - the context being prepared.
  */
 const prepare = async (hostCtx) => {
   current = hostCtx
   hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
+  // `profileContext` is a service upstream rows are GATED on rather than one
+  // they read, which is why its absence was silent. `dsh-base` composes
+  // `settings`, `config-editor`, `plugin-manager` and `hmr` with
+  // `disabled: !!js "!ctx.get('profileContext')"`, and `dsh-web-app` gates
+  // `ui-sidebar-browser` on `?.name !== 'desktop'`. Without it the app boots
+  // clean, logs nothing, and simply has no settings service — which a user
+  // meets on the Models page, where the provider directory asks for
+  // `ctx.get('settings')` and is told it "is absent".
+  //
+  // Upstream provides it from its own profile boot — the entry this surface
+  // replaces, since `web-startup` is disabled. Replacing an entry means
+  // inheriting what it provided, and 0.1.7 is the version that added this.
+  //
+  // Withheld when the composition is not the one the profile describes, which
+  // is the honest condition rather than a cautious one: this service is what
+  // upstream reconciles THROUGH, so handing it over while running a tree that
+  // cannot be rebuilt from the profile is the exact shape of the bug that cost
+  // a release. The safe-mode retry below clears it for that reason.
+  if (profileContext !== undefined) hostCtx.provide('profileContext', profileContext)
   // Here rather than anywhere else, because `prepare` is the one point upstream
   // documents as after the Loader is installed and before any config-tree entry
   // mounts — and the interception has to be in place before the first row is
@@ -473,45 +650,28 @@ const prepare = async (hostCtx) => {
   // the payload as it always did, and mounting the service with no resolution
   // would install an interception that routes nothing.
   if (anchored !== undefined) {
-    // `profileContext` is a service upstream rows are GATED on rather than one
-    // they read, which is why its absence was silent. `dsh-base` composes
-    // `settings`, `config-editor`, `plugin-manager` and `hmr` with
-    // `disabled: !!js "!ctx.get('profileContext')"`, and `dsh-web-app` gates
-    // `ui-sidebar-browser` on `?.name !== 'desktop'`. Without it the app boots
-    // clean, logs nothing, and simply has no settings service — which a user
-    // meets on the Models page, where the provider directory asks for
-    // `ctx.get('settings')` and is told it "is absent".
-    //
-    // Upstream provides it from its own profile boot — the entry this surface
-    // replaces, since `web-startup` is disabled. Replacing an entry means
-    // inheriting what it provided, and 0.1.7 is the version that added this.
-    //
-    // Inside the profile guard because every field below describes a profile:
-    // with none prepared there is nowhere for `settings` to persist, and
-    // upstream's own gate says as much by keying on this service.
-    hostCtx.provide('profileContext', {
-      name: PROFILE,
-      dir: anchored.profile.dir,
-      patchPath: anchored.profile.patchPath,
-      installAnchor,
-      startedBundles: anchored.profile.layers.map((layer) => layer.packageName),
-      cwd: process.cwd(),
-      home,
-      // This surface's last patch layer, which is the seat upstream fills with
-      // its `--patch` overlays. `packageManager` is left out exactly as
-      // upstream leaves it out without `--package-manager`: `dsh-plugin-manager`
-      // falls back to its own pnpm command, and naming one here would be this
-      // app inventing a fact it does not have.
-      overlays,
-      telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
-    })
     await hostCtx.plugin(PluginPackages, { resolution: anchored.resolution })
   }
-  provideCmdline(hostCtx, { args: [], exit: (code) => void shutdown(code) })
+  provideCmdline(hostCtx, {
+    args: [],
+    exit: (code) => void shutdown(code),
+    ready: appReady.service,
+  })
 }
 
-/** The installed bundles this boot is composing, by package name. */
-const installedNames = (anchored?.profile.layers ?? []).map((layer) => layer.packageName)
+/**
+ * The INSTALLED bundles this boot is composing, by package name.
+ *
+ * Filtered against APP_BUNDLES, and not cosmetically: these three are in the
+ * profile's layer list now, and every reader here treats a name in this list as
+ * something a user chose and can be offered removal of. Unfiltered, a boot
+ * failure with nothing installed would retry in safe mode instead of rethrowing
+ * the informative first error, and the marketplace tab would offer to uninstall
+ * the app itself.
+ */
+const installedNames = (anchored?.profile.layers ?? [])
+  .map((layer) => layer.packageName)
+  .filter((name) => !APP_BUNDLES.includes(name))
 
 /**
  * Boot, and if an installed plugin can stop that, boot again without them.
@@ -540,6 +700,14 @@ try {
     + `plugin(s) disabled (${installedNames.join(', ')}). The cause is not proven to be one of them.`,
   )
   console.warn(String(error))
+  // The retry composes a tree the profile does not describe: the installed
+  // bundles are still listed there and are deliberately not mounted here. A
+  // rebuild from the profile would therefore bring back exactly what just
+  // failed, so this boot does not get the service upstream rebuilds through.
+  // The cost is that Settings is unavailable in safe mode, which is the right
+  // trade: safe mode exists to get the window open so the marketplace tab can
+  // offer to remove the plugin that broke it.
+  profileContext = undefined
   const safeLayers = [
     ...upstreamLayers,
     ...loadOverlayPatches(NAME, fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))),
@@ -558,4 +726,10 @@ try {
   }
 }
 current = ctx
+
+// Upstream's own condition, and both halves of it matter: a boot that fell
+// through to the safe retry still reaches here, and a tree that failed to
+// come up must not tell `hmr` to start watching a composition that is not
+// there.
+if (ctx.fiber.state === FIBER_ACTIVE && ctx.get('loader') !== undefined) appReady.commit()
 console.log(`${NAME}: ready${installedNames.length === 0 ? '' : ` (${installedNames.length} installed plugin(s))`}`)

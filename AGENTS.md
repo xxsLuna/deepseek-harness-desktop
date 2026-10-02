@@ -585,6 +585,60 @@ The general rule this is the second instance of: **replacing an entry means
 inheriting what it provided.** `web-startup` is the entry here. In 0.1.2 it
 was `connection`, and that one cost every client plugin.
 
+### The composition has to be reproducible from the profile
+
+Providing `profileContext` mounted the settings service, and the first write
+through it killed the sidecar. Exit 0, no stderr, nothing written to disk.
+
+`ConfigEditor.edit` reconciles before it persists:
+
+```js
+const beforePatches = readProfilePatches('dsh', profileContext)
+await reconcileProfilePatches(this.ownerContext.root, beforePatches, 'dsh')
+```
+
+and `reconcileProfilePatches` REPLACES the root Include entry's whole patch
+list with what `readProfilePatches` rebuilt. That rebuild reads the profile
+manifest's `dsh.profile.bundles` — which this app seeded EMPTY, on purpose and
+with a comment explaining why. So the rebuild held none of `dsh-base`,
+`dsh-web-app` or this bundle's own overlay: every app row was removed, the
+carrier socket closed, the event loop emptied.
+
+Upstream composes its own tree through that same function —
+`boot(NAME, rootConfig, readProfilePatches(...), ...)` — so for upstream the
+booted composition and the reconciled one are the same list by construction.
+Assembling the layers by hand was a divergence that 0.1.7 turned from
+different into fatal.
+
+**So the three app-owned layers are named in the profile now**, first and in
+composition order, with installed plugins after them, and `boot.js` calls
+`readProfilePatches` like upstream does. The precedence is unchanged. What
+changed is that there is one list instead of two that have to agree.
+
+Three things ride along, and each was invisible until the gate opened:
+
+- **`appReady`.** `dsh-hmr` throws `Profile HMR requires application readiness`
+  without it. `provideCmdline` takes it as a documented `ready` option, so it
+  is a value upstream asks for; the signal itself is one `onReady`.
+- **Product analytics.** `desktop-product-telemetry` and `product-analytics`
+  are gated the same way, so providing the service switched them on — and
+  their endpoint defaults to upstream's own collector
+  (`dsh-otel-collector.deepseeksvc.com`). A bug fix does not get to start an
+  unofficial build reporting to the vendor, and they cannot validate anyway
+  (`serviceVersion` reads `DSH_CLIENT_VERSION`, which this launcher never
+  sets). Both are now disabled explicitly, which *preserves* the shipped
+  behaviour rather than changing it. Two inactive entries also break every
+  save: `reconcileProfilePatches` refuses a write that introduces one.
+- **`volatile` config is a reference, not a value.** `@dsh-desktop/market`
+  read `config.sources` as an array. `Schema.resolve` wraps a volatile field
+  with cosmokit's `createVolatile`, so what arrives is a frozen `{ get() }`
+  the settings runtime updates in place — which is how a saved setting takes
+  effect without reloading the row. Read as an array it never matched and
+  always fell through to the default, so the shipped catalog looked right
+  while a user's saved list was invisible. The `apply` JSDoc had the wrong
+  type written out by hand; it is inferred from the schema now, so the
+  compiler catches the next one.
+
 ### What 0.1.2 broke, and where each seam went
 
 Six seams, measured on 2026-09-04 against staged `0.1.2-alpha.5` and confirmed

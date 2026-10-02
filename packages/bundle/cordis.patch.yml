@@ -42,6 +42,29 @@
   config:
     trustedHosts: []
 
+# Product analytics: newly REACHABLE, and deliberately still off.
+#
+# Upstream composes both rows `disabled: !!js "ctx.get('profileContext')?.name
+# !== 'desktop'"`, so while this surface provided no `profileContext` they were
+# off by accident. Providing it turns them on — and their endpoint defaults to
+# upstream's own collector (`dsh-otel-collector.deepseeksvc.com`), so a bug fix
+# would have started an unofficial build reporting to the vendor. That is not a
+# side effect a bug fix gets to have, so the OLD behaviour is made explicit
+# rather than quietly inverted. Soft rather than a hard overlay on purpose: a
+# user who wants to send it can say so in their home layer.
+#
+# They could not work in any case. `serviceVersion` is
+# `!!js process.env.DSH_CLIENT_VERSION`, which this launcher never sets, so the
+# host row fails schema validation and the client row waits forever on the
+# service it would have provided. Since 0.1.7 two inactive entries are not
+# merely untidy: `reconcileProfilePatches` refuses any settings write that
+# INTRODUCES an inactive entry, so this pair breaks every save in Settings.
+- id: desktop-product-telemetry
+  disabled: true
+
+- id: product-analytics
+  disabled: true
+
 # The HMR browser half opens EventSource('/plugins/events'), which the app
 # scheme cannot serve; a failed client fiber would hold the whole UI on the
 # loading page. Desktop applies plugin changes on restart.
