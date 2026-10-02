@@ -346,6 +346,13 @@ function indexRows(entries) {
 // still have a row called X" cannot be answered by a layer we write.
 const upstreamRows = indexRows(upstreamLayers)
 
+/** The same rows by PACKAGE name, for the rows whose id is not stable across pins. */
+const upstreamRowsByName = new Map(
+  [...upstreamRows.values()]
+    .filter((row) => typeof row.name === 'string')
+    .map((row) => [row.name, row]),
+)
+
 /**
  * Fail now if upstream no longer has a row this composition patches by id.
  *
@@ -409,17 +416,41 @@ for (const id of DISABLED_UPSTREAM_ROWS) {
 // The trust fence rides along for the same reason it is in the patch: with the
 // row upstream's, `trustedHosts` is the one connection option this surface
 // depends on, and a home file widening it is not a preference.
+/**
+ * Fail now if upstream moved a row this app disables to a different id.
+ *
+ * `requireUpstreamRows` cannot answer this one. These two arrived in 0.2.0 and
+ * do not exist on an older pin, so demanding the id outright would refuse to
+ * boot on a channel that is behind — and dropping the check would let a rename
+ * turn the disable in `cordis.patch.yml` into a silent no-op, which for these
+ * two means an unofficial build quietly reporting to the vendor's collector.
+ *
+ * The PACKAGE name is the stable thing: if upstream composes it at all, it has
+ * to be under the id this app disables. Absent is fine; moved is not.
+ * @param {Record<string, string>} byName - package name to the id this app disables.
+ * @returns nothing; throws when a composed package carries a different id.
+ */
+function requireDisabledIds(byName) {
+  const moved = Object.entries(byName).flatMap(([name, id]) => {
+    const row = upstreamRowsByName.get(name)
+    return row === undefined || row.id === id ? [] : [`${name} is now ${String(row.id)}, not ${id}`]
+  })
+  if (moved.length === 0) return
+  throw new Error(
+    `${NAME}: upstream moved a row this app disables: ${moved.join('; ')}. `
+    + 'The disable in packages/bundle/cordis.patch.yml is keyed by id, so it is now a no-op. '
+    + 'These rows report to an upstream collector by default and cannot validate without '
+    + 'DSH_CLIENT_VERSION, which this launcher does not set; two inactive entries also make '
+    + 'every settings write fail. Refusing to boot rather than starting with them on.',
+  )
+}
+
 // Off because they cannot work here and must not start working by accident;
-// the patch file carries the whole reason. Named here so a rename is loud:
-// upstream warns and skips an id it cannot find, which would silently restore
-// a pair that reports to the vendor and breaks every settings write.
-requireUpstreamRows(
-  ['desktop-product-telemetry', 'product-analytics'],
-  'This app requires them off: they report to an upstream collector by default and cannot '
-  + 'validate without DSH_CLIENT_VERSION, which this launcher does not set. Two inactive '
-  + 'entries also make every settings write fail. Refusing to boot rather than starting with '
-  + 'them unaccounted for.',
-)
+// the patch file carries the whole reason.
+requireDisabledIds({
+  '@deepseek-ai/dsh-host-product-telemetry-otel': 'desktop-product-telemetry',
+  '@deepseek-ai/dsh-client-product-analytics': 'product-analytics',
+})
 
 requireUpstreamRows(
   ['connection'],
