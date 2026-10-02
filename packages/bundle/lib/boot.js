@@ -472,7 +472,41 @@ const prepare = async (hostCtx) => {
   // the app-owned root config with no installed plugins, every row resolves from
   // the payload as it always did, and mounting the service with no resolution
   // would install an interception that routes nothing.
-  if (anchored !== undefined) await hostCtx.plugin(PluginPackages, { resolution: anchored.resolution })
+  if (anchored !== undefined) {
+    // `profileContext` is a service upstream rows are GATED on rather than one
+    // they read, which is why its absence was silent. `dsh-base` composes
+    // `settings`, `config-editor`, `plugin-manager` and `hmr` with
+    // `disabled: !!js "!ctx.get('profileContext')"`, and `dsh-web-app` gates
+    // `ui-sidebar-browser` on `?.name !== 'desktop'`. Without it the app boots
+    // clean, logs nothing, and simply has no settings service — which a user
+    // meets on the Models page, where the provider directory asks for
+    // `ctx.get('settings')` and is told it "is absent".
+    //
+    // Upstream provides it from its own profile boot — the entry this surface
+    // replaces, since `web-startup` is disabled. Replacing an entry means
+    // inheriting what it provided, and 0.1.7 is the version that added this.
+    //
+    // Inside the profile guard because every field below describes a profile:
+    // with none prepared there is nowhere for `settings` to persist, and
+    // upstream's own gate says as much by keying on this service.
+    hostCtx.provide('profileContext', {
+      name: PROFILE,
+      dir: anchored.profile.dir,
+      patchPath: anchored.profile.patchPath,
+      installAnchor,
+      startedBundles: anchored.profile.layers.map((layer) => layer.packageName),
+      cwd: process.cwd(),
+      home,
+      // This surface's last patch layer, which is the seat upstream fills with
+      // its `--patch` overlays. `packageManager` is left out exactly as
+      // upstream leaves it out without `--package-manager`: `dsh-plugin-manager`
+      // falls back to its own pnpm command, and naming one here would be this
+      // app inventing a fact it does not have.
+      overlays,
+      telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+    })
+    await hostCtx.plugin(PluginPackages, { resolution: anchored.resolution })
+  }
   provideCmdline(hostCtx, { args: [], exit: (code) => void shutdown(code) })
 }
 
